@@ -73,23 +73,52 @@ class Settings(BaseModel):
     def worktrees_dir(self) -> Path:
         return self.data_dir / "worktrees"
 
+    @property
+    def managed_repos_dir(self) -> Path:
+        return self.data_dir / "repos"
+
+    @property
+    def runtime_repo_registry_path(self) -> Path:
+        return self.data_dir / "repositories.yaml"
+
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self.worktrees_dir.mkdir(parents=True, exist_ok=True)
+        self.managed_repos_dir.mkdir(parents=True, exist_ok=True)
 
     def load_repositories(self) -> dict[str, RepositoryProfile]:
-        if not self.repo_registry_path.is_file():
-            return {}
-        raw = yaml.safe_load(self.repo_registry_path.read_text(encoding="utf-8")) or {}
-        repos_raw = raw.get("repositories", {})
         profiles: dict[str, RepositoryProfile] = {}
-        for key, cfg in repos_raw.items():
-            payload = dict(cfg)
-            payload.setdefault("repo_id", key)
-            profile = RepositoryProfile.model_validate(payload)
-            profiles[profile.repo_id] = profile
+        for reg_path in (self.repo_registry_path, self.runtime_repo_registry_path):
+            if not reg_path.is_file():
+                continue
+            raw = yaml.safe_load(reg_path.read_text(encoding="utf-8")) or {}
+            repos_raw = raw.get("repositories", {}) if isinstance(raw, dict) else {}
+            for key, cfg in repos_raw.items():
+                if not isinstance(cfg, dict):
+                    continue
+                payload = dict(cfg)
+                payload.setdefault("repo_id", key)
+                profile = RepositoryProfile.model_validate(payload)
+                profiles[profile.repo_id] = profile
         return profiles
+
+    def save_repository(self, profile: RepositoryProfile) -> Path:
+        """Persist or update a dynamically onboarded repository in `data_dir/repositories.yaml`."""
+        self.ensure_dirs()
+        target = self.runtime_repo_registry_path
+        existing: dict[str, dict[str, object]] = {}
+        if target.is_file():
+            raw = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+            if isinstance(raw, dict) and isinstance(raw.get("repositories"), dict):
+                existing = dict(raw["repositories"])
+        existing[profile.repo_id] = profile.model_dump()
+        target.write_text(
+            "# Managed Target Repositories (Auto-Onboarded by Digital Employee)\n"
+            + yaml.safe_dump({"repositories": existing}, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        return target
 
     def resolve_repository(self, target: str) -> RepositoryProfile:
         profiles = self.load_repositories()
@@ -112,10 +141,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
             return os.environ[key]
         return local_env.get(key, default)
 
-    fallback_file_str = get_val(
-        "DE_FALLBACK_ENV_FILE",
-        "/Users/jamesyang/Documents/chat-assistant/livestream-copilot/.env",
-    )
+    fallback_file_str = get_val("DE_FALLBACK_ENV_FILE", "")
     fallback_env = _parse_dotenv(Path(fallback_file_str)) if fallback_file_str else {}
 
     api_key = (

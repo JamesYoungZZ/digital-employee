@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from digital_employee.integrations.feishu_ws import start_feishu_long_connection_if_configured
 from digital_employee.integrations.github_poller import GitHubFollowThroughPoller
+from digital_employee.onboarding import onboard_repository
 from digital_employee.orchestrator import DelegationOrchestrator
 from digital_employee.settings import Settings, load_settings
 
@@ -44,6 +45,13 @@ class ControlPayload(BaseModel):
 class FollowupPayload(BaseModel):
     comment_body: str
     publish_pr: bool = False
+
+
+class OnboardRepoPayload(BaseModel):
+    source: str
+    repo_id: str | None = None
+    base_branch: str | None = None
+    bootstrap_venv: bool = False
 
 
 def _read_artifact_uri(uri: str | None) -> str:
@@ -113,6 +121,21 @@ def create_app(
     @app.get("/api/metrics")
     def api_metrics() -> dict[str, Any]:
         return orch.store.compute_funnel_metrics()
+
+    @app.get("/api/repositories")
+    def api_list_repositories() -> list[dict[str, Any]]:
+        return [p.model_dump() for p in cfg.load_repositories().values()]
+
+    @app.post("/api/repositories/onboard")
+    def api_onboard_repository(payload: OnboardRepoPayload) -> dict[str, Any]:
+        profile = onboard_repository(
+            cfg,
+            payload.source,
+            repo_id=payload.repo_id,
+            base_branch=payload.base_branch,
+            bootstrap_venv=payload.bootstrap_venv,
+        )
+        return profile.model_dump()
 
     @app.get("/api/tasks")
     def api_list_tasks(status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
@@ -367,6 +390,24 @@ button:hover {{ background:#1e293b; }}
         <button type="submit">起草契约并执行委托</button>
       </div>
     </form>
+    <details style="margin-top:16px;padding-top:12px;border-top:1px dashed #e2e8f0;">
+      <summary style="cursor:pointer;font-size:13px;font-weight:600;color:#2563eb;">➕ 一键接入新代码仓库 (Auto-Onboarding：填本地路径或 GitHub 地址自动识别技术栈)</summary>
+      <form method="post" action="/ui/onboard" style="margin-top:10px;display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:10px;align-items:end;">
+        <div>
+          <label style="font-size:12px;color:#475569;">Git 地址 / owner/repo / 本地目录</label>
+          <input name="source" placeholder="如 git@github.com:org/service.git 或 /path/to/repo" required />
+        </div>
+        <div>
+          <label style="font-size:12px;color:#475569;">别名 ID (可选)</label>
+          <input name="repo_id" placeholder="自动推断" />
+        </div>
+        <div>
+          <label style="font-size:12px;color:#475569;">基线分支 (可选)</label>
+          <input name="base_branch" placeholder="默认自动探测" />
+        </div>
+        <button type="submit" style="background:#2563eb;height:38px;">接入仓库</button>
+      </form>
+    </details>
   </div>
 
   <div class="card">
@@ -403,6 +444,21 @@ button:hover {{ background:#1e293b; }}
                 orch.execute_task, state.task_id, publish_pr=bool(publish_pr)
             )
         return RedirectResponse(url=f"/tasks/{state.task_id}", status_code=303)
+
+    @app.post("/ui/onboard")
+    def ui_onboard(
+        source: str = Form(...),
+        repo_id: str = Form(default=""),
+        base_branch: str = Form(default=""),
+    ) -> RedirectResponse:
+        onboard_repository(
+            cfg,
+            source,
+            repo_id=repo_id.strip() or None,
+            base_branch=base_branch.strip() or None,
+            bootstrap_venv=False,
+        )
+        return RedirectResponse(url="/", status_code=303)
 
     @app.post("/ui/tasks/{task_id}/clarify")
     def ui_clarify(

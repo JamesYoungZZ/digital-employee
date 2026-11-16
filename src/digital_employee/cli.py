@@ -13,6 +13,7 @@ from rich.table import Table
 
 from digital_employee.context.decision_ledger import DecisionLedger
 from digital_employee.models.state import DurableTaskState
+from digital_employee.onboarding import onboard_repository
 from digital_employee.orchestrator import DelegationOrchestrator
 from digital_employee.settings import load_settings
 
@@ -96,6 +97,39 @@ def cmd_repos() -> None:
             p.local_path,
         )
     console.print(table)
+
+
+@app.command("onboard")
+def cmd_onboard(
+    source: str = typer.Argument(
+        ..., help="Local path, Git SSH/HTTPS URL, or GitHub `owner/repo` shorthand."
+    ),
+    repo_id: str | None = typer.Option(None, "--id", help="Custom repository ID."),
+    base_branch: str | None = typer.Option(None, "--branch", "-b", help="Override default base branch."),
+    bootstrap_venv: bool = typer.Option(
+        False, "--bootstrap-venv", help="Create `.venv` via `uv` if missing for Python repos."
+    ),
+) -> None:
+    """Auto-onboard a new target Git repository (clone, detect test runner, register)."""
+    settings = load_settings()
+    profile = onboard_repository(
+        settings,
+        source,
+        repo_id=repo_id,
+        base_branch=base_branch,
+        bootstrap_venv=bootstrap_venv,
+    )
+    console.print(
+        Panel(
+            f"[bold green]Onboarded `{profile.repo_id}` successfully![/bold green]\n"
+            f"• GitHub Slug: {profile.github_repo}\n"
+            f"• Local Path: {profile.local_path}\n"
+            f"• Default Base Branch: {profile.default_base_branch}\n"
+            f"• Test Runner: {' '.join(profile.pytest_cmd)}",
+            title="Repository Onboarded",
+            expand=False,
+        )
+    )
 
 
 @app.command("delegate")

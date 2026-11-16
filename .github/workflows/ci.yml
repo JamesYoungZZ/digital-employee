@@ -1,0 +1,29 @@
+name: Digital Employee CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    name: Security Guardrails, Durable Store & Fail-to-Pass Gate Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+      - name: Install Python 3.12 & dev dependencies
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv/bin/python -e ".[dev]"
+      - name: Run Ruff static linter
+        run: .venv/bin/ruff check src tests
+      - name: Run full verification & guardrail test suite
+        run: .venv/bin/pytest -v

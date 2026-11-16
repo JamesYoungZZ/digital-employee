@@ -94,3 +94,35 @@ decisions:
     assert appended.status == "APPROVED_POLICY"
     reloaded = DecisionLedger.from_repo(tmp_path)
     assert len(reloaded.active_policies(["src/order/refund.py"])) == 2
+
+
+def test_auto_onboard_local_git_repository(tmp_path: Path) -> None:
+    import subprocess
+
+    from digital_employee.onboarding import onboard_repository
+    from digital_employee.settings import Settings
+
+    sample_repo = tmp_path / "order-service"
+    sample_repo.mkdir()
+    (sample_repo / "pyproject.toml").write_text("[project]\nname='order-service'\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-b", "develop"], cwd=str(sample_repo), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:acme/order-service.git"],
+        cwd=str(sample_repo),
+        check=True,
+        capture_output=True,
+    )
+
+    cfg = Settings(
+        data_dir=tmp_path / "de-data",
+        repo_registry_path=tmp_path / "empty.yaml",
+    )
+    profile = onboard_repository(cfg, str(sample_repo))
+    assert profile.repo_id == "order-service"
+    assert profile.github_repo == "acme/order-service"
+    assert profile.default_base_branch == "develop"
+    assert "pytest" in " ".join(profile.pytest_cmd)
+
+    # Verify dynamic persistence and lookup
+    resolved = cfg.resolve_repository("order-service")
+    assert resolved.github_repo == "acme/order-service"

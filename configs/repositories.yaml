@@ -1,51 +1,11 @@
-# Target Repository Sandbox & Verification Profiles (Spec v2.0 Section 3.5)
-repositories:
-  modular-rag:
-    repo_id: "modular-rag"
-    github_repo: "JamesYoungZZ/MODULAR-RAG-MCP-SERVER"
-    local_path: "/Users/jamesyang/Documents/chat-assistant/MODULAR-RAG-MCP-SERVER"
-    default_base_branch: "dev"
-    python_bin: "/Users/jamesyang/Documents/chat-assistant/MODULAR-RAG-MCP-SERVER/.venv/bin/python"
-    pytest_cmd:
-      - "/Users/jamesyang/Documents/chat-assistant/MODULAR-RAG-MCP-SERVER/.venv/bin/python"
-      - "-m"
-      - "pytest"
-    lint_cmd: []
-    default_suite_targets:
-      - "tests/commerce/test_corpus_scope.py"
-    decision_ledger_path: ".ai/DECISIONS.yaml"
-    protected_branches:
-      - "main"
-      - "master"
-      - "release"
-    forbidden_paths:
-      - ".github/workflows/"
-      - ".env"
-      - ".ai/DECISIONS.yaml"
-    baseline_human_minutes: 35
+# ============================================================================
+# Target Repository Sandbox & Verification Profiles (Template)
+# ============================================================================
+# Tip: You do NOT need to edit this file manually!
+# Run `de onboard <git_url_or_local_path>` or use the "+ 接入新仓库" form in the
+# Web Control Plane (`http://127.0.0.1:8020`) to auto-clone, detect test/lint
+# runners, and register repositories into `${DE_DATA_DIR}/repositories.yaml`.
+#
+# Static/team-shared entries placed below are merged with `${DE_DATA_DIR}/repositories.yaml`.
 
-  livestream-copilot:
-    repo_id: "livestream-copilot"
-    github_repo: "JamesYoungZZ/livestream-copilot"
-    local_path: "/Users/jamesyang/Documents/chat-assistant/livestream-copilot"
-    default_base_branch: "main"
-    python_bin: "/Users/jamesyang/Documents/chat-assistant/livestream-copilot/.venv/bin/python"
-    pytest_cmd:
-      - "/Users/jamesyang/Documents/chat-assistant/livestream-copilot/.venv/bin/python"
-      - "-m"
-      - "pytest"
-    lint_cmd:
-      - "/Users/jamesyang/Documents/chat-assistant/livestream-copilot/.venv/bin/ruff"
-      - "check"
-    default_suite_targets:
-      - "tests/test_rag_mcp_integration.py"
-    decision_ledger_path: ".ai/DECISIONS.yaml"
-    protected_branches:
-      - "main"
-      - "master"
-      - "release"
-    forbidden_paths:
-      - ".github/workflows/"
-      - ".env"
-      - ".ai/DECISIONS.yaml"
-    baseline_human_minutes: 45
+repositories: {}

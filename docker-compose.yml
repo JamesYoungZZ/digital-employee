@@ -1,0 +1,18 @@
+services:
+  digital-employee:
+    build: .
+    container_name: digital-employee
+    env_file:
+      - .env
+    environment:
+      DE_DATA_DIR: /data
+      DE_WEB_HOST: 0.0.0.0
+      DE_WEB_PORT: "8020"
+    ports:
+      - "8020:8020"
+    volumes:
+      - digital-employee-data:/data
+    restart: unless-stopped
+
+volumes:
+  digital-employee-data:
