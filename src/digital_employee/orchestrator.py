@@ -14,9 +14,11 @@ from digital_employee.agents.reviewer import FocusedReviewer
 from digital_employee.context.decision_ledger import DecisionEntry, DecisionLedger
 from digital_employee.integrations.feishu_cards import (
     FeishuNotifier,
+    build_accepted_receipt_card,
     build_clarification_card,
     build_evidence_report_card,
     build_handoff_card,
+    parse_feishu_command,
 )
 from digital_employee.integrations.github_client import (
     GitHubIntegration,
@@ -61,7 +63,11 @@ class DelegationOrchestrator:
             token=self.settings.github_token,
             api_base=self.settings.github_api_base,
         )
-        self.feishu = FeishuNotifier(self.settings.feishu_webhook_url)
+        self.feishu = FeishuNotifier(
+            self.settings.feishu_webhook_url,
+            app_id=self.settings.feishu_app_id,
+            app_secret=self.settings.feishu_app_secret,
+        )
 
     @property
     def web_base_url(self) -> str:
@@ -79,6 +85,7 @@ class DelegationOrchestrator:
         auto_execute: bool = True,
         publish_pr: bool = False,
         source_channel: str = "cli",
+        feishu_chat_id: str = "",
     ) -> DurableTaskState:
         profile = self.settings.resolve_repository(target_repo)
         task_id = generate_task_id()
@@ -103,6 +110,7 @@ class DelegationOrchestrator:
             trace_id=trace_id,
             raw_request=raw_request,
             source_channel=source_channel,
+            feishu_chat_id=feishu_chat_id,
             contract=contract,
             lifecycle_status="DRAFTING_CONTRACT",
             auto_publish_pr=publish_pr,
@@ -133,7 +141,7 @@ class DelegationOrchestrator:
                 self.store.run_idempotent(
                     state,
                     "notify_clarification",
-                    lambda: self.feishu.send_card(card),
+                    lambda: self.feishu.send_card(card, chat_id=state.feishu_chat_id),
                 )
                 self.store.save_task(
                     state,
@@ -143,6 +151,14 @@ class DelegationOrchestrator:
                 return state
         else:
             state.lifecycle_status = "QUEUED"
+            receipt_card = build_accepted_receipt_card(state, self.web_base_url)
+            self.store.write_artifact(task_id, "feishu_receipt_card.json", receipt_card)
+            if source_channel.startswith("feishu"):
+                self.store.run_idempotent(
+                    state,
+                    "notify_receipt",
+                    lambda: self.feishu.send_card(receipt_card, chat_id=state.feishu_chat_id),
+                )
             self.store.save_task(state, step_name="queued", note="Contract unambiguous; queued.")
 
         if auto_execute:
@@ -560,8 +576,8 @@ class DelegationOrchestrator:
         self.store.write_artifact(state.task_id, "feishu_evidence_card.json", card)
         self.store.run_idempotent(
             state,
-            "notify_evidence_card",
-            lambda: self.feishu.send_card(card),
+            f"notify_evidence_card_{(state.head_commit_sha or '')[:8]}",
+            lambda: self.feishu.send_card(card, chat_id=state.feishu_chat_id),
         )
         return self.store.save_task(
             state,
@@ -610,9 +626,74 @@ class DelegationOrchestrator:
         self.store.run_idempotent(
             state,
             "notify_handoff_card",
-            lambda: self.feishu.send_card(card),
+            lambda: self.feishu.send_card(card, chat_id=state.feishu_chat_id),
         )
         return self.store.save_task(state, step_name="handed_off", note=reason)
+
+    def handle_feishu_text_message(
+        self,
+        *,
+        raw_text: str,
+        chat_id: str = "",
+        source_channel: str = "feishu",
+        auto_execute: bool = True,
+    ) -> DurableTaskState | None:
+        """Unified Feishu incoming text router: handles new tasks, quick clarifications & follow-ups."""
+        repos = list(self.settings.load_repositories().keys())
+        parsed = parse_feishu_command(raw_text, repos)
+        intent = parsed.get("intent")
+
+        if intent == "empty":
+            return None
+
+        if intent == "quick_clarify":
+            waiting = self.store.list_tasks(status="WAITING_CLARIFICATION", limit=10)
+            target = next(
+                (t for t in waiting if not chat_id or t.feishu_chat_id == chat_id),
+                waiting[0] if waiting else None,
+            )
+            if target is None:
+                return None
+            choice = parsed.get("choice", "默认")
+            answers: dict[str, str] = {}
+            if choice in ("1", "2") and target.contract.unresolved_decisions:
+                idx = int(choice) - 1
+                opts = target.contract.unresolved_decisions[0].options
+                if 0 <= idx < len(opts):
+                    answers["0"] = opts[idx]
+            return self.resolve_clarification(
+                target.task_id,
+                answers=answers,
+                use_defaults=not bool(answers),
+                auto_execute=auto_execute,
+                publish_pr=self.github.is_configured,
+            )
+
+        if intent == "task_clarify_default":
+            return self.resolve_clarification(
+                parsed["task_id"],
+                use_defaults=True,
+                auto_execute=auto_execute,
+                publish_pr=self.github.is_configured,
+            )
+
+        if intent == "followup":
+            if not auto_execute:
+                return self.store.get_task(parsed["task_id"])
+            return self.handle_pr_review_comment(
+                parsed["task_id"],
+                comment_body=parsed["comment"],
+                publish_pr=self.github.is_configured,
+            )
+
+        return self.submit_task(
+            raw_request=parsed["raw_request"],
+            target_repo=parsed["target_repo"],
+            auto_execute=auto_execute,
+            publish_pr=self.github.is_configured,
+            source_channel=source_channel,
+            feishu_chat_id=chat_id,
+        )
 
     def _format_gate_failures(self, ev, diag_log: str) -> str:
         issues: list[str] = []

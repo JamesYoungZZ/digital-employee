@@ -172,9 +172,25 @@ def test_web_control_plane_endpoints_and_feishu_challenge(tmp_path: Path) -> Non
     assert dash.status_code == 200
     assert "AI 研发数字员工控制台" in dash.text
 
+    js_asset = client.get("/static/app.js")
+    assert js_asset.status_code == 200
+
     challenge = client.post("/webhooks/feishu", json={"challenge": "lark-verify-xyz"})
     assert challenge.status_code == 200
     assert challenge.json() == {"challenge": "lark-verify-xyz"}
+
+    sim = client.post(
+        "/api/integrations/feishu/simulate",
+        json={
+            "raw_text": "@_user_1 #t-20261116-1886fe 补充空数组单测",
+            "dispatch_real_task": False,
+        },
+    )
+    assert sim.status_code == 200
+    parsed = sim.json()["parsed_intent"]
+    assert parsed["intent"] == "followup"
+    assert parsed["task_id"] == "t-20261116-1886fe"
+    assert "补充空数组单测" in parsed["comment"]
 
 
 def test_sandbox_preserves_crlf_line_endings_for_surgical_diffs(tmp_path: Path) -> None:

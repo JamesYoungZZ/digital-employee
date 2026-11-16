@@ -30,22 +30,15 @@ def start_feishu_long_connection_if_configured(orchestrator: DelegationOrchestra
     def _on_message(data) -> None:  # type: ignore[no-untyped-def]
         try:
             msg = data.event.message
+            chat_id = str(getattr(msg, "chat_id", "") or "")
             raw = json.loads(msg.content or "{}").get("text", "").strip()
             if not raw:
                 return
-            repos = list(s.load_repositories().keys())
-            chosen = repos[0] if repos else "modular-rag"
-            for r in repos:
-                if r.lower() in raw.lower():
-                    chosen = r
-                    break
             threading.Thread(
-                target=orchestrator.submit_task,
+                target=orchestrator.handle_feishu_text_message,
                 kwargs={
-                    "raw_request": raw,
-                    "target_repo": chosen,
-                    "auto_execute": True,
-                    "publish_pr": orchestrator.github.is_configured,
+                    "raw_text": raw,
+                    "chat_id": chat_id,
                     "source_channel": "feishu_ws",
                 },
                 daemon=True,

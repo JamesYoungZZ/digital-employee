@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI 研发数字员工控制台 v2.0</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- Left Navigation Sidebar -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-title">AI 研发数字员工</div>
+      <div class="brand-sub">Engineering Delegation v2.0</div>
+    </div>
+
+    <button class="nav-item active" data-view="workbench" onclick="switchView('workbench')">
+      <span>🗂️</span> 任务委托工作台
+    </button>
+    <button class="nav-item" data-view="repos" onclick="switchView('repos')">
+      <span>📦</span> 代码仓库与决策账本
+    </button>
+    <button class="nav-item" data-view="feishu" onclick="switchView('feishu')">
+      <span>💬</span> 飞书交互与输入输出
+    </button>
+
+    <div class="sidebar-footer" id="health-box">
+      <div><span class="dot ok"></span>推理引擎加载中...</div>
+    </div>
+  </aside>
+
+  <!-- Main Content Surface -->
+  <main class="main">
+
+    <!-- ==================== VIEW 1: WORKBENCH ==================== -->
+    <section id="view-workbench">
+      <div class="page-header">
+        <div>
+          <h1>研发委托工作台 (Work Queue)</h1>
+          <p>契约先行 · 隔离 Git Worktree 沙箱 · Fail-to-Pass 回归门禁 · PR 评论自动跟进</p>
+        </div>
+        <button class="btn btn-outline" onclick="refreshAll()">↻ 立即同步</button>
+      </div>
+
+      <!-- KPI Strip -->
+      <div class="kpi-grid">
+        <div class="kpi-card"><div class="kpi-label">累计委托任务</div><div class="kpi-val" id="kpi-total">0</div></div>
+        <div class="kpi-card"><div class="kpi-label">证据门禁通过</div><div class="kpi-val" id="kpi-passed">0</div></div>
+        <div class="kpi-card"><div class="kpi-label">已采纳合入闭环</div><div class="kpi-val" id="kpi-accepted">0</div></div>
+        <div class="kpi-card"><div class="kpi-label">预计净省人工耗时</div><div class="kpi-val" id="kpi-saved">0 min</div></div>
+        <div class="kpi-card"><div class="kpi-label">累计模型费用 (含缓存折扣)</div><div class="kpi-val" id="kpi-cost">$0.0000</div></div>
+      </div>
+
+      <!-- New Task Composer -->
+      <div class="card">
+        <h3>⚡ 发起新研发委托 (输入需求或报错堆栈)</h3>
+        <form id="delegate-form" onsubmit="submitDelegation(event)">
+          <div style="display:grid;grid-template-columns:240px 1fr;gap:14px;">
+            <div>
+              <label>目标业务仓库</label>
+              <select id="del-repo" required></select>
+              <div style="margin-top:10px;font-size:12px;color:#64748b;line-height:1.6;">
+                <label style="font-weight:500;display:flex;align-items:center;gap:6px;cursor:pointer;">
+                  <input type="checkbox" id="del-publish-pr" checked /> 验证通过后自动提 GitHub Draft PR
+                </label>
+                <label style="font-weight:500;display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:4px;">
+                  <input type="checkbox" id="del-accept-defaults" /> 轻微歧义自动按默认假设执行
+                </label>
+              </div>
+            </div>
+            <div>
+              <label>委托指令 / Bug 复现线索 / 单测报错</label>
+              <textarea id="del-request" rows="3" placeholder="用一句自然语言描述 Bug 或粘贴报错堆栈，例如：修复 tests/unit/test_list_collections.py 中 include_stats 参数未正确透传的 Bug" required></textarea>
+              <div>
+                <span style="font-size:12px;color:#64748b;">快捷示例：</span>
+                <span class="chip" onclick="fillPrompt('修复 tests/unit/test_list_collections.py 中 include_stats 参数未正确透传的单测 Bug')">修 list_collections 参数透传</span>
+                <span class="chip" onclick="fillPrompt('修复 tests/unit/test_protocol_handler.py 中重复注册 query_knowledge_hub 工具报错的 Bug')">修 protocol_handler 重复注册</span>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;justify-content:flex-end;margin-top:12px;">
+            <button type="submit" class="btn btn-primary" id="btn-delegate">🚀 起草任务契约并启动沙箱</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- Task Queue Table -->
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+          <h3 style="margin:0;">任务队列 (点击任意行展开契约、证据与飞书卡片详情)</h3>
+          <span style="font-size:12px;color:#64748b;" id="poll-indicator">每 3 秒无感同步中</span>
+        </div>
+
+        <div class="filter-bar" id="queue-filters">
+          <button class="filter-pill active" data-filter="ALL" onclick="setFilter('ALL')">全部</button>
+          <button class="filter-pill" data-filter="WAITING_CLARIFICATION" onclick="setFilter('WAITING_CLARIFICATION')">⏸️ 等我拍板</button>
+          <button class="filter-pill" data-filter="ACTIVE" onclick="setFilter('ACTIVE')">⏳ 沙箱运行中</button>
+          <button class="filter-pill" data-filter="READY" onclick="setFilter('READY')">🟢 待审阅 PR</button>
+          <button class="filter-pill" data-filter="ACCEPTED_AND_CLOSED" onclick="setFilter('ACCEPTED_AND_CLOSED')">✅ 已合入闭环</button>
+          <button class="filter-pill" data-filter="HANDED_OFF_INCOMPLETE" onclick="setFilter('HANDED_OFF_INCOMPLETE')">🤝 交接现场</button>
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Task ID</th>
+              <th>来源</th>
+              <th>仓库</th>
+              <th>契约目标</th>
+              <th>生命周期状态</th>
+              <th>回归门禁</th>
+              <th>交付物 (PR)</th>
+              <th>费用</th>
+              <th>净省时间</th>
+            </tr>
+          </thead>
+          <tbody id="tasks-tbody"></tbody>
+        </table>
+      </div>
+
+      <!-- Selected Task Split Inspector -->
+      <div id="task-inspector" class="inspector hidden"></div>
+    </section>
+
+    <!-- ==================== VIEW 2: REPOSITORIES & LEDGER ==================== -->
+    <section id="view-repos" class="hidden">
+      <div class="page-header">
+        <div>
+          <h1>代码仓库与组织决策账本 (Auto-Onboarding & Decision Ledger)</h1>
+          <p>零业务代码侵入挂载任意 Git 仓库 · 自动识别测试命令 · 查看与管理团队长期架构约束 (.ai/DECISIONS.yaml)</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>➕ 一键接入新代码仓库 (Auto-Onboarding)</h3>
+        <form onsubmit="submitOnboard(event)" style="display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:12px;align-items:end;">
+          <div>
+            <label>Git 仓库地址 / GitHub `owner/repo` / 本地绝对路径</label>
+            <input type="text" id="onb-source" placeholder="例如 git@github.com:org/order-service.git 或 /path/to/repo" required />
+          </div>
+          <div>
+            <label>仓库别名 ID (可选)</label>
+            <input type="text" id="onb-id" placeholder="默认按目录名推断" />
+          </div>
+          <div>
+            <label>默认基线分支 (可选)</label>
+            <input type="text" id="onb-branch" placeholder="默认自动探测 main/dev" />
+          </div>
+          <button type="submit" class="btn btn-primary" id="btn-onboard" style="height:38px;">接入仓库</button>
+        </form>
+      </div>
+
+      <div id="repos-list"></div>
+    </section>
+
+    <!-- ==================== VIEW 3: FEISHU & IO GUIDE ==================== -->
+    <section id="view-feishu" class="hidden">
+      <div class="page-header">
+        <div>
+          <h1>飞书交互闭环 · 系统输入与交付输出全景</h1>
+          <p>清晰定义“用户给系统什么输入”与“系统给用户交付什么输出”，支持免公网 IP 接入飞书</p>
+        </div>
+      </div>
+
+      <!-- Clear Input -> Process -> Output Specification -->
+      <div class="io-grid">
+        <div class="io-box">
+          <h4>📥 1. 系统的输入是什么？(3 类输入)</h4>
+          <div><b>① 发起委托输入</b>（飞书 `@机器人` / 网页 / CLI）：</div>
+          <div style="color:#475569;margin-bottom:6px;">• 一句自然语言需求：<code>[modular-rag] 修一下 sparse_encoder 连字符分词报错</code><br/>• 或直接粘贴报错日志堆栈 / 失败单测名</div>
+          <div><b>② 5 秒微确认输入</b>（仅当遇到实质业务歧义时）：</div>
+          <div style="color:#475569;margin-bottom:6px;">• 在飞书卡片点选项按钮，或直接回一句 <code>默认</code> / <code>1</code> / <code>2</code></div>
+          <div><b>③ 下半场追改输入</b>（PR 打开后）：</div>
+          <div style="color:#475569;">• 直接在 <b>GitHub PR 代码行下留评论</b>（后台 30 秒自动感应）<br/>• 或在飞书发 <code>#t-20261116-xxxx 再补个空值判断</code></div>
+        </div>
+
+        <div class="io-box">
+          <h4>⚙️ 2. 系统在黑盒外透明做了什么？</h4>
+          <div style="color:#475569;">
+            1. 读取目标仓代码与 <code>.ai/DECISIONS.yaml</code>，自动切分出原子级 <b>TaskContract</b>；<br/>
+            2. 拉起隔离 <code>git worktree</code>（<code>ai-agent/{task_id}</code>），剥离敏感密钥；<br/>
+            3. 先在基线 Commit 跑回归单测确认 <b>FAIL</b>，修复后确认 <b>PASS</b>（防幻觉自嗨）；<br/>
+            4. 反作弊扫描 Diff（严禁删 <code>assert</code> 或加 <code>@skip</code>）；<br/>
+            5. 单审查器核对验收标准并提取沙箱未覆盖的真实风险。
+          </div>
+        </div>
+
+        <div class="io-box">
+          <h4>📤 3. 输出给到用户是什么？(3 件交付物)</h4>
+          <div><b>① 线上 GitHub Draft PR</b>（绝不擅自合入主干）：</div>
+          <div style="color:#475569;margin-bottom:6px;">• 干净的最小化代码补丁 + 线上真实 GitHub Actions CI 绿灯</div>
+          <div><b>② 飞书结构化证据卡片</b>（分阶段主动推送）：</div>
+          <div style="color:#475569;margin-bottom:6px;">• 蓝色《已受理回执卡》 / 橙色《5 秒拍板卡》<br/>• 绿色<b>《证据门禁报告卡》</b>（含 Fail-to-Pass 结果、费用、<b>⚠️ 未验证盲区披露</b> 与一键跳 GitHub 审阅按钮）</div>
+          <div><b>③ 兜底结构化交接包 (Handoff)</b>：</div>
+          <div style="color:#475569;">• 若超步数或缺系统库无法独立完成，输出已排查根因与保留分支现场，零白费功夫。</div>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px;">
+        <!-- Feishu Credentials Config -->
+        <div class="card">
+          <h3>🔌 飞书通道配置 (任选其一，无需公网服务器)</h3>
+          <form onsubmit="saveFeishuConfig(event)">
+            <label>方案 A（最快 30 秒）：飞书群「自定义机器人」Webhook 地址</label>
+            <input type="text" id="fs-webhook" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." style="margin-bottom:12px;" />
+
+            <label>方案 B（手机双向对话）：飞书自建应用 App ID + App Secret（配合 lark-oapi 长连接）</label>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">
+              <input type="text" id="fs-appid" placeholder="cli_xxxxxxxxxx" />
+              <input type="password" id="fs-secret" placeholder="App Secret (留空保持原值)" />
+            </div>
+
+            <div style="font-size:12px;color:#64748b;margin-bottom:12px;" id="fs-status-hint"></div>
+
+            <div style="display:flex;gap:10px;">
+              <button type="submit" class="btn btn-primary">💾 保存飞书配置</button>
+              <button type="button" class="btn btn-success" onclick="sendFeishuTestCard()">📨 发送测试卡片到飞书</button>
+            </div>
+          </form>
+        </div>
+
+        <!-- Live Feishu Message & Card Simulator -->
+        <div class="card">
+          <h3>🧪 飞书消息输入沙盒模拟器 (测试输入解析 & 卡片回执)</h3>
+          <p style="font-size:12.5px;color:#64748b;margin-top:0;">模拟你在飞书群里 @数字员工 发一句话，查看系统如何识别意图并向你回复什么飞书卡片：</p>
+          <input type="text" id="sim-input" value="@_user_1 [modular-rag] 修复 list_collections 中 include_stats 未透传的问题" style="margin-bottom:10px;" />
+          <div style="display:flex;gap:8px;margin-bottom:14px;">
+            <button type="button" class="btn btn-outline" onclick="simulateFeishu(false)">🔍 仅预览意图解析</button>
+            <button type="button" class="btn btn-primary" onclick="simulateFeishu(true)">⚡ 模拟真实飞书派活并生成回执卡</button>
+          </div>
+          <div id="sim-result"></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <div id="toast" class="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -108,7 +108,8 @@ class DurableTaskState(BaseModel):
     task_id: str
     trace_id: str
     raw_request: str
-    source_channel: str = "cli"  # cli | web | feishu
+    source_channel: str = "cli"  # cli | web | feishu | feishu_ws
+    feishu_chat_id: str = ""
 
     # 2. Contract & lifecycle
     contract: TaskContract
