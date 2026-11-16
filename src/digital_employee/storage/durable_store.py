@@ -1,0 +1,261 @@
+"""SQLite WAL durable state store, checkpoint history, idempotency ledger & artifact storage."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+from digital_employee.models.state import DurableTaskState, utc_now_iso
+from digital_employee.security.dlp import redact_sensitive_text
+
+
+def make_idempotency_key(task_id: str, step_name: str, contract_version: int = 1) -> str:
+    payload = f"{task_id}:{step_name}:v{contract_version}".encode()
+    return hashlib.sha256(payload).hexdigest()[:24]
+
+
+class DurableStore:
+    """Crash-recoverable relational state engine for Digital Employee tasks."""
+
+    def __init__(self, db_path: Path, artifacts_dir: Path) -> None:
+        self.db_path = db_path
+        self.artifacts_dir = artifacts_dir
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        self._init_schema()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path), timeout=15.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA foreign_keys=ON;")
+        return conn
+
+    def _init_schema(self) -> None:
+        with self._connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS tasks (
+                    task_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    lifecycle_status TEXT NOT NULL,
+                    target_repo TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    state_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS checkpoints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    step_name TEXT NOT NULL,
+                    lifecycle_status TEXT NOT NULL,
+                    state_json TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS idempotency_ledger (
+                    idempotency_key TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    step_name TEXT NOT NULL,
+                    result_value TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(lifecycle_status);
+                CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON checkpoints(task_id);
+                """
+            )
+
+    def save_task(
+        self,
+        state: DurableTaskState,
+        *,
+        step_name: str = "state_update",
+        note: str = "",
+    ) -> DurableTaskState:
+        """Persist current task state and append an immutable step checkpoint."""
+        state.updated_at = utc_now_iso()
+        serialized = state.model_dump_json()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO tasks (
+                    task_id, tenant_id, workspace_id, lifecycle_status,
+                    target_repo, owner_id, state_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    lifecycle_status = excluded.lifecycle_status,
+                    target_repo = excluded.target_repo,
+                    owner_id = excluded.owner_id,
+                    state_json = excluded.state_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    state.task_id,
+                    state.tenant_id,
+                    state.workspace_id,
+                    state.lifecycle_status,
+                    state.contract.target_repo,
+                    state.contract.owner_id,
+                    serialized,
+                    state.created_at,
+                    state.updated_at,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO checkpoints (
+                    task_id, step_name, lifecycle_status, state_json, note, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    state.task_id,
+                    step_name,
+                    state.lifecycle_status,
+                    serialized,
+                    redact_sensitive_text(note)[:1000],
+                    state.updated_at,
+                ),
+            )
+        return state
+
+    def get_task(self, task_id: str) -> DurableTaskState | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT state_json FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return DurableTaskState.model_validate_json(row["state_json"])
+
+    def list_tasks(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[DurableTaskState]:
+        query = "SELECT state_json FROM tasks"
+        params: list[Any] = []
+        if status:
+            query += " WHERE lifecycle_status = ?"
+            params.append(status)
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [DurableTaskState.model_validate_json(r["state_json"]) for r in rows]
+
+    def list_checkpoints(self, task_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, step_name, lifecycle_status, note, created_at
+                FROM checkpoints
+                WHERE task_id = ?
+                ORDER BY id ASC
+                """,
+                (task_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def run_idempotent(
+        self,
+        state: DurableTaskState,
+        step_name: str,
+        action: Callable[[], str],
+    ) -> tuple[str, bool]:
+        """Execute external side-effect at most once per (task_id, step_name, contract_version).
+
+        Returns `(result_value, was_reused)`.
+        """
+        idem_key = make_idempotency_key(
+            state.task_id, step_name, state.contract.contract_version
+        )
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT result_value FROM idempotency_ledger WHERE idempotency_key = ?",
+                (idem_key,),
+            ).fetchone()
+        if existing is not None:
+            val = str(existing["result_value"])
+            state.recorded_operations[step_name] = val
+            return val, True
+
+        result_val = action()
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO idempotency_ledger (
+                    idempotency_key, task_id, step_name, result_value, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (idem_key, state.task_id, step_name, result_val, now),
+            )
+        state.recorded_operations[step_name] = result_val
+        self.save_task(state, step_name=f"idempotent:{step_name}", note=result_val)
+        return result_val, False
+
+    def write_artifact(self, task_id: str, name: str, content: str | dict[str, Any]) -> str:
+        """Store large diffs, execution logs, or JSON reports outside task state JSON."""
+        task_dir = self.artifacts_dir / task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = name.replace("/", "_").replace("..", "_")
+        target = task_dir / safe_name
+        if isinstance(content, dict):
+            raw_text = json.dumps(content, ensure_ascii=False, indent=2)
+        else:
+            raw_text = content
+        target.write_text(redact_sensitive_text(raw_text), encoding="utf-8")
+        return f"file://{target.resolve()}"
+
+    def compute_funnel_metrics(self) -> dict[str, Any]:
+        """Compute Spec v2.0 Section 4 funnel & Net Human Time Saved metrics."""
+        tasks = self.list_tasks(limit=1000)
+        total = len(tasks)
+        clarified_or_queued = sum(
+            1 for t in tasks if t.lifecycle_status != "WAITING_CLARIFICATION"
+        )
+        evidence_passed = sum(
+            1
+            for t in tasks
+            if t.verification_evidence and t.verification_evidence.passed_all_hard_gates
+        )
+        delivered = sum(
+            1
+            for t in tasks
+            if t.lifecycle_status
+            in ("PR_OPEN_FOLLOWING_UP", "DELIVERED_LOCAL_READY", "ACCEPTED_AND_CLOSED")
+        )
+        accepted = sum(1 for t in tasks if t.lifecycle_status == "ACCEPTED_AND_CLOSED")
+        handed_off = sum(1 for t in tasks if t.lifecycle_status == "HANDED_OFF_INCOMPLETE")
+        abandoned = sum(1 for t in tasks if t.lifecycle_status == "ABANDONED_OR_REVERTED")
+
+        net_minutes_saved = sum(
+            t.estimated_net_minutes_saved
+            for t in tasks
+            if t.lifecycle_status
+            in ("PR_OPEN_FOLLOWING_UP", "DELIVERED_LOCAL_READY", "ACCEPTED_AND_CLOSED")
+        )
+        total_cost = round(sum(t.total_cost_usd for t in tasks), 4)
+
+        return {
+            "total_delegated": total,
+            "contract_confirmed": clarified_or_queued,
+            "evidence_gate_passed": evidence_passed,
+            "delivered_ready": delivered,
+            "accepted_without_rework": accepted,
+            "handed_off_incomplete": handed_off,
+            "abandoned_or_reverted": abandoned,
+            "total_cost_usd": total_cost,
+            "estimated_net_human_minutes_saved": round(net_minutes_saved, 2),
+        }

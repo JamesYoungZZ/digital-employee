@@ -1,0 +1,21 @@
+# Virtual environments & caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Secrets & local runtime state
+.env
+.local/
+data/
+worktrees/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+/claude-mem/
