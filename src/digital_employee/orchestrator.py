@@ -488,6 +488,10 @@ class DelegationOrchestrator:
                 state.failure_reason = outcome.needs_clarification.question
                 card = build_clarification_card(state, self.web_base_url)
                 self.store.write_artifact(task_id, "feishu_clarification_card.json", card)
+                try:
+                    self.feishu.send_card(card, chat_id=state.feishu_chat_id)
+                except Exception:
+                    pass
                 self.store.save_task(
                     state,
                     step_name="mid_flight_clarification",
@@ -644,10 +648,12 @@ class DelegationOrchestrator:
                     title=f"单测门禁通过！正在调用独立 AI Reviewer (`{self.settings.reviewer_model}`) 审查代码…",
                 )
                 rev_t0 = time.monotonic()
+                report_url = f"{self.web_base_url}/reports/{state.task_id}/review"
                 reviewer_report, rev_cost = self.reviewer.review(
                     contract=state.contract,
                     sandbox=sandbox,
                     evidence=evidence,
+                    full_report_url=report_url,
                 )
                 state.total_cost_usd = round(state.total_cost_usd + rev_cost, 6)
                 state.agent_elapsed_seconds = round(
@@ -655,6 +661,7 @@ class DelegationOrchestrator:
                 )
                 evidence.reviewer_report = reviewer_report
                 evidence.unverified_risks = list(reviewer_report.unverified_risks)
+                state.verification_evidence = evidence
                 self.append_live_event(
                     state,
                     attempt=attempt,
@@ -663,6 +670,15 @@ class DelegationOrchestrator:
                     title=f"独立 Code Review 完成：`{reviewer_report.verdict}` ({len(reviewer_report.blocking_issues)} 阻断项)",
                     detail=reviewer_report.summary,
                 )
+
+                # If BLOCKED on a PR workflow, still publish the branch/PR & post the BLOCK review comment
+                # onto GitHub so every real review finding is visibly documented on the PR timeline!
+                if (
+                    reviewer_report.verdict == "BLOCK"
+                    and (publish_pr or state.auto_publish_pr)
+                    and self.github.is_configured
+                ):
+                    self._sync_pr_and_post_review(state, sandbox=sandbox)
 
             state.verification_evidence = evidence
 
@@ -809,6 +825,60 @@ class DelegationOrchestrator:
     # Internal Delivery & Handoff Helpers
     # =========================================================================
 
+    def _sync_pr_and_post_review(
+        self, state: DurableTaskState, *, sandbox: WorktreeSandbox
+    ) -> None:
+        """Push branch, ensure PR exists, and post the structured PR Review report (including BLOCK findings)."""
+        try:
+            self.store.run_idempotent(
+                state,
+                f"push_branch_{(state.head_commit_sha or '')[:10]}",
+                lambda: self.github.push_agent_branch(
+                    worktree_path=Path(state.worktree_path),
+                    branch_name=state.branch_name,
+                    protected_branches=sandbox.profile.protected_branches,
+                ),
+            )
+
+            def _create_or_reconcile() -> str:
+                info = self.github.reconcile_or_create_pr(
+                    github_repo=sandbox.profile.github_repo,
+                    state=state,
+                    protected_branches=sandbox.profile.protected_branches,
+                    draft=False,
+                )
+                return json.dumps(info)
+
+            pr_json, _ = self.store.run_idempotent(state, "create_pr", _create_or_reconcile)
+            pr_info = json.loads(pr_json)
+            state.deliverable_pr_url = pr_info["html_url"]
+            state.deliverable_pr_number = int(pr_info["number"])
+
+            ev = state.verification_evidence
+            if ev and ev.reviewer_report and state.head_commit_sha:
+                report_url = f"{self.web_base_url}/reports/{state.task_id}/review"
+                review_md = render_pr_review_agent_comment(
+                    ev.reviewer_report,
+                    verified_commit_sha=state.head_commit_sha,
+                    repro_test_target=ev.repro_test_target,
+                    full_report_url=report_url,
+                )
+                rev_url, _ = self.store.run_idempotent(
+                    state,
+                    f"post_pr_review_{state.head_commit_sha[:10]}",
+                    lambda: self.github.submit_pr_review_report(
+                        github_repo=sandbox.profile.github_repo,
+                        pr_number=state.deliverable_pr_number or 0,
+                        commit_sha=state.head_commit_sha or "",
+                        report_markdown=review_md,
+                        blocking_issues=ev.reviewer_report.blocking_issues,
+                    ),
+                )
+                state.pr_review_comment_url = rev_url
+            self.store.save_task(state)
+        except Exception:
+            pass
+
     def _deliver_verified_result(
         self,
         state: DurableTaskState,
@@ -855,13 +925,15 @@ class DelegationOrchestrator:
                     state.deliverable_pr_number = int(pr_info["number"])
                     state.lifecycle_status = "PR_OPEN_FOLLOWING_UP"
 
-                    # Post concise report from the separate PR Review Agent
+                    # Post structured PR Review report with full report link
                     ev = state.verification_evidence
                     if ev and ev.reviewer_report and state.head_commit_sha:
+                        report_url = f"{self.web_base_url}/reports/{state.task_id}/review"
                         review_md = render_pr_review_agent_comment(
                             ev.reviewer_report,
                             verified_commit_sha=state.head_commit_sha,
                             repro_test_target=ev.repro_test_target,
+                            full_report_url=report_url,
                         )
                         rev_url, _ = self.store.run_idempotent(
                             state,

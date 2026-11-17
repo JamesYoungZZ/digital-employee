@@ -239,13 +239,19 @@ def build_merge_approval_card(
                     "actions": [
                         {
                             "tag": "button",
-                            "text": {"tag": "plain_text", "content": "✅ 批准并自动合入"},
+                            "text": {"tag": "plain_text", "content": "✅ 批准合入"},
                             "type": "primary",
                             "value": {"action": "approve_merge", "task_id": state.task_id},
                         },
                         {
                             "tag": "button",
-                            "text": {"tag": "plain_text", "content": f"看 Review & PR #{pr_num}"},
+                            "text": {"tag": "plain_text", "content": "📄 全量Review报告"},
+                            "type": "default",
+                            "url": f"{web_base_url}/reports/{state.task_id}/review",
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": f"PR #{pr_num}"},
                             "type": "default",
                             "url": pr_url,
                         },

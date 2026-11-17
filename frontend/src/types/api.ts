@@ -77,6 +77,19 @@ export interface BlockingReviewIssue {
   path: string;
   line?: number | null;
   message: string;
+  suggestion?: string;
+}
+
+export interface ReviewAuditItem {
+  dimension: string;
+  status: "PASS" | "WARN" | "FAIL";
+  detail: string;
+}
+
+export interface ReviewObservation {
+  path: string;
+  line?: number | null;
+  note: string;
 }
 
 export interface ReviewerReport {
@@ -87,10 +100,14 @@ export interface ReviewerReport {
   ac_assessment: string[];
   decision_ledger_compliant: boolean;
   ledger_violations: string[];
+  change_overview?: string[];
+  audit_checklist?: ReviewAuditItem[];
   blocking_issues?: BlockingReviewIssue[];
+  notable_observations?: ReviewObservation[];
   side_effect_findings: string[];
   unverified_risks: string[];
   summary: string;
+  full_report_url?: string;
 }
 
 export interface VerificationEvidence {

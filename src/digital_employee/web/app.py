@@ -5,10 +5,11 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from digital_employee.agents.reviewer import render_full_review_report_html
 from digital_employee.integrations.feishu_ws import (
     is_feishu_ws_running,
     start_feishu_long_connection_if_configured,
@@ -69,5 +70,17 @@ def create_app(
     @app.get("/tasks/{task_id}", include_in_schema=False)
     def redirect_legacy_task_url(task_id: str) -> RedirectResponse:
         return RedirectResponse(url=f"/#task={task_id}", status_code=302)
+
+    @app.get("/reports/{task_id}/review", response_class=HTMLResponse, include_in_schema=False)
+    def serve_full_review_report(task_id: str) -> HTMLResponse:
+        state = orch.store.get_task(task_id)
+        if state is None:
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        diff_text = ""
+        if state.patch_artifact_uri:
+            fp = Path(state.patch_artifact_uri)
+            if fp.is_file():
+                diff_text = fp.read_text(encoding="utf-8")[:80000]
+        return HTMLResponse(render_full_review_report_html(state, diff_text))
 
     return app

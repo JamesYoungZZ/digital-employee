@@ -29,6 +29,7 @@ class LLMCallMetrics:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     estimated_cost_usd: float = 0.0
+    actual_model: str = ""
 
 
 def extract_json_object(raw_text: str) -> dict[str, Any]:
@@ -183,6 +184,7 @@ class LLMClient:
                     estimated_cost_usd=self._estimate_cost(
                         chosen_model, p_tok, c_tok, cached_tok
                     ),
+                    actual_model=chosen_model,
                 )
                 return assistant_msg, metrics
             except (httpx.TimeoutException, httpx.NetworkError, TransientLLMError) as exc:
@@ -304,6 +306,7 @@ class LLMClient:
                     prompt_tokens=0,
                     completion_tokens=0,
                     estimated_cost_usd=0.0,
+                    actual_model=agy_model,
                 )
             err_detail = (proc.stderr or proc.stdout or "").strip()
             # Graceful fallback if current VPN region blocks agy CLI or not yet signed in

@@ -47,10 +47,27 @@ class BlockingReviewIssue(BaseModel):
     path: str = ""
     line: int | None = None
     message: str
+    suggestion: str = ""
+
+
+class ReviewAuditItem(BaseModel):
+    """Single dimension in the full structured PR Code Review audit matrix."""
+
+    dimension: str
+    status: Literal["PASS", "WARN", "FAIL"] = "PASS"
+    detail: str = ""
+
+
+class ReviewObservation(BaseModel):
+    """Concrete non-blocking review comment worth surfacing to the human engineer."""
+
+    path: str = ""
+    line: int | None = None
+    note: str
 
 
 class ReviewerReport(BaseModel):
-    """Independent Cross-Model PR Review Agent output (Blocking-only, zero nitpicks)."""
+    """Independent Cross-Model PR Review Agent output (Structured overview + full audit matrix)."""
 
     verdict: Literal["APPROVE", "BLOCK"] = "APPROVE"
     reviewer_model: str = ""
@@ -59,10 +76,14 @@ class ReviewerReport(BaseModel):
     ac_assessment: list[str] = Field(default_factory=list)
     decision_ledger_compliant: bool = True
     ledger_violations: list[str] = Field(default_factory=list)
+    change_overview: list[str] = Field(default_factory=list)
+    audit_checklist: list[ReviewAuditItem] = Field(default_factory=list)
     blocking_issues: list[BlockingReviewIssue] = Field(default_factory=list)
+    notable_observations: list[ReviewObservation] = Field(default_factory=list)
     side_effect_findings: list[str] = Field(default_factory=list)
     unverified_risks: list[str] = Field(default_factory=list)
     summary: str = ""
+    full_report_url: str = ""
 
 
 class VerificationEvidence(BaseModel):

@@ -610,12 +610,21 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                   </div>
 
                   {ev.reviewer_report && (
-                    <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-2.5 text-xs">
+                    <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-3 text-xs">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <span className="font-semibold text-zinc-800 dark:text-zinc-200">
-                          独立跨模型 PR Review Agent 报告 (Skill: <code className="font-mono">{ev.reviewer_report.skill_used ?? "pr-code-review"}</code>)
+                          独立跨模型 Code Review 报告
                         </span>
                         <div className="flex items-center gap-2">
+                          <a
+                            href={`/reports/${encodeURIComponent(t.task_id)}/review`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 rounded-md bg-blue-500/10 px-2 py-0.5 font-medium text-blue-600 hover:bg-blue-500/20 dark:text-blue-300"
+                          >
+                            📄 打开独立全量 Review 报告
+                            <ArrowUpRight className="h-3 w-3" />
+                          </a>
                           {ev.reviewer_report.reviewer_model && (
                             <code className="rounded bg-purple-500/10 px-2 py-0.5 text-[11px] text-purple-600 dark:text-purple-300">
                               {ev.reviewer_report.reviewer_model}
@@ -629,25 +638,88 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                                 : "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
                             )}
                           >
-                            {ev.reviewer_report.verdict ?? "APPROVE"} · {(ev.reviewer_report.blocking_issues ?? []).length} Blocking
+                            {ev.reviewer_report.verdict ?? "APPROVE"} · {(ev.reviewer_report.blocking_issues ?? []).length} 阻断
                           </span>
                         </div>
                       </div>
-                      <p className="leading-relaxed text-zinc-600 dark:text-zinc-300">
+
+                      <p className="leading-relaxed text-zinc-700 dark:text-zinc-200 font-medium">
                         {ev.reviewer_report.summary}
                       </p>
+
+                      {(ev.reviewer_report.change_overview ?? []).length > 0 && (
+                        <div className="rounded-lg bg-zinc-50 dark:bg-zinc-900 p-3 space-y-1">
+                          <div className="font-semibold text-zinc-700 dark:text-zinc-300">
+                            📦 本次改动做了什么：
+                          </div>
+                          <ul className="list-disc pl-4 space-y-0.5 text-zinc-600 dark:text-zinc-400">
+                            {(ev.reviewer_report.change_overview ?? []).map((ln, idx) => (
+                              <li key={idx}>{ln}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
                       {(ev.reviewer_report.blocking_issues ?? []).length > 0 && (
-                        <div className="rounded-lg border border-red-500/30 bg-red-500/8 p-3 space-y-1">
+                        <div className="rounded-lg border border-red-500/30 bg-red-500/8 p-3 space-y-2">
                           <div className="font-semibold text-red-600 dark:text-red-400">
-                            严重阻断项 (Blocking Only)：
+                            🚨 必须修改的阻断级审查意见 (Blocking Comments)：
                           </div>
                           {(ev.reviewer_report.blocking_issues ?? []).map((b, idx) => (
-                            <div key={idx} className="text-red-700 dark:text-red-300">
-                              <b>[{b.severity} · {b.category}]</b>{" "}
-                              {b.path ? <code className="font-mono">{b.path}{b.line ? `:${b.line}` : ""}</code> : null}{" "}
-                              — {b.message}
+                            <div key={idx} className="space-y-0.5 text-red-700 dark:text-red-300">
+                              <div>
+                                <b>[{b.severity} · {b.category}]</b>{" "}
+                                {b.path ? <code className="font-mono">{b.path}{b.line ? `:${b.line}` : ""}</code> : null}
+                                {" — "}{b.message}
+                              </div>
+                              {b.suggestion && (
+                                <div className="pl-3 text-emerald-700 dark:text-emerald-300">
+                                  <b>建议改法：</b>{b.suggestion}
+                                </div>
+                              )}
                             </div>
                           ))}
+                        </div>
+                      )}
+
+                      {(ev.reviewer_report.notable_observations ?? []).length > 0 && (
+                        <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 space-y-1">
+                          <div className="font-semibold text-blue-700 dark:text-blue-300">
+                            💡 审查补充观察（非阻断建议）：
+                          </div>
+                          <ul className="list-disc pl-4 space-y-0.5 text-zinc-600 dark:text-zinc-300">
+                            {(ev.reviewer_report.notable_observations ?? []).map((o, idx) => (
+                              <li key={idx}>
+                                {o.path ? <code className="font-mono mr-1">{o.path}{o.line ? `:${o.line}` : ""}</code> : null}
+                                {o.note}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      {(ev.reviewer_report.audit_checklist ?? []).length > 0 && (
+                        <div className="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
+                          <table className="w-full text-left text-[11.5px]">
+                            <thead className="bg-zinc-50 dark:bg-zinc-900 text-zinc-500">
+                              <tr>
+                                <th className="px-3 py-1.5">审查维度</th>
+                                <th className="px-3 py-1.5">结论</th>
+                                <th className="px-3 py-1.5">具体核查依据</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800/80">
+                              {(ev.reviewer_report.audit_checklist ?? []).map((row, idx) => (
+                                <tr key={idx}>
+                                  <td className="px-3 py-1.5 font-medium">{row.dimension}</td>
+                                  <td className="px-3 py-1.5 font-mono font-semibold">
+                                    {row.status === "PASS" ? "✅ PASS" : row.status === "WARN" ? "⚠️ WARN" : "❌ FAIL"}
+                                  </td>
+                                  <td className="px-3 py-1.5 text-zinc-600 dark:text-zinc-400">{row.detail}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
                         </div>
                       )}
                     </div>
