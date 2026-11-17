@@ -49,7 +49,7 @@ Emit an item in `blocking_issues` **ONLY** when you can point to a concrete file
 - **`concise_summary`**: 1～2 句精炼中文总结结论（≤ 60 字）。
 - **`residual_risk_note`**: 1 句简短中文指出单测未覆盖的真实线上边界（无则填 `""`）。
 
-Return **strict JSON only**:
+Return **strict JSON only** (NOTE: inside JSON string values, NEVER use unescaped ASCII double-quotes `"`; use backticks `` ` `` or `『』` instead):
 ```json
 {
   "verdict": "APPROVE",

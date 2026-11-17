@@ -359,13 +359,21 @@ class LLMClient:
             max_tokens=max_tokens,
         )
         content = (msg.get("content") or "").strip()
-        if not content:
-            # Reasoning models may exhaust max_tokens in reasoning_content; retry with concise directive
+        try:
+            if not content:
+                raise ValueError("Empty content")
+            return extract_json_object(content), metrics
+        except (ValueError, json.JSONDecodeError) as parse_err:
+            # Retry once if reasoning exhausted max_tokens or string contained unescaped quotes
             retry_msgs = [
                 *messages,
                 {
                     "role": "user",
-                    "content": "Keep internal reasoning brief and output ONLY the final JSON object now.",
+                    "content": (
+                        f"Previous response failed JSON parsing ({parse_err}). "
+                        "Keep internal reasoning brief and output ONLY a valid, strictly escaped JSON object "
+                        "(never put unescaped ASCII double quotes `\"` inside string values; use backticks or 『』 instead)."
+                    ),
                 },
             ]
             msg2, metrics2 = self.chat(
@@ -380,7 +388,7 @@ class LLMClient:
                 estimated_cost_usd=round(
                     metrics.estimated_cost_usd + metrics2.estimated_cost_usd, 6
                 ),
+                actual_model=metrics2.actual_model or metrics.actual_model,
             )
             content = (msg2.get("content") or "").strip()
-        parsed = extract_json_object(content)
-        return parsed, metrics
+            return extract_json_object(content), metrics
