@@ -203,6 +203,14 @@ def start_feishu_long_connection_if_configured(orchestrator: DelegationOrchestra
     )
 
     def _run_ws() -> None:
+        import asyncio
+
+        import lark_oapi.ws.client as lark_ws_mod
+
+        # Give lark-oapi WS its own dedicated asyncio event loop isolated from uvicorn's loop
+        dedicated_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(dedicated_loop)
+        lark_ws_mod.loop = dedicated_loop
         try:
             ws_client.start()
         except Exception as exc:

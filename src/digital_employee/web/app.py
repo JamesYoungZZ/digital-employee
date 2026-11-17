@@ -56,7 +56,7 @@ def create_app(
             cfg,
             orch,
             poller_enabled_fn=lambda: enable_background_daemons and orch.github.is_configured,
-            feishu_ws_fn=lambda: feishu_ws_active or is_feishu_ws_running(),
+            feishu_ws_fn=is_feishu_ws_running,
         )
     )
     app.include_router(build_webhook_router(orch))
