@@ -42,6 +42,10 @@ export function FeishuIntegrationView({ onTaskDispatched }: Props) {
   const [webhookUrl, setWebhookUrl] = React.useState("");
   const [appId, setAppId] = React.useState("");
   const [appSecret, setAppSecret] = React.useState("");
+  const [revProvider, setRevProvider] = React.useState("gemini_cli");
+  const [revModel, setRevModel] = React.useState("gemini-3.8-flash");
+  const [revApiKey, setRevApiKey] = React.useState("");
+  const [revCurrent, setRevCurrent] = React.useState<{ provider: string; model: string } | null>(null);
   const [simInput, setSimInput] = React.useState(
     "@_user_1 [modular-rag] 修复 list_collections 中 include_stats 未透传的问题"
   );
@@ -49,9 +53,15 @@ export function FeishuIntegrationView({ onTaskDispatched }: Props) {
   const [previewCard, setPreviewCard] = React.useState<FeishuCardPayload | null>(null);
 
   const loadConfig = React.useCallback(async () => {
-    const res = await apiFetch<FeishuIntegrationStatus>("/api/integrations/feishu");
+    const [res, rev] = await Promise.all([
+      apiFetch<FeishuIntegrationStatus>("/api/integrations/feishu"),
+      apiFetch<{ provider: string; model: string }>("/api/integrations/reviewer"),
+    ]);
     setStatus(res);
     setAppId(res.app_id || "");
+    setRevCurrent(rev);
+    setRevProvider(rev.provider);
+    setRevModel(rev.model);
   }, []);
 
   React.useEffect(() => {
@@ -332,6 +342,95 @@ export function FeishuIntegrationView({ onTaskDispatched }: Props) {
           {previewCard && <FeishuCardPreview payload={previewCard} />}
         </SurfaceCard>
       </div>
+
+      {/* Cross-Model Independent Reviewer Engine (Gemini 3.8 Flash) */}
+      <SurfaceCard className="p-5 space-y-3.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+            <Cpu className="h-4 w-4 text-purple-500" />
+            跨厂商独立 Code Review 引擎（当前生效：
+            <code className="rounded bg-purple-500/10 px-2 py-0.5 font-mono text-xs text-purple-600 dark:text-purple-300">
+              {revCurrent ? `${revCurrent.provider} · ${revCurrent.model}` : "加载中..."}
+            </code>
+            ）
+          </div>
+        </div>
+
+        <div className="grid md:grid-cols-4 gap-3 text-xs items-end">
+          <div>
+            <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+              Review 通道
+            </label>
+            <select
+              value={revProvider}
+              onChange={(e) => {
+                const p = e.target.value;
+                setRevProvider(p);
+                if (p === "gemini_cli" || p === "gemini") setRevModel("gemini-3.8-flash");
+                else if (p === "anthropic") setRevModel("claude-sonnet-4-20250514");
+                else setRevModel("deepseek-flash");
+              }}
+              className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-950"
+            >
+              <option value="gemini_cli">Gemini Ultra CLI (gemini_cli 免Key)</option>
+              <option value="gemini">Gemini API Key (AI Studio)</option>
+              <option value="anthropic">Anthropic Claude API</option>
+              <option value="openai_compatible">OpenAI / DeepSeek 兼容</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+              Review 模型 ID
+            </label>
+            <input
+              type="text"
+              value={revModel}
+              onChange={(e) => setRevModel(e.target.value)}
+              placeholder="gemini-3.8-flash"
+              className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-3 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-950"
+            />
+          </div>
+
+          <div>
+            <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+              API Key（选 Gemini Ultra CLI 时留空）
+            </label>
+            <input
+              type="password"
+              value={revApiKey}
+              onChange={(e) => setRevApiKey(e.target.value)}
+              placeholder={revProvider === "gemini_cli" ? "走本机 gemini OAuth 额度" : "AIza... / sk-..."}
+              disabled={revProvider === "gemini_cli"}
+              className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-3 font-mono text-xs disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950"
+            />
+          </div>
+
+          <Button
+            type="button"
+            variant="primary"
+            onClick={async () => {
+              try {
+                await apiFetch("/api/integrations/reviewer/config", {
+                  method: "POST",
+                  body: JSON.stringify({
+                    provider: revProvider,
+                    model: revModel,
+                    api_key: revApiKey,
+                  }),
+                });
+                setRevApiKey("");
+                toast.success(`已切换独立 Code Review 引擎为 ${revProvider} · ${revModel}`);
+                await loadConfig();
+              } catch (err: any) {
+                toast.error(err.message);
+              }
+            }}
+          >
+            切换为 {revModel || "gemini-3.8-flash"}
+          </Button>
+        </div>
+      </SurfaceCard>
     </div>
   );
 }

@@ -207,14 +207,14 @@ def load_settings(env_file: Path | None = None) -> Settings:
     if reviewer_provider == "gemini_cli":
         reviewer_api_key = ""
         reviewer_base_url = "gemini-cli://local"
-        reviewer_model = get_val("DE_REVIEWER_MODEL") or "gemini-2.5-pro"
+        reviewer_model = get_val("DE_REVIEWER_MODEL") or "gemini-3.8-flash"
     elif reviewer_provider == "gemini":
         reviewer_api_key = get_val("DE_REVIEWER_API_KEY") or gemini_key or api_key
         reviewer_base_url = (
             get_val("DE_REVIEWER_BASE_URL")
             or "https://generativelanguage.googleapis.com/v1beta/openai"
         )
-        reviewer_model = get_val("DE_REVIEWER_MODEL") or "gemini-2.5-pro"
+        reviewer_model = get_val("DE_REVIEWER_MODEL") or "gemini-3.8-flash"
     elif reviewer_provider == "anthropic":
         reviewer_api_key = get_val("DE_REVIEWER_API_KEY") or anthropic_key or api_key
         reviewer_base_url = get_val("DE_REVIEWER_BASE_URL") or "https://api.anthropic.com"

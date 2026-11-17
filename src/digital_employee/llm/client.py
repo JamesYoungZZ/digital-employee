@@ -277,16 +277,19 @@ class LLMClient:
             if m.get("content")
         ]
         combined_prompt = "\n\n".join(prompt_chunks) + "\n\nOutput ONLY the requested JSON object."
+        sub_env = dict(os.environ)
+        sub_env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{sub_env.get('PATH', '')}"
         proc = subprocess.run(
             [gemini_bin, "-m", chosen_model, "-p", "Follow the stdin instructions and output strict JSON only."],
             input=combined_prompt,
+            env=sub_env,
             capture_output=True,
             text=True,
             timeout=max(90.0, self.settings.llm_timeout_seconds),
             check=False,
         )
         if proc.returncode != 0:
-            raise TransientLLMError(f"gemini-cli exited {proc.returncode}: {proc.stderr[:300]}")
+            raise TransientLLMError(f"gemini-cli ({chosen_model}) exited {proc.returncode}: {proc.stderr[:300]}")
         return {"role": "assistant", "content": proc.stdout.strip()}, LLMCallMetrics(
             prompt_tokens=0,
             completion_tokens=0,

@@ -56,3 +56,10 @@ class FeishuConfigPayload(BaseModel):
 class FeishuSimulatePayload(BaseModel):
     raw_text: str
     dispatch_real_task: bool = False
+
+
+class ReviewerConfigPayload(BaseModel):
+    provider: str = "gemini_cli"  # gemini_cli | gemini | anthropic | openai_compatible
+    model: str = "gemini-3.8-flash"
+    api_key: str = ""
+    base_url: str = ""

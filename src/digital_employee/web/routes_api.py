@@ -32,6 +32,7 @@ from digital_employee.web.schemas import (
     FollowupPayload,
     OnboardRepoPayload,
     PromoteDecisionPayload,
+    ReviewerConfigPayload,
 )
 
 
@@ -398,6 +399,66 @@ def build_api_router(
             "parsed_intent": parsed,
             "task": state.model_dump(),
             "feishu_reply_card": card,
+        }
+
+    @router.get("/integrations/reviewer")
+    def api_get_reviewer_config() -> dict[str, Any]:
+        return {
+            "provider": cfg.reviewer_provider,
+            "model": cfg.reviewer_model,
+            "base_url": cfg.reviewer_base_url,
+            "api_key_configured": bool(cfg.reviewer_api_key),
+        }
+
+    @router.post("/integrations/reviewer/config")
+    def api_save_reviewer_config(payload: ReviewerConfigPayload) -> dict[str, Any]:
+        from digital_employee.agents.reviewer import FocusedReviewer
+        from digital_employee.llm.client import LLMClient
+
+        prov = payload.provider.strip().lower()
+        if prov not in ("gemini_cli", "gemini", "anthropic", "openai_compatible"):
+            raise HTTPException(status_code=400, detail=f"Unsupported reviewer provider: {prov}")
+
+        model_name = payload.model.strip() or (
+            "gemini-3.8-flash" if prov in ("gemini_cli", "gemini") else "deepseek-flash"
+        )
+        base_url = payload.base_url.strip()
+        if not base_url:
+            if prov == "gemini_cli":
+                base_url = "gemini-cli://local"
+            elif prov == "gemini":
+                base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+            elif prov == "anthropic":
+                base_url = "https://api.anthropic.com"
+            else:
+                base_url = cfg.llm_base_url
+
+        updates: dict[str, str] = {
+            "DE_REVIEWER_PROVIDER": prov,
+            "DE_REVIEWER_MODEL": model_name,
+            "DE_REVIEWER_BASE_URL": base_url,
+        }
+        if payload.api_key.strip():
+            updates["DE_REVIEWER_API_KEY"] = payload.api_key.strip()
+            cfg.reviewer_api_key = payload.api_key.strip()
+
+        cfg.reviewer_provider = prov  # type: ignore[assignment]
+        cfg.reviewer_model = model_name
+        cfg.reviewer_base_url = base_url
+        _upsert_dotenv_keys(PROJECT_ROOT / ".env", updates)
+
+        orch.reviewer_llm = LLMClient(
+            cfg,
+            provider=cfg.reviewer_provider,
+            base_url=cfg.reviewer_base_url,
+            api_key=cfg.reviewer_api_key,
+            default_model=cfg.reviewer_model,
+        )
+        orch.reviewer = FocusedReviewer(orch.reviewer_llm, skill_path=cfg.pr_review_skill_path)
+        return {
+            "ok": True,
+            "provider": cfg.reviewer_provider,
+            "model": cfg.reviewer_model,
         }
 
     return router
