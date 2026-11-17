@@ -54,11 +54,22 @@ def extract_json_object(raw_text: str) -> dict[str, Any]:
 
 
 class LLMClient:
-    """Client supporting OpenAI / DeepSeek V4 / local vLLM chat & tool calling."""
+    """Client supporting OpenAI-compatible, DeepSeek V4, and Anthropic Messages APIs."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        provider: str = "openai_compatible",
+        base_url: str | None = None,
+        api_key: str | None = None,
+        default_model: str | None = None,
+    ) -> None:
         self.settings = settings
-        self.base_url = settings.llm_base_url.rstrip("/")
+        self.provider = provider
+        self.base_url = (base_url or settings.llm_base_url).rstrip("/")
+        self.api_key = api_key if api_key is not None else settings.llm_api_key
+        self.default_model = default_model or settings.reasoning_model
 
     def _scrub_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if self.settings.inference_mode != "cloud_api":
@@ -101,15 +112,22 @@ class LLMClient:
         max_tokens: int = 4096,
         max_retries: int = 2,
     ) -> tuple[dict[str, Any], LLMCallMetrics]:
-        if not self.settings.llm_api_key and self.settings.inference_mode == "cloud_api":
+        if not self.api_key and self.settings.inference_mode == "cloud_api":
             raise LLMConfigurationError(
-                "Missing DE_LLM_API_KEY (or DEEPSEEK_API_KEY / OPENAI_API_KEY)."
+                "Missing LLM API key (DE_LLM_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY)."
             )
 
-        chosen_model = model or self.settings.reasoning_model
+        chosen_model = model or self.default_model
+        scrubbed_msgs = self._scrub_messages(messages)
+
+        if self.provider == "anthropic":
+            return self._chat_anthropic(
+                scrubbed_msgs, chosen_model=chosen_model, max_tokens=max_tokens, max_retries=max_retries
+            )
+
         payload: dict[str, Any] = {
             "model": chosen_model,
-            "messages": self._scrub_messages(messages),
+            "messages": scrubbed_msgs,
             "max_tokens": max_tokens,
         }
         if tools:
@@ -118,8 +136,8 @@ class LLMClient:
             payload["response_format"] = {"type": "json_object"}
 
         headers = {"Content-Type": "application/json"}
-        if self.settings.llm_api_key:
-            headers["Authorization"] = f"Bearer {self.settings.llm_api_key}"
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
 
         url = f"{self.base_url}/chat/completions"
         last_err: Exception | None = None
@@ -172,6 +190,66 @@ class LLMClient:
                 raise TransientLLMError(f"LLM request failed after retries: {exc}") from exc
 
         raise TransientLLMError(f"LLM request failed: {last_err}")
+
+    def _chat_anthropic(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        chosen_model: str,
+        max_tokens: int,
+        max_retries: int,
+    ) -> tuple[dict[str, Any], LLMCallMetrics]:
+        sys_parts = [m["content"] for m in messages if m.get("role") == "system" and m.get("content")]
+        chat_msgs = [
+            {"role": m["role"], "content": m.get("content") or ""}
+            for m in messages
+            if m.get("role") in ("user", "assistant")
+        ]
+        payload: dict[str, Any] = {
+            "model": chosen_model,
+            "max_tokens": max_tokens,
+            "messages": chat_msgs,
+        }
+        if sys_parts:
+            payload["system"] = "\n\n".join(sys_parts)
+
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+        }
+        url = f"{self.base_url}/v1/messages" if not self.base_url.endswith("/v1") else f"{self.base_url}/messages"
+
+        for attempt in range(max_retries + 1):
+            try:
+                with httpx.Client(timeout=self.settings.llm_timeout_seconds) as client:
+                    resp = client.post(url, headers=headers, json=payload)
+                if resp.status_code in (429, 500, 502, 503, 504, 529):
+                    raise TransientLLMError(f"Anthropic HTTP {resp.status_code}: {resp.text[:250]}")
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"Anthropic HTTP {resp.status_code}: {resp.text[:350]}")
+                body = resp.json()
+                text_blocks = [
+                    b.get("text", "")
+                    for b in (body.get("content") or [])
+                    if b.get("type") == "text"
+                ]
+                usage = body.get("usage") or {}
+                p_tok = int(usage.get("input_tokens", 0))
+                c_tok = int(usage.get("output_tokens", 0))
+                cached = int(usage.get("cache_read_input_tokens", 0))
+                metrics = LLMCallMetrics(
+                    prompt_tokens=p_tok,
+                    completion_tokens=c_tok,
+                    estimated_cost_usd=self._estimate_cost(chosen_model, p_tok, c_tok, cached),
+                )
+                return {"role": "assistant", "content": "\n".join(text_blocks)}, metrics
+            except (httpx.TimeoutException, httpx.NetworkError, TransientLLMError) as exc:
+                if attempt < max_retries:
+                    time.sleep(1.5 * (2**attempt))
+                    continue
+                raise TransientLLMError(f"Anthropic request failed: {exc}") from exc
+        raise TransientLLMError("Anthropic request failed")
 
     def complete_json(
         self,

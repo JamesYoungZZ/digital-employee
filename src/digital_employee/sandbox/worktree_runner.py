@@ -81,6 +81,31 @@ class WorktreeSandbox:
         self.permitted_scopes = permitted_scopes or []
 
     def resolve_commit(self, rev: str) -> str:
+        # Sync remote tracking branch when online so new worktrees start from latest merged origin/<rev>
+        has_origin = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(self.repo_path),
+            capture_output=True,
+            text=True,
+        )
+        if has_origin.returncode == 0:
+            subprocess.run(
+                ["git", "fetch", "origin", rev],
+                cwd=str(self.repo_path),
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            remote_proc = subprocess.run(
+                ["git", "rev-parse", "--verify", f"refs/remotes/origin/{rev}"],
+                cwd=str(self.repo_path),
+                capture_output=True,
+                text=True,
+            )
+            if remote_proc.returncode == 0:
+                return remote_proc.stdout.strip()
+
         proc = subprocess.run(
             ["git", "rev-parse", rev],
             cwd=str(self.repo_path),

@@ -480,18 +480,44 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
 
                   {ev.reviewer_report && (
                     <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-2.5 text-xs">
-                      <div className="font-semibold text-zinc-800 dark:text-zinc-200">
-                        单审查器工程结论 (Focused Single Reviewer)
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-semibold text-zinc-800 dark:text-zinc-200">
+                          独立跨模型 PR Review Agent 报告 (Skill: <code className="font-mono">{ev.reviewer_report.skill_used ?? "pr-code-review"}</code>)
+                        </span>
+                        <div className="flex items-center gap-2">
+                          {ev.reviewer_report.reviewer_model && (
+                            <code className="rounded bg-purple-500/10 px-2 py-0.5 text-[11px] text-purple-600 dark:text-purple-300">
+                              {ev.reviewer_report.reviewer_model}
+                            </code>
+                          )}
+                          <span
+                            className={cn(
+                              "rounded-full px-2 py-0.5 text-[11px] font-semibold",
+                              ev.reviewer_report.verdict === "BLOCK"
+                                ? "bg-red-500/15 text-red-600 dark:text-red-400"
+                                : "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                            )}
+                          >
+                            {ev.reviewer_report.verdict ?? "APPROVE"} · {(ev.reviewer_report.blocking_issues ?? []).length} Blocking
+                          </span>
+                        </div>
                       </div>
                       <p className="leading-relaxed text-zinc-600 dark:text-zinc-300">
                         {ev.reviewer_report.summary}
                       </p>
-                      {ev.reviewer_report.ac_assessment?.length > 0 && (
-                        <ul className="list-disc pl-5 space-y-1 text-zinc-500 dark:text-zinc-400">
-                          {ev.reviewer_report.ac_assessment.map((x, i) => (
-                            <li key={i}>{x}</li>
+                      {(ev.reviewer_report.blocking_issues ?? []).length > 0 && (
+                        <div className="rounded-lg border border-red-500/30 bg-red-500/8 p-3 space-y-1">
+                          <div className="font-semibold text-red-600 dark:text-red-400">
+                            严重阻断项 (Blocking Only)：
+                          </div>
+                          {(ev.reviewer_report.blocking_issues ?? []).map((b, idx) => (
+                            <div key={idx} className="text-red-700 dark:text-red-300">
+                              <b>[{b.severity} · {b.category}]</b>{" "}
+                              {b.path ? <code className="font-mono">{b.path}{b.line ? `:${b.line}` : ""}</code> : null}{" "}
+                              — {b.message}
+                            </div>
                           ))}
-                        </ul>
+                        </div>
                       )}
                     </div>
                   )}

@@ -15,7 +15,7 @@ logger = logging.getLogger("digital_employee.poller")
 class GitHubFollowThroughPoller:
     """Periodically reconciles open Draft PRs for review comments, CI failures, and merge outcomes."""
 
-    def __init__(self, orchestrator: DelegationOrchestrator, interval_seconds: float = 30.0) -> None:
+    def __init__(self, orchestrator: DelegationOrchestrator, interval_seconds: float = 15.0) -> None:
         self.orch = orchestrator
         self.interval_seconds = interval_seconds
         self._stop_event = threading.Event()
@@ -141,5 +141,15 @@ class GitHubFollowThroughPoller:
                         publish_pr=True,
                     )
                     actions += 1
+                    continue
+
+            # 4. Evaluate 5-Gate Auto-Merge once CI checks pass & PR Review APPROVED
+            if state.auto_merge:
+                try:
+                    merge_res = self.orch.try_auto_merge(state.task_id)
+                    if merge_res.get("merged"):
+                        actions += 1
+                except Exception as merge_exc:
+                    logger.warning("Auto-merge check failed for %s: %s", state.task_id, merge_exc)
 
         return actions

@@ -158,20 +158,26 @@ export function App() {
           </div>
           <div className="space-y-1 text-zinc-500 dark:text-zinc-400">
             <div className="flex items-center justify-between">
-              <span>推理模型</span>
+              <span>编码模型</span>
               <code className="text-[10.5px] text-zinc-800 dark:text-zinc-200">
                 {health?.reasoning_model ?? "..."}
               </code>
             </div>
             <div className="flex items-center justify-between">
-              <span>GitHub 轮询器</span>
+              <span>独立审查模型</span>
+              <code className="text-[10.5px] text-purple-600 dark:text-purple-400">
+                {health?.reviewer_model ?? "..."}
+              </code>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>PR & 自动合入</span>
               <span
                 className={cn(
                   "font-medium",
                   health?.github_poller_enabled ? "text-emerald-500" : "text-amber-500"
                 )}
               >
-                {health?.github_poller_enabled ? "30s 自动跟进" : "未开启"}
+                {health?.github_poller_enabled ? "15s 巡检合入" : "未开启"}
               </span>
             </div>
             <div className="flex items-center justify-between">

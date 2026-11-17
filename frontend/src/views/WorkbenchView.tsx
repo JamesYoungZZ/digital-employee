@@ -71,6 +71,7 @@ export function WorkbenchView({
   const [targetRepo, setTargetRepo] = React.useState("");
   const [prompt, setPrompt] = React.useState("");
   const [publishPr, setPublishPr] = React.useState(true);
+  const [autoMerge, setAutoMerge] = React.useState(true);
   const [acceptDefaults, setAcceptDefaults] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [filter, setFilter] = React.useState<string>("ALL");
@@ -92,6 +93,7 @@ export function WorkbenchView({
           target_repo: targetRepo,
           raw_request: prompt.trim(),
           publish_pr: publishPr,
+          auto_merge: autoMerge,
           accept_defaults: acceptDefaults,
           auto_execute: true,
         }),
@@ -226,12 +228,17 @@ export function WorkbenchView({
 
               <label className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
                 <Switch checked={publishPr} onCheckedChange={setPublishPr} />
-                <span>自动提 GitHub Draft PR</span>
+                <span>自动创建正式 PR</span>
+              </label>
+
+              <label className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
+                <Switch checked={autoMerge} onCheckedChange={setAutoMerge} disabled={!publishPr} />
+                <span>Review + CI 全绿自动合入</span>
               </label>
 
               <label className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
                 <Switch checked={acceptDefaults} onCheckedChange={setAcceptDefaults} />
-                <span>轻微歧义按默认假设继续</span>
+                <span>轻微歧义按默认继续</span>
               </label>
             </div>
 

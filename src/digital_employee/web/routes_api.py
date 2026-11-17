@@ -81,6 +81,8 @@ def build_api_router(
             "inference_mode": cfg.inference_mode,
             "fast_model": cfg.fast_model,
             "reasoning_model": cfg.reasoning_model,
+            "reviewer_model": cfg.reviewer_model,
+            "reviewer_provider": cfg.reviewer_provider,
             "registered_repositories": repos,
             "github_configured": orch.github.is_configured,
             "github_poller_enabled": bool(poller_enabled_fn()),
@@ -179,6 +181,7 @@ def build_api_router(
                 accept_defaults=payload.accept_defaults,
                 auto_execute=False,
                 publish_pr=payload.publish_pr,
+                auto_merge=payload.auto_merge,
                 source_channel="web",
             )
         except Exception as exc:

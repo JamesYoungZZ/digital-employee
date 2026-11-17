@@ -20,6 +20,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY configs ./configs
+COPY skills ./skills
 COPY --from=frontend-builder /dist-static ./src/digital_employee/web/static
 
 RUN uv venv /app/.venv \

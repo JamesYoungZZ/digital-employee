@@ -38,6 +38,15 @@ class Settings(BaseModel):
     reasoning_model: str = "deepseek-v4-pro"
     llm_timeout_seconds: float = 60.0
 
+    # Separate Cross-Model PR Review Agent settings
+    reviewer_provider: Literal["openai_compatible", "anthropic"] = "openai_compatible"
+    reviewer_base_url: str = "https://api.deepseek.com"
+    reviewer_api_key: str = Field(default="", repr=False)
+    reviewer_model: str = "deepseek-flash"
+    pr_review_skill_path: Path = Field(
+        default_factory=lambda: PROJECT_ROOT / "skills" / "pr-code-review" / "SKILL.md"
+    )
+
     data_dir: Path = Field(default_factory=lambda: PROJECT_ROOT / ".local")
     repo_registry_path: Path = Field(
         default_factory=lambda: PROJECT_ROOT / "configs" / "repositories.yaml"
@@ -172,6 +181,31 @@ def load_settings(env_file: Path | None = None) -> Settings:
         "intranet_only" if mode_raw == "intranet_only" else "cloud_api"
     )
 
+    # Resolve Independent Cross-Model PR Reviewer credentials
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    openai_only_key = os.environ.get("OPENAI_API_KEY", "")
+    rev_provider_raw = get_val(
+        "DE_REVIEWER_PROVIDER",
+        "anthropic" if anthropic_key and not get_val("DE_REVIEWER_BASE_URL") else "openai_compatible",
+    )
+    reviewer_provider: Literal["openai_compatible", "anthropic"] = (
+        "anthropic" if rev_provider_raw == "anthropic" else "openai_compatible"
+    )
+    if reviewer_provider == "anthropic":
+        reviewer_api_key = get_val("DE_REVIEWER_API_KEY") or anthropic_key or api_key
+        reviewer_base_url = get_val("DE_REVIEWER_BASE_URL") or "https://api.anthropic.com"
+        reviewer_model = get_val("DE_REVIEWER_MODEL") or "claude-sonnet-4-20250514"
+    elif get_val("DE_REVIEWER_API_KEY") or (openai_only_key and openai_only_key != api_key):
+        reviewer_api_key = get_val("DE_REVIEWER_API_KEY") or openai_only_key
+        reviewer_base_url = get_val("DE_REVIEWER_BASE_URL") or "https://api.openai.com/v1"
+        reviewer_model = get_val("DE_REVIEWER_MODEL") or "gpt-4.1"
+    else:
+        reviewer_api_key = get_val("DE_REVIEWER_API_KEY") or api_key
+        reviewer_base_url = get_val("DE_REVIEWER_BASE_URL") or base_url
+        # Default to distinct model (`fast_model` vs `reasoning_model`) when sharing provider
+        default_cross = fast_model if fast_model != reasoning_model else reasoning_model
+        reviewer_model = get_val("DE_REVIEWER_MODEL") or default_cross
+
     settings = Settings(
         inference_mode=inference_mode,
         llm_base_url=base_url,
@@ -179,6 +213,10 @@ def load_settings(env_file: Path | None = None) -> Settings:
         fast_model=fast_model,
         reasoning_model=reasoning_model,
         llm_timeout_seconds=float(get_val("DE_LLM_TIMEOUT_SECONDS", "60")),
+        reviewer_provider=reviewer_provider,
+        reviewer_base_url=reviewer_base_url,
+        reviewer_api_key=reviewer_api_key,
+        reviewer_model=reviewer_model,
         data_dir=Path(get_val("DE_DATA_DIR", str(PROJECT_ROOT / ".local"))),
         repo_registry_path=Path(
             get_val("DE_REPO_REGISTRY", str(PROJECT_ROOT / "configs" / "repositories.yaml"))

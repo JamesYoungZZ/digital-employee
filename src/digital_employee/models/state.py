@@ -38,13 +38,27 @@ def utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-class ReviewerReport(BaseModel):
-    """Focused Single Reviewer output (no subjective numeric score)."""
+class BlockingReviewIssue(BaseModel):
+    """Severe P0/P1 defect reported by the Independent PR Review Agent."""
 
-    ac_covered: bool
+    severity: Literal["P0", "P1"] = "P1"
+    category: str = "LOGIC_OR_REGRESSION"
+    path: str = ""
+    line: int | None = None
+    message: str
+
+
+class ReviewerReport(BaseModel):
+    """Independent Cross-Model PR Review Agent output (Blocking-only, zero nitpicks)."""
+
+    verdict: Literal["APPROVE", "BLOCK"] = "APPROVE"
+    reviewer_model: str = ""
+    skill_used: str = "pr-code-review"
+    ac_covered: bool = True
     ac_assessment: list[str] = Field(default_factory=list)
     decision_ledger_compliant: bool = True
     ledger_violations: list[str] = Field(default_factory=list)
+    blocking_issues: list[BlockingReviewIssue] = Field(default_factory=list)
     side_effect_findings: list[str] = Field(default_factory=list)
     unverified_risks: list[str] = Field(default_factory=list)
     summary: str = ""
@@ -72,7 +86,9 @@ class VerificationEvidence(BaseModel):
         reviewer_ok = True
         if self.reviewer_report is not None:
             reviewer_ok = (
-                self.reviewer_report.ac_covered
+                self.reviewer_report.verdict == "APPROVE"
+                and len(self.reviewer_report.blocking_issues) == 0
+                and self.reviewer_report.ac_covered
                 and self.reviewer_report.decision_ledger_compliant
             )
         return (
@@ -115,6 +131,7 @@ class DurableTaskState(BaseModel):
     contract: TaskContract
     lifecycle_status: LifecycleStatus = "DRAFTING_CONTRACT"
     auto_publish_pr: bool = False
+    auto_merge: bool = True
 
     # 3. Idempotency & external side-effect ledger
     recorded_operations: dict[str, str] = Field(default_factory=dict)
@@ -128,6 +145,8 @@ class DurableTaskState(BaseModel):
     handoff_bundle: HandoffBundle | None = None
     deliverable_pr_url: str | None = None
     deliverable_pr_number: int | None = None
+    pr_review_comment_url: str | None = None
+    merged_commit_sha: str | None = None
 
     # 5. Failure classification & economics/time accounting
     failure_class: FailureClass = "NONE"

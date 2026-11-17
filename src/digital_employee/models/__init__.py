@@ -6,6 +6,7 @@ from digital_employee.models.contract import (
     UnresolvedDecision,
 )
 from digital_employee.models.state import (
+    BlockingReviewIssue,
     DurableTaskState,
     FailureClass,
     HandoffBundle,
@@ -15,6 +16,7 @@ from digital_employee.models.state import (
 )
 
 __all__ = [
+    "BlockingReviewIssue",
     "DurableTaskState",
     "FailureClass",
     "HandoffBundle",

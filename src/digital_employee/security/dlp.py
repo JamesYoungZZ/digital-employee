@@ -88,7 +88,7 @@ def check_path_policy(
     except PolicyViolationError as exc:
         return False, str(exc)
 
-    default_forbidden = [".github/workflows/", ".env", ".ai/DECISIONS.yaml"]
+    default_forbidden = [".github/workflows/", ".env", ".ai/DECISIONS.yaml", ".ai/unit_backlog.txt"]
     all_forbidden = list(dict.fromkeys((forbidden_paths or []) + default_forbidden))
     for pattern in all_forbidden:
         pat = pattern.strip().replace("\\", "/")

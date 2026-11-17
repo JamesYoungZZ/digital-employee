@@ -27,7 +27,7 @@ def create_app(
 ) -> FastAPI:
     cfg = settings or load_settings()
     orch = orchestrator or DelegationOrchestrator(cfg)
-    poller = GitHubFollowThroughPoller(orch, interval_seconds=30.0)
+    poller = GitHubFollowThroughPoller(orch, interval_seconds=15.0)
     feishu_ws_active = False
 
     @asynccontextmanager

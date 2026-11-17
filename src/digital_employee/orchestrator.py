@@ -10,7 +10,7 @@ from pathlib import Path
 
 from digital_employee.agents.coding_loop import SandboxCodingAgent
 from digital_employee.agents.contract_drafter import ContractDrafter
-from digital_employee.agents.reviewer import FocusedReviewer
+from digital_employee.agents.reviewer import FocusedReviewer, render_pr_review_agent_comment
 from digital_employee.context.decision_ledger import DecisionEntry, DecisionLedger
 from digital_employee.integrations.feishu_cards import (
     FeishuNotifier,
@@ -56,9 +56,22 @@ class DelegationOrchestrator:
         self.settings = settings or load_settings()
         self.store = store or DurableStore(self.settings.db_path, self.settings.artifacts_dir)
         self.llm = llm or LLMClient(self.settings)
+        self.reviewer_llm = (
+            llm
+            if llm is not None
+            else LLMClient(
+                self.settings,
+                provider=self.settings.reviewer_provider,
+                base_url=self.settings.reviewer_base_url,
+                api_key=self.settings.reviewer_api_key,
+                default_model=self.settings.reviewer_model,
+            )
+        )
         self.drafter = ContractDrafter(self.llm)
         self.coder = SandboxCodingAgent(self.llm, max_steps=self.settings.max_coding_steps)
-        self.reviewer = FocusedReviewer(self.llm)
+        self.reviewer = FocusedReviewer(
+            self.reviewer_llm, skill_path=self.settings.pr_review_skill_path
+        )
         self.github = GitHubIntegration(
             token=self.settings.github_token,
             api_base=self.settings.github_api_base,
@@ -84,6 +97,7 @@ class DelegationOrchestrator:
         accept_defaults: bool = False,
         auto_execute: bool = True,
         publish_pr: bool = False,
+        auto_merge: bool = True,
         source_channel: str = "cli",
         feishu_chat_id: str = "",
     ) -> DurableTaskState:
@@ -114,6 +128,7 @@ class DelegationOrchestrator:
             contract=contract,
             lifecycle_status="DRAFTING_CONTRACT",
             auto_publish_pr=publish_pr,
+            auto_merge=auto_merge,
             branch_name=sandbox.branch_name,
             worktree_path=str(sandbox.worktree_path),
             total_cost_usd=round(draft_cost, 6),
@@ -454,12 +469,17 @@ class DelegationOrchestrator:
             return self.store.save_task(state, step_name="abandoned_by_human", note=note)
         if action == "publish_pr":
             if not (state.verification_evidence and state.verification_evidence.passed_all_hard_gates):
-                raise ValueError("Cannot publish Draft PR before passing all hard evidence gates.")
+                raise ValueError("Cannot publish PR before passing all hard evidence gates.")
             return self._deliver_verified_result(
                 state,
                 sandbox=sandbox,
                 publish_pr=True,
             )
+        if action == "auto_merge":
+            res = self.try_auto_merge(task_id)
+            if not res.get("merged"):
+                raise ValueError(f"Auto-merge gate not yet satisfied: {res.get('reason')}")
+            return self._require_task(task_id)
 
         raise ValueError(f"Unsupported control action: {action}")
 
@@ -523,33 +543,67 @@ class DelegationOrchestrator:
             if branch_pushed and self.github.is_configured:
                 try:
                     def _create_or_reconcile() -> str:
-                        info = self.github.reconcile_or_create_draft_pr(
+                        info = self.github.reconcile_or_create_pr(
                             github_repo=sandbox.profile.github_repo,
                             state=state,
                             protected_branches=sandbox.profile.protected_branches,
+                            draft=False,
                         )
                         return json.dumps(info)
 
                     pr_json, _ = self.store.run_idempotent(
-                        state, "create_draft_pr", _create_or_reconcile
+                        state, "create_pr", _create_or_reconcile
                     )
                     pr_info = json.loads(pr_json)
                     state.deliverable_pr_url = pr_info["html_url"]
                     state.deliverable_pr_number = int(pr_info["number"])
                     state.lifecycle_status = "PR_OPEN_FOLLOWING_UP"
 
+                    # Post concise report from the separate PR Review Agent
+                    ev = state.verification_evidence
+                    if ev and ev.reviewer_report and state.head_commit_sha:
+                        review_md = render_pr_review_agent_comment(
+                            ev.reviewer_report,
+                            verified_commit_sha=state.head_commit_sha,
+                            repro_test_target=ev.repro_test_target,
+                        )
+                        rev_url, _ = self.store.run_idempotent(
+                            state,
+                            f"post_pr_review_{state.head_commit_sha[:10]}",
+                            lambda: self.github.submit_pr_review_report(
+                                github_repo=sandbox.profile.github_repo,
+                                pr_number=state.deliverable_pr_number or 0,
+                                commit_sha=state.head_commit_sha or "",
+                                report_markdown=review_md,
+                                blocking_issues=ev.reviewer_report.blocking_issues,
+                            ),
+                        )
+                        state.pr_review_comment_url = rev_url
+
                     if followup_comment and state.deliverable_pr_number:
                         reply = (
                             f"Updated branch `{state.branch_name}` at `{(state.head_commit_sha or '')[:8]}` "
                             f"in response to review feedback.\n\n"
                             f"- Fail-to-Pass (`{state.verification_evidence.repro_test_target if state.verification_evidence else ''}`): ✅\n"
-                            f"- Related suite & anti-tampering checks: ✅"
+                            f"- Independent PR Review (`{state.verification_evidence.reviewer_report.verdict if (state.verification_evidence and state.verification_evidence.reviewer_report) else 'APPROVE'}`): ✅"
                         )
                         self.github.post_pr_comment(
                             github_repo=sandbox.profile.github_repo,
                             pr_number=state.deliverable_pr_number,
                             body=reply,
                         )
+
+                    # Save before evaluating auto-merge gates
+                    self.store.save_task(
+                        state,
+                        step_name="pr_opened_and_reviewed",
+                        note=f"PR #{state.deliverable_pr_number} opened & reviewed.",
+                    )
+                    if state.auto_merge:
+                        self.try_auto_merge(state.task_id)
+                        refreshed = self.store.get_task(state.task_id)
+                        if refreshed is not None:
+                            state = refreshed
                 except Exception as pr_exc:
                     # Branch is already pushed to GitHub; provide 1-click Compare/Create-PR link
                     state.deliverable_pr_url = (
@@ -712,12 +766,98 @@ class DelegationOrchestrator:
             issues.append("- Existing related test suite failed on HEAD.")
         if not ev.static_analysis_passed:
             issues.append("- Static linter check failed on modified Python files.")
+        if ev.reviewer_report and ev.reviewer_report.blocking_issues:
+            formatted_blocks = [
+                f"[{b.severity} {b.category}] {b.path}:{b.line or '?'} -> {b.message}"
+                for b in ev.reviewer_report.blocking_issues
+            ]
+            issues.append(f"- Independent PR Review BLOCKING issues: {formatted_blocks}")
         if ev.reviewer_report and not ev.reviewer_report.ac_covered:
             issues.append(f"- Reviewer found unmet Acceptance Criteria: {ev.reviewer_report.ac_assessment}")
         if ev.reviewer_report and not ev.reviewer_report.decision_ledger_compliant:
             issues.append(f"- Reviewer found DecisionLedger policy violations: {ev.reviewer_report.ledger_violations}")
 
         return "\n".join(issues) + "\n\nRecent test log tail:\n" + diag_log[-2500:]
+
+    def try_auto_merge(self, task_id: str) -> dict[str, str | bool]:
+        """Evaluate the 5 Objective PR Pass Gates and squash-merge automatically when all pass.
+
+        5 Required Gates:
+          1. Local deterministic Fail-to-Pass & Anti-Tampering == True
+          2. Separate PR Review Agent verdict == 'APPROVE' and 0 blocking_issues
+          3. Remote GitHub Actions CI checks completed & all green
+          4. PR is Open, Ready (non-draft), conflict-free, and head SHA matches verified_commit_sha
+          5. Task `auto_merge` policy is enabled
+        """
+        state = self._require_task(task_id)
+        if not state.auto_merge:
+            return {"merged": False, "reason": "auto_merge_disabled"}
+        if not (self.github.is_configured and state.deliverable_pr_number):
+            return {"merged": False, "reason": "no_remote_pr"}
+
+        ev = state.verification_evidence
+        if not (ev and ev.passed_all_hard_gates and ev.reviewer_report):
+            return {"merged": False, "reason": "local_or_review_gate_not_passed"}
+        if ev.reviewer_report.verdict != "APPROVE" or len(ev.reviewer_report.blocking_issues) > 0:
+            return {"merged": False, "reason": "pr_review_blocked"}
+
+        profile = self.settings.resolve_repository(state.contract.target_repo)
+        gh_repo = profile.github_repo
+        pr_num = state.deliverable_pr_number
+
+        pr_data = self.github.fetch_pr_state(github_repo=gh_repo, pr_number=pr_num)
+        if pr_data.get("merged"):
+            state.lifecycle_status = "ACCEPTED_AND_CLOSED"
+            self.store.save_task(state, step_name="pr_already_merged", note=f"PR #{pr_num} merged.")
+            return {"merged": True, "reason": "already_merged"}
+        if pr_data.get("state") != "open":
+            return {"merged": False, "reason": "pr_not_open"}
+
+        # Ensure PR is non-draft
+        if pr_data.get("draft") and pr_data.get("node_id"):
+            self.github.mark_pr_ready_for_review(str(pr_data["node_id"]))
+
+        remote_head_sha = str((pr_data.get("head") or {}).get("sha") or "")
+        if remote_head_sha != ev.verified_commit_sha:
+            return {"merged": False, "reason": "head_sha_mismatch"}
+        if pr_data.get("mergeable") is False:
+            return {"merged": False, "reason": "merge_conflict"}
+
+        expect_wf = (Path(profile.local_path) / ".github" / "workflows").is_dir()
+        ci_info = self.github.inspect_commit_ci_status(
+            github_repo=gh_repo,
+            commit_sha=ev.verified_commit_sha,
+            expect_workflows=expect_wf,
+        )
+        if ci_info["state"] != "passed":
+            return {"merged": False, "reason": f"ci_{ci_info['state']}"}
+
+        # All 5 Gates GREEN -> Execute atomic Squash Merge locked to verified_commit_sha
+        merge_res = self.github.merge_pull_request(
+            github_repo=gh_repo,
+            pr_number=pr_num,
+            expected_head_sha=ev.verified_commit_sha,
+            commit_title=f"fix: {state.contract.objective[:72]} (#{pr_num})",
+        )
+        merge_sha = str(merge_res.get("sha") or "")
+        state.merged_commit_sha = merge_sha
+        state.lifecycle_status = "ACCEPTED_AND_CLOSED"
+        self.github.post_pr_comment(
+            github_repo=gh_repo,
+            pr_number=pr_num,
+            body=(
+                f"✅ **Auto-Merged (`{merge_sha[:8]}`)** — All 5 quality gates passed:\n"
+                f"1. Sandbox `Fail → Pass` & Anti-Tampering ✅\n"
+                f"2. Independent PR Review Agent (`{ev.reviewer_report.reviewer_model}`) `APPROVE` (0 blocking issues) ✅\n"
+                f"3. GitHub Actions CI Checks (`{ci_info['total']}` green) ✅"
+            ),
+        )
+        self.store.save_task(
+            state,
+            step_name="auto_merged_pr",
+            note=f"Auto-merged PR #{pr_num} -> {merge_sha[:10]}",
+        )
+        return {"merged": True, "reason": "merged", "sha": merge_sha}
 
     def _require_task(self, task_id: str) -> DurableTaskState:
         state = self.store.get_task(task_id)

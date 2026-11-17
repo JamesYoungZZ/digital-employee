@@ -3,6 +3,8 @@ export interface HealthInfo {
   inference_mode: string;
   fast_model: string;
   reasoning_model: string;
+  reviewer_model?: string;
+  reviewer_provider?: string;
   registered_repositories: string[];
   github_configured: boolean;
   github_poller_enabled: boolean;
@@ -68,11 +70,23 @@ export interface TaskContract {
   owner_id: string;
 }
 
+export interface BlockingReviewIssue {
+  severity: "P0" | "P1";
+  category: string;
+  path: string;
+  line?: number | null;
+  message: string;
+}
+
 export interface ReviewerReport {
+  verdict?: "APPROVE" | "BLOCK";
+  reviewer_model?: string;
+  skill_used?: string;
   ac_covered: boolean;
   ac_assessment: string[];
   decision_ledger_compliant: boolean;
   ledger_violations: string[];
+  blocking_issues?: BlockingReviewIssue[];
   side_effect_findings: string[];
   unverified_risks: string[];
   summary: string;
@@ -112,6 +126,7 @@ export interface TaskItem {
   contract: TaskContract;
   lifecycle_status: string;
   auto_publish_pr: boolean;
+  auto_merge?: boolean;
   branch_name: string;
   worktree_path: string;
   head_commit_sha?: string | null;
@@ -119,6 +134,8 @@ export interface TaskItem {
   handoff_bundle?: HandoffBundle | null;
   deliverable_pr_url?: string | null;
   deliverable_pr_number?: number | null;
+  pr_review_comment_url?: string | null;
+  merged_commit_sha?: string | null;
   failure_class: string;
   failure_reason?: string | null;
   sandbox_attempt_count: number;

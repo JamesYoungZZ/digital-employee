@@ -296,3 +296,128 @@ def test_github_poller_reconciles_comments_idempotently_and_merge_state(tmp_path
     updated = orch.store.get_task("t-poll-1")
     assert updated is not None and updated.lifecycle_status == "ACCEPTED_AND_CLOSED"
 
+
+def test_five_gate_auto_merge_and_blocking_pr_review_skill(tmp_path: Path) -> None:
+    from unittest.mock import MagicMock
+
+    from digital_employee.agents.reviewer import (
+        load_pr_review_skill,
+        render_pr_review_agent_comment,
+    )
+    from digital_employee.models.state import (
+        BlockingReviewIssue,
+        DurableTaskState,
+        ReviewerReport,
+        VerificationEvidence,
+    )
+    from digital_employee.orchestrator import DelegationOrchestrator
+
+    skill_md = load_pr_review_skill()
+    assert "pr-code-review" in skill_md
+    assert "Blocking" in skill_md
+
+    repo_cfg = tmp_path / "repos.yaml"
+    repo_cfg.write_text(
+        "repositories:\n"
+        "  demo:\n"
+        f"    github_repo: acme/demo\n"
+        f"    local_path: {tmp_path}\n",
+        encoding="utf-8",
+    )
+    cfg = Settings(
+        data_dir=tmp_path / "data",
+        repo_registry_path=repo_cfg,
+        llm_api_key="dummy",
+        github_token="ghp_dummy_token_for_test_only_12345",
+    )
+    cfg.ensure_dirs()
+    orch = DelegationOrchestrator(cfg)
+
+    blocked_report = ReviewerReport(
+        verdict="BLOCK",
+        reviewer_model="claude-sonnet-4-20250514",
+        blocking_issues=[
+            BlockingReviewIssue(
+                severity="P0",
+                category="LOGIC_OR_REGRESSION",
+                path="src/app.py",
+                line=12,
+                message="Null dereference on empty input",
+            )
+        ],
+        summary="Blocked due to null dereference.",
+    )
+    comment_md = render_pr_review_agent_comment(
+        blocked_report, verified_commit_sha="aaaa11112222", repro_test_target="tests/test_app.py"
+    )
+    assert "<!-- ai-pr-review-agent -->" in comment_md
+    assert "P0 · LOGIC_OR_REGRESSION" in comment_md
+
+    ev = VerificationEvidence(
+        verified_commit_sha="aaaa11112222",
+        repro_test_target="tests/test_app.py",
+        repro_test_failed_on_base=True,
+        repro_test_passed_on_head=True,
+        existing_test_suite_passed=True,
+        tests_weakened_check=True,
+        reviewer_report=blocked_report,
+    )
+    assert ev.passed_all_hard_gates is False
+
+    state = DurableTaskState(
+        task_id="t-merge-1",
+        trace_id="tr-m1",
+        raw_request="fix app",
+        contract=TaskContract(
+            objective="fix app",
+            target_repo="demo",
+            base_branch="dev",
+            base_commit_sha="0000",
+            reproduction_evidence="err",
+            permitted_scopes=["src", "tests"],
+        ),
+        lifecycle_status="PR_OPEN_FOLLOWING_UP",
+        auto_merge=True,
+        deliverable_pr_number=9,
+        deliverable_pr_url="https://github.com/acme/demo/pull/9",
+        head_commit_sha="aaaa11112222",
+        verification_evidence=ev,
+    )
+    orch.store.save_task(state)
+
+    # Gate 2 blocks auto-merge when PR Review Agent verdict is BLOCK
+    res_blocked = orch.try_auto_merge("t-merge-1")
+    assert res_blocked["merged"] is False
+
+    # Upgrade report to APPROVE (0 blocking issues)
+    state.verification_evidence.reviewer_report = ReviewerReport(
+        verdict="APPROVE",
+        reviewer_model="claude-sonnet-4-20250514",
+        blocking_issues=[],
+        summary="Clean surgical fix.",
+    )
+    orch.store.save_task(state)
+
+    orch.github.fetch_pr_state = MagicMock(  # type: ignore[method-assign]
+        return_value={"state": "open", "draft": False, "merged": False, "mergeable": True, "head": {"sha": "aaaa11112222"}}
+    )
+    # Gate 3 holds auto-merge while GitHub Actions CI is pending
+    orch.github.inspect_commit_ci_status = MagicMock(  # type: ignore[method-assign]
+        return_value={"state": "pending", "failed_checks": [], "total": 2}
+    )
+    assert orch.try_auto_merge("t-merge-1")["merged"] is False
+
+    # Once CI turns green, all 5 Gates pass -> Squash Merge & ACCEPTED_AND_CLOSED!
+    orch.github.inspect_commit_ci_status = MagicMock(  # type: ignore[method-assign]
+        return_value={"state": "passed", "failed_checks": [], "total": 2}
+    )
+    orch.github.merge_pull_request = MagicMock(return_value={"sha": "merged9999"})  # type: ignore[method-assign]
+    orch.github.post_pr_comment = MagicMock(return_value="ok")  # type: ignore[method-assign]
+
+    merged_res = orch.try_auto_merge("t-merge-1")
+    assert merged_res["merged"] is True
+    final_state = orch.store.get_task("t-merge-1")
+    assert final_state is not None
+    assert final_state.lifecycle_status == "ACCEPTED_AND_CLOSED"
+    assert final_state.merged_commit_sha == "merged9999"
+
