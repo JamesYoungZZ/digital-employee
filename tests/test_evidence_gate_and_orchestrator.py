@@ -280,15 +280,15 @@ def test_github_poller_reconciles_comments_idempotently_and_merge_state(tmp_path
         return_value=[{"id": "issue_comment_99", "body": "Add edge case assertion", "created_at": "2026-11-16T03:00:00Z", "user": "alice"}]
     )
     orch.github.fetch_failed_blocking_checks = MagicMock(return_value=[])  # type: ignore[method-assign]
-    orch.handle_pr_review_comment = MagicMock(return_value=state)  # type: ignore[method-assign]
+    orch.notify_review_fix_needed = MagicMock(return_value="ok")  # type: ignore[method-assign]
 
     poller = GitHubFollowThroughPoller(orch)
     assert poller.poll_once() == 1
-    assert orch.handle_pr_review_comment.call_count == 1
+    assert orch.notify_review_fix_needed.call_count == 1
 
     # Second poll on identical comment must be skipped via recorded_operations idempotency
     assert poller.poll_once() == 0
-    assert orch.handle_pr_review_comment.call_count == 1
+    assert orch.notify_review_fix_needed.call_count == 1
 
     # When PR is merged on GitHub, poller transitions task to ACCEPTED_AND_CLOSED
     orch.github.fetch_pr_state = MagicMock(return_value={"state": "closed", "merged": True})  # type: ignore[method-assign]

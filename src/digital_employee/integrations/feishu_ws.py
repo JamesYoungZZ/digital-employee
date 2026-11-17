@@ -131,6 +131,25 @@ def start_feishu_long_connection_if_configured(orchestrator: DelegationOrchestra
                 resp.toast = toast
                 return resp
 
+            if tid and act == "autofix_review":
+                extra_cmt = str(val.get("comment") or "")
+                threading.Thread(
+                    target=orchestrator.autofix_review_issues,
+                    args=(tid,),
+                    kwargs={"extra_comment": extra_cmt, "triggered_by": "feishu_ws_card"},
+                    daemon=True,
+                ).start()
+                toast.type = "success"
+                toast.content = f"🔧 已唤醒数字员工！正在按 Review 意见自动修复 {tid} 并更新 PR…"
+                resp.toast = toast
+                return resp
+
+            if tid and act == "ignore_review_comment":
+                toast.type = "info"
+                toast.content = "好的，暂不自动修改，保留当前 PR 状态。"
+                resp.toast = toast
+                return resp
+
             if tid and act == "reject_merge":
                 threading.Thread(
                     target=orchestrator.update_scope_or_cancel,

@@ -75,6 +75,22 @@ def build_webhook_router(orch: DelegationOrchestrator) -> APIRouter:
                         "content": f"已批准合入！正在自动 Squash Merge 任务 {tid} 的 PR...",
                     }
                 }
+            if tid and act == "autofix_review":
+                extra_cmt = str(val.get("comment") or "")
+                background_tasks.add_task(
+                    orch.autofix_review_issues,
+                    tid,
+                    extra_comment=extra_cmt,
+                    triggered_by="feishu_webhook_card",
+                )
+                return {
+                    "toast": {
+                        "type": "success",
+                        "content": f"🔧 已唤醒数字员工！正在按 Review 意见自动修复 {tid}…",
+                    }
+                }
+            if tid and act == "ignore_review_comment":
+                return {"toast": {"type": "info", "content": "已暂缓修改，保留当前 PR。"}}
             if tid and act == "reject_merge":
                 background_tasks.add_task(
                     orch.update_scope_or_cancel,

@@ -120,6 +120,36 @@ export function WorkbenchView({
     }
   };
 
+  const handleAutoFixReview = async (taskId: string) => {
+    setMergingId(taskId);
+    try {
+      await apiFetch(`/api/tasks/${encodeURIComponent(taskId)}/control`, {
+        method: "POST",
+        body: JSON.stringify({ action: "autofix_review" }),
+      });
+      toast.success(`🔧 已唤醒沙箱！正在按 Review 意见自动修复 ${taskId}…`);
+      onSelectTask(taskId);
+      await onMutated();
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setMergingId(null);
+    }
+  };
+
+  const pendingReviewFixTasks = React.useMemo(
+    () =>
+      tasks.filter(
+        (t) =>
+          !t.worker_alive &&
+          !["ACCEPTED_AND_CLOSED", "ABANDONED_OR_REVERTED", "WAITING_MERGE_APPROVAL"].includes(
+            t.lifecycle_status
+          ) &&
+          t.verification_evidence?.reviewer_report?.verdict === "BLOCK"
+      ),
+    [tasks]
+  );
+
   React.useEffect(() => {
     if (!targetRepo && repos.length > 0) {
       setTargetRepo(repos[0].repo_id);
@@ -321,6 +351,99 @@ export function WorkbenchView({
                       {mc?.reviewer_summary || ev?.reviewer_report?.summary}
                     </p>
                   )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Interactive Review Blocked -> 1-Click Auto-Fix Cards */}
+      {pendingReviewFixTasks.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 text-xs font-semibold text-amber-600 dark:text-amber-400">
+            <BellRing className="h-4 w-4" />
+            <span>
+              Code Review 待修复 ({pendingReviewFixTasks.length} 张卡片 — 飞书与控制台均支持一键唤醒自动修复)
+            </span>
+          </div>
+
+          <div className="grid gap-3">
+            {pendingReviewFixTasks.map((t) => {
+              const rep = t.verification_evidence?.reviewer_report;
+              const issues = rep?.blocking_issues ?? [];
+              const busy = mergingId === t.task_id;
+              return (
+                <div
+                  key={t.task_id}
+                  className="rounded-xl border border-amber-500/45 bg-gradient-to-r from-amber-500/8 via-white to-white p-5 shadow-md dark:from-amber-500/12 dark:via-zinc-900 dark:to-zinc-900 space-y-3"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center gap-1 rounded-md bg-amber-600 px-2 py-0.5 text-[11px] font-semibold text-white">
+                          🛑 Code Review 发现 {issues.length} 项阻断问题
+                        </span>
+                        <span className="font-mono text-xs font-semibold text-zinc-800 dark:text-zinc-200">
+                          {t.task_id}
+                        </span>
+                        {t.deliverable_pr_url && (
+                          <a
+                            href={t.pr_review_comment_url || t.deliverable_pr_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+                          >
+                            PR #{t.deliverable_pr_number} 审查评论
+                            <ArrowUpRight className="h-3.5 w-3.5" />
+                          </a>
+                        )}
+                      </div>
+                      <h4 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                        {t.contract.objective}
+                      </h4>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        variant="primary"
+                        size="lg"
+                        disabled={busy}
+                        onClick={() => handleAutoFixReview(t.task_id)}
+                      >
+                        {busy ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Sparkles className="h-4 w-4" />
+                        )}
+                        🔧 一键按 Review 意见自动修复
+                      </Button>
+                      <a
+                        href={`/reports/${encodeURIComponent(t.task_id)}/review`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex h-8 items-center gap-1 rounded-lg border border-zinc-200 bg-white px-3 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
+                      >
+                        📄 全量报告
+                        <ArrowUpRight className="h-3 w-3" />
+                      </a>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1 rounded-lg border border-amber-500/20 bg-white/80 dark:bg-zinc-950/60 p-3 text-xs">
+                    {issues.slice(0, 3).map((b, idx) => (
+                      <div key={idx} className="text-zinc-700 dark:text-zinc-300">
+                        <b className="text-red-600 dark:text-red-400">[{b.severity}]</b>{" "}
+                        {b.path ? (
+                          <code className="font-mono mr-1">
+                            {b.path}
+                            {b.line ? `:${b.line}` : ""}
+                          </code>
+                        ) : null}
+                        {b.message}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               );
             })}

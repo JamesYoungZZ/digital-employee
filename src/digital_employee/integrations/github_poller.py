@@ -94,7 +94,7 @@ class GitHubFollowThroughPoller:
                 actions += 1
                 continue
 
-            # 2. Check for new human review / issue comments on the PR
+            # 2. Check for new human review / issue comments on the PR -> Push 1-Click Auto-Fix Card!
             comments = self.orch.github.fetch_human_pr_comments(
                 github_repo=gh_repo, pr_number=pr_num
             )
@@ -104,15 +104,17 @@ class GitHubFollowThroughPoller:
                 if op_key in state.recorded_operations:
                     continue
                 state.recorded_operations[op_key] = cmt["created_at"]
+                state.recorded_operations["latest_human_pr_comment"] = cmt["body"][:800]
                 self.orch.store.save_task(
                     state,
                     step_name=op_key,
-                    note=f"Processing PR comment by {cmt['user']}: {cmt['body'][:120]}",
+                    note=f"Detected PR comment by {cmt['user']}: {cmt['body'][:120]}",
                 )
-                self.orch.handle_pr_review_comment(
-                    state.task_id,
-                    comment_body=cmt["body"],
-                    publish_pr=True,
+                self.orch.notify_review_fix_needed(
+                    state,
+                    trigger_source="github_comment",
+                    human_comment=cmt["body"],
+                    comment_author=cmt["user"],
                 )
                 actions += 1
                 handled_comment = True

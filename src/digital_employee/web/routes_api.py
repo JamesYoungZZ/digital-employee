@@ -16,6 +16,7 @@ from digital_employee.integrations.feishu_cards import (
     build_handoff_card,
     build_merge_approval_card,
     build_noop_verified_card,
+    build_review_fix_card,
     build_test_connection_card,
     parse_feishu_command,
 )
@@ -159,10 +160,17 @@ def build_api_router(
         )
 
         # Build live Feishu card preview matching current lifecycle stage
+        has_review_block = bool(
+            state.verification_evidence
+            and state.verification_evidence.reviewer_report
+            and state.verification_evidence.reviewer_report.verdict == "BLOCK"
+        )
         if state.lifecycle_status == "WAITING_CLARIFICATION":
             active_card = build_clarification_card(state, orch.web_base_url)
         elif state.lifecycle_status == "WAITING_MERGE_APPROVAL":
             active_card = build_merge_approval_card(state, orch.web_base_url)
+        elif has_review_block:
+            active_card = build_review_fix_card(state, orch.web_base_url)
         elif state.lifecycle_status == "HANDED_OFF_INCOMPLETE":
             active_card = build_handoff_card(state, orch.web_base_url)
         elif state.verification_evidence is not None and state.verification_evidence.noop_verified:
@@ -237,11 +245,23 @@ def build_api_router(
         payload: ControlPayload,
         background_tasks: BackgroundTasks,
     ) -> dict[str, Any]:
-        if payload.action == "retry":
+        if payload.action in ("retry", "autofix_review"):
             state = orch.store.get_task(task_id)
             if state is None:
                 raise HTTPException(status_code=404, detail="Task not found")
             if orch.is_task_actively_running(task_id):
+                return state.model_dump()
+
+            ev = state.verification_evidence
+            has_block = bool(ev and ev.reviewer_report and ev.reviewer_report.blocking_issues)
+            if has_block or payload.action == "autofix_review":
+                background_tasks.add_task(
+                    orch.autofix_review_issues,
+                    task_id,
+                    extra_comment=payload.note.strip(),
+                    triggered_by="console_user",
+                )
+                state.lifecycle_status = "QUEUED"
                 return state.model_dump()
 
             followup = payload.note.strip()

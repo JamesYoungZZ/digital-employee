@@ -8,6 +8,7 @@ from digital_employee.integrations.feishu_cards import (
     build_handoff_card,
     build_merge_approval_card,
     build_noop_verified_card,
+    build_review_fix_card,
     build_test_connection_card,
     parse_feishu_command,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "build_handoff_card",
     "build_merge_approval_card",
     "build_noop_verified_card",
+    "build_review_fix_card",
     "build_test_connection_card",
     "parse_feishu_command",
     "render_evidence_pr_body",

@@ -22,6 +22,7 @@ from digital_employee.integrations.feishu_cards import (
     build_handoff_card,
     build_merge_approval_card,
     build_noop_verified_card,
+    build_review_fix_card,
     parse_feishu_command,
 )
 from digital_employee.integrations.github_client import (
@@ -1041,7 +1042,16 @@ class DelegationOrchestrator:
                 f"Inspect preserved worktree at `{sandbox.worktree_path}` on branch `{state.branch_name}`."
             ),
         )
-        card = build_handoff_card(state, self.web_base_url)
+        has_review_block = bool(
+            state.verification_evidence
+            and state.verification_evidence.reviewer_report
+            and state.verification_evidence.reviewer_report.verdict == "BLOCK"
+        )
+        card = (
+            build_review_fix_card(state, self.web_base_url, trigger_source="ai_review")
+            if has_review_block
+            else build_handoff_card(state, self.web_base_url)
+        )
         self.store.write_artifact(state.task_id, "feishu_handoff_card.json", card)
         self.store.write_artifact(
             state.task_id,
@@ -1050,10 +1060,78 @@ class DelegationOrchestrator:
         )
         self.store.run_idempotent(
             state,
-            "notify_handoff_card",
+            f"notify_handoff_card_{(state.head_commit_sha or 'none')[:8]}",
             lambda: self.feishu.send_card(card, chat_id=state.feishu_chat_id),
         )
         return self.store.save_task(state, step_name="handed_off", note=reason)
+
+    def notify_review_fix_needed(
+        self,
+        state: DurableTaskState,
+        *,
+        trigger_source: str = "ai_review",
+        human_comment: str = "",
+        comment_author: str = "",
+    ) -> str:
+        """Push an interactive 1-Click Review Auto-Fix card to Feishu & store preview artifact."""
+        card = build_review_fix_card(
+            state,
+            self.web_base_url,
+            trigger_source=trigger_source,
+            human_comment=human_comment,
+            comment_author=comment_author,
+        )
+        self.store.write_artifact(state.task_id, "feishu_review_fix_card.json", card)
+        try:
+            return self.feishu.send_card(card, chat_id=state.feishu_chat_id)
+        except Exception:
+            return "local_artifact_only"
+
+    def autofix_review_issues(
+        self,
+        task_id: str,
+        *,
+        extra_comment: str = "",
+        triggered_by: str = "feishu_card",
+    ) -> DurableTaskState:
+        """1-Click Auto-Fix: wake up sandbox Coding Agent to resolve blocking AI/human Review comments."""
+        state = self._require_task(task_id)
+        parts: list[str] = []
+        ev = state.verification_evidence
+        if ev and ev.reviewer_report and ev.reviewer_report.blocking_issues:
+            parts.append("Please resolve ALL of the following blocking PR Code Review issues:")
+            for idx, b in enumerate(ev.reviewer_report.blocking_issues, start=1):
+                loc = f"{b.path}:{b.line}" if (b.path and b.line) else (b.path or "diff")
+                sug = f" | Suggested fix: {b.suggestion}" if b.suggestion else ""
+                parts.append(f"{idx}. [{b.severity} · {b.category}] {loc} — {b.message}{sug}")
+
+        human_cmt = extra_comment.strip() or state.recorded_operations.get("latest_human_pr_comment", "")
+        if human_cmt:
+            parts.append(f"Human PR Review Comment to address:\n{human_cmt}")
+
+        instruction = "\n".join(parts) or "Address the latest PR review feedback and re-verify tests."
+        state.lifecycle_status = "QUEUED"
+        state.failure_class = "NONE"
+        state.failure_reason = None
+        state.handoff_bundle = None
+        self.append_live_event(
+            state,
+            attempt=state.sandbox_attempt_count + 1,
+            kind="autofix",
+            icon="🔧",
+            title=f"收到一键修复指令 (`{triggered_by}`)，正在按 Review 意见自动修复…",
+            detail=instruction[:300],
+        )
+        self.store.save_task(
+            state,
+            step_name="autofix_review_triggered",
+            note=f"Triggered by {triggered_by}: {instruction[:200]}",
+        )
+        return self.execute_task(
+            task_id,
+            publish_pr=state.auto_publish_pr or self.github.is_configured,
+            followup_comment=instruction,
+        )
 
     def handle_feishu_text_message(
         self,
@@ -1092,6 +1170,28 @@ class DelegationOrchestrator:
                 return None
             self.approve_and_merge(target_m.task_id, approved_by="feishu_reply")
             return self.store.get_task(target_m.task_id)
+
+        if intent == "quick_autofix_review":
+            candidates = self.store.list_tasks(limit=20)
+            target_fix = next(
+                (
+                    t
+                    for t in candidates
+                    if not self.is_task_actively_running(t.task_id)
+                    and (
+                        (
+                            t.verification_evidence
+                            and t.verification_evidence.reviewer_report
+                            and t.verification_evidence.reviewer_report.verdict == "BLOCK"
+                        )
+                        or "latest_human_pr_comment" in t.recorded_operations
+                    )
+                ),
+                None,
+            )
+            if target_fix is None:
+                return None
+            return self.autofix_review_issues(target_fix.task_id, triggered_by="feishu_reply")
 
         if intent == "task_approve_merge":
             self.approve_and_merge(parsed["task_id"], approved_by="feishu_reply")

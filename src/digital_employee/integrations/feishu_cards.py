@@ -268,6 +268,99 @@ def build_merge_approval_card(
     }
 
 
+def build_review_fix_card(
+    state: DurableTaskState,
+    web_base_url: str = "http://127.0.0.1:8020",
+    *,
+    trigger_source: str = "ai_review",
+    human_comment: str = "",
+    comment_author: str = "",
+) -> dict[str, Any]:
+    """Build interactive 1-Click Auto-Fix Card when AI Review BLOCKs or a human comments on the PR."""
+    ev = state.verification_evidence
+    rep = ev.reviewer_report if ev else None
+    pr_num = state.deliverable_pr_number or 0
+    pr_url = state.pr_review_comment_url or state.deliverable_pr_url or web_base_url
+
+    if trigger_source == "github_comment" and human_comment:
+        header_title = f"💬 PR #{pr_num} 收到新 Review 评论 · 待你指令"
+        left_k, left_v = "评论人", f"`@{comment_author or 'reviewer'}`"
+        right_k, right_v = "关联仓库", f"`{state.contract.target_repo}`"
+        body_md = (
+            f"**任务**：{_clip(state.contract.objective, 65)}\n"
+            f"**评论内容**：{_clip(human_comment, 120)}\n"
+            f"<font color='grey'>点下方「一键让 AI 修复」或直接回复『修复』，将唤醒原沙箱改代码并更新 PR。</font>"
+        )
+    else:
+        issues = rep.blocking_issues if rep else []
+        header_title = f"🛑 Code Review 发现 {len(issues)} 项问题 · PR #{pr_num}" if pr_num else f"🛑 Code Review 拦截 · {state.task_id}"
+        left_k, left_v = "审查模型", f"`{rep.reviewer_model if rep else 'AI Reviewer'}`"
+        right_k, right_v = "目标仓库", f"`{state.contract.target_repo}`"
+        issue_bullets = []
+        for idx, b in enumerate(issues[:3], start=1):
+            loc = f"`{b.path}:{b.line}` " if (b.path and b.line) else (f"`{b.path}` " if b.path else "")
+            issue_bullets.append(f"`{idx}` **[{b.severity}]** {loc}{_clip(b.message, 68)}")
+        if len(issues) > 3:
+            issue_bullets.append(f"<font color='grey'>…其余 {len(issues) - 3} 项见全量报告</font>")
+        body_md = (
+            f"**改动目标**：{_clip(state.contract.objective, 65)}\n"
+            + "\n".join(issue_bullets)
+            + "\n<font color='grey'>点击「🔧 一键自动修复」或回复『修复』，Agent 将逐条修复并重新提交审查。</font>"
+        )
+
+    actions: list[dict[str, Any]] = [
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "🔧 一键自动修复"},
+            "type": "primary",
+            "value": {
+                "action": "autofix_review",
+                "task_id": state.task_id,
+                "comment": human_comment[:400] if human_comment else "",
+            },
+        },
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "📄 全量报告"},
+            "type": "default",
+            "url": f"{web_base_url}/reports/{state.task_id}/review",
+        },
+    ]
+    if state.deliverable_pr_url:
+        actions.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"PR #{pr_num}" if pr_num else "查看 PR"},
+                "type": "default",
+                "url": pr_url,
+            }
+        )
+    actions.append(
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "暂不处理"},
+            "type": "default",
+            "value": {"action": "ignore_review_comment", "task_id": state.task_id},
+        }
+    )
+
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "header": {
+                "title": {"tag": "plain_text", "content": header_title},
+                "template": "orange",
+            },
+            "elements": [
+                _meta_fields(left_k, left_v, right_k, right_v),
+                {"tag": "hr"},
+                {"tag": "markdown", "content": body_md},
+                {"tag": "action", "actions": actions[:4]},
+            ],
+        },
+    }
+
+
 def build_handoff_card(
     state: DurableTaskState, web_base_url: str = "http://127.0.0.1:8020"
 ) -> dict[str, Any]:
@@ -415,6 +508,10 @@ def parse_feishu_command(
     # 0b. Quick merge approval reply ("批准", "同意合入", "合入", "approve", "merge")
     if cleaned.lower() in {"批准", "同意合入", "合入", "批准合入", "approve", "merge", "lgtm"}:
         return {"intent": "quick_approve_merge"}
+
+    # 0c. Quick review auto-fix reply ("修复", "一键修复", "自动修复", "autofix", "fix")
+    if cleaned.lower() in {"修复", "一键修复", "自动修复", "按意见修复", "autofix", "fix"}:
+        return {"intent": "quick_autofix_review"}
 
     # 1. Quick clarification reply ("默认", "继续", "1", "2")
     if cleaned.lower() in {"默认", "继续", "确认", "default", "ok", "yes", "1", "2"}:
