@@ -260,25 +260,55 @@ class LLMClient:
         *,
         chosen_model: str,
     ) -> tuple[dict[str, Any], LLMCallMetrics]:
-        """Invoke local `@google/gemini-cli` authenticated via Google One AI Ultra / OAuth."""
+        """Invoke local Antigravity CLI (`agy`) authenticated via Google AI Ultra subscription."""
         import os
         import shutil
         import subprocess
 
-        gemini_bin = shutil.which("gemini") or "/opt/homebrew/bin/gemini"
-        if not shutil.which(gemini_bin) and not os.path.isfile(gemini_bin):
-            raise LLMConfigurationError(
-                "DE_REVIEWER_PROVIDER=gemini_cli requires `@google/gemini-cli` (`npm i -g @google/gemini-cli` and run `gemini` once to log in with your Google Ultra account)."
-            )
-
+        agy_bin = shutil.which("agy") or "/Applications/Gemini.app/Contents/Helpers/agy"
         prompt_chunks = [
             f"[{str(m.get('role', 'user')).upper()}]\n{m.get('content', '')}"
             for m in messages
             if m.get("content")
         ]
-        combined_prompt = "\n\n".join(prompt_chunks) + "\n\nOutput ONLY the requested JSON object."
+        combined_prompt = "\n\n".join(prompt_chunks) + "\n\nOutput ONLY the requested JSON object. Do not call any tools."
         sub_env = dict(os.environ)
         sub_env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{sub_env.get('PATH', '')}"
+
+        if os.path.isfile(agy_bin):
+            cmd = [
+                agy_bin,
+                "--disable-slash-commands",
+                "--effort",
+                "medium",
+                "--model",
+                chosen_model,
+                "-p",
+                combined_prompt,
+            ]
+            proc = subprocess.run(
+                cmd,
+                env=sub_env,
+                capture_output=True,
+                text=True,
+                timeout=max(120.0, self.settings.llm_timeout_seconds),
+                check=False,
+            )
+            if proc.returncode != 0:
+                raise TransientLLMError(
+                    f"agy CLI ({chosen_model}) exited {proc.returncode}: {(proc.stderr or proc.stdout)[:320]}"
+                )
+            return {"role": "assistant", "content": proc.stdout.strip()}, LLMCallMetrics(
+                prompt_tokens=0,
+                completion_tokens=0,
+                estimated_cost_usd=0.0,
+            )
+
+        gemini_bin = shutil.which("gemini") or "/opt/homebrew/bin/gemini"
+        if not os.path.isfile(gemini_bin):
+            raise LLMConfigurationError(
+                "Antigravity CLI (`agy`) not found. Run `/Applications/Gemini.app/Contents/Helpers/agy` to sign in, or set GEMINI_API_KEY."
+            )
         proc = subprocess.run(
             [gemini_bin, "-m", chosen_model, "-p", "Follow the stdin instructions and output strict JSON only."],
             input=combined_prompt,

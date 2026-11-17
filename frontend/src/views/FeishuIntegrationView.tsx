@@ -372,7 +372,7 @@ export function FeishuIntegrationView({ onTaskDispatched }: Props) {
               }}
               className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-950"
             >
-              <option value="gemini_cli">Gemini Ultra CLI (gemini_cli 免Key)</option>
+              <option value="gemini_cli">Antigravity CLI (agy · Gemini Ultra 免Key)</option>
               <option value="gemini">Gemini API Key (AI Studio)</option>
               <option value="anthropic">Anthropic Claude API</option>
               <option value="openai_compatible">OpenAI / DeepSeek 兼容</option>
