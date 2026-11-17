@@ -39,7 +39,9 @@ class Settings(BaseModel):
     llm_timeout_seconds: float = 60.0
 
     # Separate Cross-Model PR Review Agent settings
-    reviewer_provider: Literal["openai_compatible", "anthropic"] = "openai_compatible"
+    reviewer_provider: Literal["openai_compatible", "anthropic", "gemini", "gemini_cli"] = (
+        "openai_compatible"
+    )
     reviewer_base_url: str = "https://api.deepseek.com"
     reviewer_api_key: str = Field(default="", repr=False)
     reviewer_model: str = "deepseek-flash"
@@ -183,16 +185,37 @@ def load_settings(env_file: Path | None = None) -> Settings:
     )
 
     # Resolve Independent Cross-Model PR Reviewer credentials
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    anthropic_key = get_val("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+    gemini_key = (
+        get_val("GEMINI_API_KEY")
+        or get_val("GOOGLE_API_KEY")
+        or os.environ.get("GEMINI_API_KEY", "")
+        or os.environ.get("GOOGLE_API_KEY", "")
+    )
     openai_only_key = os.environ.get("OPENAI_API_KEY", "")
-    rev_provider_raw = get_val(
-        "DE_REVIEWER_PROVIDER",
-        "anthropic" if anthropic_key and not get_val("DE_REVIEWER_BASE_URL") else "openai_compatible",
+    default_rev_provider = (
+        "gemini"
+        if gemini_key and not get_val("DE_REVIEWER_BASE_URL")
+        else ("anthropic" if anthropic_key and not get_val("DE_REVIEWER_BASE_URL") else "openai_compatible")
     )
-    reviewer_provider: Literal["openai_compatible", "anthropic"] = (
-        "anthropic" if rev_provider_raw == "anthropic" else "openai_compatible"
+    rev_provider_raw = get_val("DE_REVIEWER_PROVIDER", default_rev_provider).lower()
+    reviewer_provider: Literal["openai_compatible", "anthropic", "gemini", "gemini_cli"] = (
+        rev_provider_raw  # type: ignore[assignment]
+        if rev_provider_raw in ("openai_compatible", "anthropic", "gemini", "gemini_cli")
+        else "openai_compatible"
     )
-    if reviewer_provider == "anthropic":
+    if reviewer_provider == "gemini_cli":
+        reviewer_api_key = ""
+        reviewer_base_url = "gemini-cli://local"
+        reviewer_model = get_val("DE_REVIEWER_MODEL") or "gemini-2.5-pro"
+    elif reviewer_provider == "gemini":
+        reviewer_api_key = get_val("DE_REVIEWER_API_KEY") or gemini_key or api_key
+        reviewer_base_url = (
+            get_val("DE_REVIEWER_BASE_URL")
+            or "https://generativelanguage.googleapis.com/v1beta/openai"
+        )
+        reviewer_model = get_val("DE_REVIEWER_MODEL") or "gemini-2.5-pro"
+    elif reviewer_provider == "anthropic":
         reviewer_api_key = get_val("DE_REVIEWER_API_KEY") or anthropic_key or api_key
         reviewer_base_url = get_val("DE_REVIEWER_BASE_URL") or "https://api.anthropic.com"
         reviewer_model = get_val("DE_REVIEWER_MODEL") or "claude-sonnet-4-20250514"

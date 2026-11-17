@@ -112,13 +112,16 @@ class LLMClient:
         max_tokens: int = 4096,
         max_retries: int = 2,
     ) -> tuple[dict[str, Any], LLMCallMetrics]:
-        if not self.api_key and self.settings.inference_mode == "cloud_api":
-            raise LLMConfigurationError(
-                "Missing LLM API key (DE_LLM_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY)."
-            )
-
         chosen_model = model or self.default_model
         scrubbed_msgs = self._scrub_messages(messages)
+
+        if self.provider == "gemini_cli":
+            return self._chat_gemini_cli(scrubbed_msgs, chosen_model=chosen_model)
+
+        if not self.api_key and self.settings.inference_mode == "cloud_api":
+            raise LLMConfigurationError(
+                "Missing LLM API key (DE_LLM_API_KEY / DEEPSEEK_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY)."
+            )
 
         if self.provider == "anthropic":
             return self._chat_anthropic(
@@ -250,6 +253,45 @@ class LLMClient:
                     continue
                 raise TransientLLMError(f"Anthropic request failed: {exc}") from exc
         raise TransientLLMError("Anthropic request failed")
+
+    def _chat_gemini_cli(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        chosen_model: str,
+    ) -> tuple[dict[str, Any], LLMCallMetrics]:
+        """Invoke local `@google/gemini-cli` authenticated via Google One AI Ultra / OAuth."""
+        import os
+        import shutil
+        import subprocess
+
+        gemini_bin = shutil.which("gemini") or "/opt/homebrew/bin/gemini"
+        if not shutil.which(gemini_bin) and not os.path.isfile(gemini_bin):
+            raise LLMConfigurationError(
+                "DE_REVIEWER_PROVIDER=gemini_cli requires `@google/gemini-cli` (`npm i -g @google/gemini-cli` and run `gemini` once to log in with your Google Ultra account)."
+            )
+
+        prompt_chunks = [
+            f"[{str(m.get('role', 'user')).upper()}]\n{m.get('content', '')}"
+            for m in messages
+            if m.get("content")
+        ]
+        combined_prompt = "\n\n".join(prompt_chunks) + "\n\nOutput ONLY the requested JSON object."
+        proc = subprocess.run(
+            [gemini_bin, "-m", chosen_model, "-p", "Follow the stdin instructions and output strict JSON only."],
+            input=combined_prompt,
+            capture_output=True,
+            text=True,
+            timeout=max(90.0, self.settings.llm_timeout_seconds),
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise TransientLLMError(f"gemini-cli exited {proc.returncode}: {proc.stderr[:300]}")
+        return {"role": "assistant", "content": proc.stdout.strip()}, LLMCallMetrics(
+            prompt_tokens=0,
+            completion_tokens=0,
+            estimated_cost_usd=0.0,
+        )
 
     def complete_json(
         self,

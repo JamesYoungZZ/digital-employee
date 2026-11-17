@@ -44,8 +44,10 @@ const FILTERS = [
 ] as const;
 
 const SAMPLE_PROMPTS = [
-  "修复 tests/unit/test_list_collections.py 中 include_stats 参数未正确透传的单测 Bug",
-  "修复 tests/unit/test_protocol_handler.py 中重复注册 query_knowledge_hub 工具报错的 Bug",
+  "在 livestream-copilot 的 reply_safety.py 中补齐公屏索要微信号/VX/WhatsApp/身份证号的隐私拦截，以及『已为您补发/已改价/已免单』虚假后台承诺拦截",
+  "为 livestream-copilot 的 reply_safety.py 新增直播广告违禁极限词（如『全网最低价』『100%根治』『国家级』）实时告警检测",
+  "修复 livestream-copilot 的 RoomCommentCoalescer._question_counts 随直播间弹幕无限增长的内存泄漏问题，增加容量上限淘汰",
+  "为 modular-rag 的 search_commerce_documents 工具新增可选 category 过滤参数并保持向后兼容",
 ];
 
 function matchesFilter(t: TaskItem, filter: string): boolean {
@@ -357,12 +359,16 @@ export function WorkbenchView({
 
           {/* Quick-fill Chips */}
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[11px] text-zinc-400 mr-1">一键填入真实待修单测：</span>
+            <span className="text-[11px] text-zinc-400 mr-1">真实业务需求 / 线上隐患示例：</span>
             {SAMPLE_PROMPTS.map((sp) => (
               <button
                 key={sp}
                 type="button"
-                onClick={() => setPrompt(sp)}
+                onClick={() => {
+                  setPrompt(sp);
+                  if (sp.includes("livestream-copilot")) setTargetRepo("livestream-copilot");
+                  else if (sp.includes("modular-rag")) setTargetRepo("modular-rag");
+                }}
                 className="rounded-md border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11.5px] text-zinc-600 hover:border-zinc-300 hover:text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:border-zinc-700 dark:hover:text-zinc-200 cursor-pointer transition-colors"
               >
                 {sp.slice(0, 44)}…

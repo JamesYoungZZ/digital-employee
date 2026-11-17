@@ -732,13 +732,17 @@ class DelegationOrchestrator:
         else:
             state.lifecycle_status = "DELIVERED_LOCAL_READY"
 
-        card = build_evidence_report_card(state, self.web_base_url)
-        self.store.write_artifact(state.task_id, "feishu_evidence_card.json", card)
-        self.store.run_idempotent(
-            state,
-            f"notify_evidence_card_{(state.head_commit_sha or '')[:8]}",
-            lambda: self.feishu.send_card(card, chat_id=state.feishu_chat_id),
-        )
+        # Only send local-delivery card when NOT opening a GitHub PR.
+        # For PR tasks, wait until BOTH Independent Code Review AND GitHub CI finish,
+        # then push ONE single Merge Approval Card carrying the full Review report!
+        if state.lifecycle_status == "DELIVERED_LOCAL_READY":
+            card = build_evidence_report_card(state, self.web_base_url)
+            self.store.write_artifact(state.task_id, "feishu_evidence_card.json", card)
+            self.store.run_idempotent(
+                state,
+                f"notify_evidence_card_{(state.head_commit_sha or '')[:8]}",
+                lambda: self.feishu.send_card(card, chat_id=state.feishu_chat_id),
+            )
         return self.store.save_task(
             state,
             step_name="delivered",

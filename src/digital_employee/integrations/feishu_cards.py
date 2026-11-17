@@ -190,37 +190,50 @@ def build_merge_approval_card(
     mc = state.merge_approval_card
     ev = state.verification_evidence
     pr_num = mc.pr_number if mc else (state.deliverable_pr_number or 0)
-    pr_url = (mc.pr_url if mc else state.deliverable_pr_url) or web_base_url
+    pr_url = state.pr_review_comment_url or (mc.pr_url if mc else state.deliverable_pr_url) or web_base_url
+    rev_model = (
+        (mc.reviewer_model if mc else "")
+        or (ev.reviewer_report.reviewer_model if (ev and ev.reviewer_report) else "")
+        or "AI Reviewer"
+    )
+    rev_verdict = (
+        (mc.reviewer_verdict if mc else "")
+        or (ev.reviewer_report.verdict if (ev and ev.reviewer_report) else "APPROVE")
+    )
     rev_summary = _clip(
         (mc.reviewer_summary if mc else (ev.reviewer_report.summary if (ev and ev.reviewer_report) else ""))
         or "代码改动克制，无阻断级风险。",
-        85,
+        90,
+    )
+    risk_note = _clip(
+        (mc.residual_risk if mc else "")
+        or (ev.unverified_risks[0] if (ev and ev.unverified_risks) else ""),
+        75,
     )
     ci_cnt = mc.ci_checks_count if mc else 2
+    review_lines = [
+        f"**交付内容**：{_clip(state.contract.objective, 75)}",
+        f"**Code Review (`{rev_model}` · `{rev_verdict}`)**：{rev_summary}",
+    ]
+    if risk_note:
+        review_lines.append(f"**边界提示**：{risk_note}")
 
     return {
         "msg_type": "interactive",
         "card": {
             "header": {
-                "title": {"tag": "plain_text", "content": f"🛎️ 待你审批合入 · PR #{pr_num}"},
+                "title": {"tag": "plain_text", "content": f"🛎️ Review 通过 · 待你合入 PR #{pr_num}"},
                 "template": "green",
             },
             "elements": [
                 _meta_fields(
-                    "目标仓库",
+                    "目标分支",
                     f"`{state.contract.target_repo}` → `{state.contract.base_branch}`",
-                    "校验状态",
-                    f"CI `{ci_cnt}/{ci_cnt}` 全绿 · `${state.total_cost_usd:.3f}`",
+                    "验证门禁",
+                    f"✅ Review `0` 阻断 · ✅ CI `{ci_cnt}/{ci_cnt}`",
                 ),
                 {"tag": "hr"},
-                {
-                    "tag": "markdown",
-                    "content": (
-                        f"**修复内容**：{_clip(state.contract.objective, 75)}\n"
-                        f"**AI 审查结论**：{rev_summary}\n"
-                        f"**准入门禁**：✅ 单测复现通过 · ✅ Review 0 阻断 · ✅ 线上 CI 全绿"
-                    ),
-                },
+                {"tag": "markdown", "content": "\n".join(review_lines)},
                 {
                     "tag": "action",
                     "actions": [
@@ -232,7 +245,7 @@ def build_merge_approval_card(
                         },
                         {
                             "tag": "button",
-                            "text": {"tag": "plain_text", "content": f"看 PR #{pr_num}"},
+                            "text": {"tag": "plain_text", "content": f"看 Review & PR #{pr_num}"},
                             "type": "default",
                             "url": pr_url,
                         },
@@ -252,9 +265,15 @@ def build_merge_approval_card(
 def build_handoff_card(
     state: DurableTaskState, web_base_url: str = "http://127.0.0.1:8020"
 ) -> dict[str, Any]:
-    """Build concise Handoff card when task pauses for human intervention."""
+    """Build concise Handoff / Review-Blocked card when task pauses for human intervention."""
     hb = state.handoff_bundle
+    ev = state.verification_evidence
     reason = _clip((hb.reason if hb else state.failure_reason) or "未能在预算步数内通过门禁", 80)
+    rev_block_line = ""
+    if ev and ev.reviewer_report and ev.reviewer_report.blocking_issues:
+        b0 = ev.reviewer_report.blocking_issues[0]
+        rev_block_line = f"\n**Review 拦截 (`{b0.severity}`)**：{_clip(b0.message, 75)}"
+
     return {
         "msg_type": "interactive",
         "card": {
@@ -267,7 +286,7 @@ def build_handoff_card(
                 {"tag": "hr"},
                 {
                     "tag": "markdown",
-                    "content": f"**任务**：{_clip(state.contract.objective, 65)}\n**卡点**：{reason}",
+                    "content": f"**任务**：{_clip(state.contract.objective, 65)}\n**卡点**：{reason}{rev_block_line}",
                 },
                 {
                     "tag": "action",
