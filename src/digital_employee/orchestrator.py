@@ -10,9 +10,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from digital_employee.agents.coding_loop import SandboxCodingAgent
 from digital_employee.agents.contract_drafter import ContractDrafter
 from digital_employee.agents.reviewer import FocusedReviewer, render_pr_review_agent_comment
+from digital_employee.agents.runtime import CodingRuntime, create_coding_runtime
 from digital_employee.context.decision_ledger import DecisionEntry, DecisionLedger
 from digital_employee.integrations.feishu_cards import (
     FeishuNotifier,
@@ -76,7 +76,7 @@ class DelegationOrchestrator:
             )
         )
         self.drafter = ContractDrafter(self.llm)
-        self.coder = SandboxCodingAgent(self.llm, max_steps=self.settings.max_coding_steps)
+        self.coder: CodingRuntime = create_coding_runtime(self.settings, llm=llm)
         self.reviewer = FocusedReviewer(
             self.reviewer_llm, skill_path=self.settings.pr_review_skill_path
         )
@@ -461,6 +461,7 @@ class DelegationOrchestrator:
                         detail=str(ev.get("detail", "")),
                         step_cost_usd=float(ev.get("step_cost_usd", 0.0)),
                     ),
+                    session_state_path=self.store.artifacts_dir / task_id / "kernel_session.jsonl",
                 )
             except TransientLLMError as exc:
                 state.failure_class = "TRANSIENT_INFRA"
@@ -525,8 +526,12 @@ class DelegationOrchestrator:
                     step_name=f"verifying_noop_{attempt}",
                     note=f"Deterministically verifying No-Op claim on {noop_targets}",
                 )
-                noop_res = sandbox.run_pytest(noop_targets, timeout_seconds=120)
-                if noop_res.exit_code != 0 or "passed" not in noop_res.combined_output:
+                noop_res = sandbox.run_test_targets(noop_targets, timeout_seconds=120)
+                is_pytest_runner = any("pytest" in p for p in sandbox.profile.test_cmd)
+                noop_ok = noop_res.exit_code == 0 and (
+                    "passed" in noop_res.combined_output if is_pytest_runner else not noop_res.timed_out
+                )
+                if not noop_ok:
                     feedback = (
                         f"`finish_noop` rejected: independent pytest run on {noop_targets} "
                         f"exited with code {noop_res.exit_code}.\n{noop_res.combined_output[-1500:]}"

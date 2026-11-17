@@ -152,4 +152,66 @@ def build_webhook_router(orch: DelegationOrchestrator) -> APIRouter:
                         return {"ok": True, "resumed_task_id": task.task_id}
         return {"ok": True}
 
+    @router.post("/alert")
+    async def alert_webhook(
+        request: Request, background_tasks: BackgroundTasks
+    ) -> dict[str, Any]:
+        """7x24 Ops Alert Ingestion (Alertmanager / Sentry / Generic Incident Webhook)."""
+        body = await request.json()
+        target_repo = str(body.get("target_repo") or body.get("service") or "").strip()
+        if not target_repo:
+            repos = orch.settings.load_repositories()
+            if repos:
+                target_repo = next(iter(repos.keys()))
+            else:
+                return {"ok": False, "error": "No target_repo provided and no repositories registered."}
+
+        alert_name = str(body.get("alert_name") or body.get("title") or "RuntimeIncidentAlert").strip()
+        severity = str(body.get("severity") or "critical").strip()
+        error_message = str(body.get("error_message") or body.get("message") or "").strip()
+        stack_trace = str(body.get("stack_trace") or body.get("culprit") or "").strip()
+        auto_execute = bool(body.get("auto_execute", True))
+        publish_pr = bool(body.get("publish_pr", orch.github.is_configured))
+
+        raw_request = (
+            f"[7x24 Ops Alert · {severity.upper()}] {alert_name}\n"
+            f"Error: {error_message}\n"
+        )
+        if stack_trace:
+            raw_request += f"Stack Trace / Diagnostic Context:\n{stack_trace[:3000]}\n"
+        raw_request += (
+            "Please triage root cause using Ops diagnostics, write a Fail-to-Pass regression fix if caused by a code bug, "
+            "or exit via finish_noop with a root-cause report if repository tests are healthy."
+        )
+
+        if auto_execute:
+            state = orch.submit_task(
+                raw_request=raw_request,
+                target_repo=target_repo,
+                accept_defaults=True,
+                auto_execute=False,
+                publish_pr=publish_pr,
+                source_channel="alert_webhook",
+            )
+            background_tasks.add_task(
+                orch.execute_task,
+                state.task_id,
+                publish_pr=publish_pr,
+            )
+        else:
+            state = orch.submit_task(
+                raw_request=raw_request,
+                target_repo=target_repo,
+                accept_defaults=True,
+                auto_execute=False,
+                publish_pr=publish_pr,
+                source_channel="alert_webhook",
+            )
+        return {
+            "ok": True,
+            "task_id": state.task_id,
+            "lifecycle_status": state.lifecycle_status,
+            "target_repo": state.contract.target_repo,
+        }
+
     return router

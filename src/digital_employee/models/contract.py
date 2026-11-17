@@ -56,6 +56,7 @@ class RepositoryProfile(BaseModel):
     default_base_branch: str = "main"
     python_bin: str = "python3"
     pytest_cmd: list[str] = Field(default_factory=lambda: ["pytest"])
+    test_runner_cmd: list[str] = Field(default_factory=list)
     lint_cmd: list[str] = Field(default_factory=list)
     default_suite_targets: list[str] = Field(default_factory=list)
     decision_ledger_path: str = ".ai/DECISIONS.yaml"
@@ -66,3 +67,7 @@ class RepositoryProfile(BaseModel):
         default_factory=lambda: [".github/workflows/", ".env", ".ai/DECISIONS.yaml"]
     )
     baseline_human_minutes: float = 35.0
+
+    @property
+    def test_cmd(self) -> list[str]:
+        return self.test_runner_cmd if self.test_runner_cmd else self.pytest_cmd

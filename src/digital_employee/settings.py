@@ -60,6 +60,10 @@ class Settings(BaseModel):
     default_max_budget_usd: float = 1.50
     max_coding_steps: int = 32
     max_self_heal_attempts: int = 3
+    coding_runtime: Literal["kernel", "lite", "external_cli"] = "kernel"
+    external_coding_cli: str = "claude"
+    enable_os_sandbox: bool = False
+    enable_ops_mcp: bool = True
 
     github_token: str = Field(default="", repr=False)
     github_api_base: str = "https://api.github.com"
@@ -251,6 +255,14 @@ def load_settings(env_file: Path | None = None) -> Settings:
         default_max_budget_usd=float(get_val("DE_DEFAULT_MAX_BUDGET_USD", "1.50")),
         max_coding_steps=int(get_val("DE_MAX_CODING_STEPS", "32")),
         max_self_heal_attempts=int(get_val("DE_MAX_SELF_HEAL_ATTEMPTS", "3")),
+        coding_runtime=(
+            get_val("DE_CODING_RUNTIME", "kernel")  # type: ignore[arg-type]
+            if get_val("DE_CODING_RUNTIME", "kernel") in ("kernel", "lite", "external_cli")
+            else "kernel"
+        ),
+        external_coding_cli=get_val("DE_EXTERNAL_CODING_CLI", "claude"),
+        enable_os_sandbox=get_val("DE_ENABLE_OS_SANDBOX", "false").lower() in ("1", "true", "yes"),
+        enable_ops_mcp=get_val("DE_ENABLE_OPS_MCP", "true").lower() not in ("0", "false", "no"),
         github_token=get_val("DE_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", ""),
         github_api_base=get_val("DE_GITHUB_API_BASE", "https://api.github.com"),
         feishu_webhook_url=get_val("DE_FEISHU_WEBHOOK_URL", ""),

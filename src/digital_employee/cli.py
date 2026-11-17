@@ -298,5 +298,33 @@ def cmd_serve(
     )
 
 
+@app.command("code")
+def cmd_code(
+    prompt: str | None = typer.Option(
+        None, "-p", "--prompt", help="Run non-interactively on a single prompt."
+    ),
+    output_format: str = typer.Option(
+        "text", "--output-format", help="Output format for -p mode: 'text' or 'stream-json'."
+    ),
+    mode: str | None = typer.Option(
+        None, "--mode", help="Permission mode: default | accept_edits | plan | bypass."
+    ),
+    remote: bool = typer.Option(
+        False, "--remote", help="Start remote WebSocket browser UI on 0.0.0.0:18888."
+    ),
+) -> None:
+    """Launch the white-box Coding Agent Kernel (Interactive TUI, `-p` Headless, or `--remote` Web UI)."""
+    from digital_employee.kernel.__main__ import main as kernel_main
+
+    argv: list[str] = []
+    if mode:
+        argv.extend(["--mode", mode])
+    if prompt is not None:
+        argv.extend(["-p", prompt, "--output-format", output_format])
+    if remote:
+        argv.append("--remote")
+    kernel_main(argv)
+
+
 if __name__ == "__main__":
     app()

@@ -262,7 +262,10 @@ class SandboxCodingAgent:
         followup_comment: str = "",
         remaining_budget_usd: float = 1.50,
         on_step: Callable[[dict[str, Any]], None] | None = None,
+        session_state_path: Path | None = None,
     ) -> CodingLoopOutcome:
+        del session_state_path
+
         def _emit(
             *,
             step: int,
@@ -287,7 +290,6 @@ class SandboxCodingAgent:
                     )
                 except Exception:
                     pass
-
         ledger = DecisionLedger.from_repo(
             Path(sandbox.profile.local_path), sandbox.profile.decision_ledger_path
         )

@@ -303,6 +303,23 @@ class WorktreeSandbox:
         cmd = [*self.profile.pytest_cmd, "-q", "--tb=short", *clean_targets]
         return self._run_cmd(cmd, cwd=exec_dir, timeout_seconds=timeout_seconds)
 
+    def run_test_targets(
+        self,
+        targets: list[str],
+        *,
+        cwd: Path | None = None,
+        timeout_seconds: int = 90,
+    ) -> CommandResult:
+        """Run polyglot regression test targets (pytest, npm/vitest/jest, go test, cargo test)."""
+        runner = self.profile.test_cmd
+        if any("pytest" in part for part in runner):
+            return self.run_pytest(targets, cwd=cwd, timeout_seconds=timeout_seconds)
+        exec_dir = cwd or (
+            self.worktree_path if self.worktree_path.exists() else self.repo_path
+        )
+        cmd = [*runner, *[t.strip() for t in targets if t.strip()]]
+        return self._run_cmd(cmd, cwd=exec_dir, timeout_seconds=timeout_seconds)
+
     def run_linter(self, targets: list[str], *, timeout_seconds: int = 60) -> CommandResult:
         if not self.profile.lint_cmd:
             return CommandResult(exit_code=0, stdout="No lint_cmd configured; skipped.", stderr="")
@@ -358,7 +375,13 @@ class WorktreeSandbox:
             text=True,
             check=True,
         ).stdout.splitlines()
-        combined = sorted({f.strip() for f in [*tracked, *untracked] if f.strip()})
+        combined = sorted(
+            {
+                f.strip()
+                for f in [*tracked, *untracked]
+                if f.strip() and f.strip() != ".de" and not f.strip().startswith(".de/")
+            }
+        )
         return combined
 
     def git_diff(self, base_commit_sha: str, paths: list[str] | None = None) -> str:
@@ -391,7 +414,7 @@ class WorktreeSandbox:
                 raise PolicyViolationError(reason)
 
         subprocess.run(
-            ["git", "add", "-A"],
+            ["git", "add", "-A", "--", ".", ":!.de"],
             cwd=str(self.worktree_path),
             capture_output=True,
             text=True,

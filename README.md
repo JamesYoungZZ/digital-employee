@@ -14,8 +14,8 @@
 | **1. 一键接入任意仓库 (`Auto-Onboarding`)** | 支持网页表单、REST API 或 `de onboard <git_url_or_path>` 一键挂载本地或远端 Git 仓库，自动识别 Python / Node / Go 技术栈与测试命令，**对目标业务仓库零代码侵入**。 |
 | **2. 契约先行与单模块自动切片 (`TaskContract`)** | 改代码前先读取目标仓代码结构与 `.ai/DECISIONS.yaml` 起草契约；遇到笼统大包干请求自动切分为原子级可审阅模块；仅在存在实质业务歧义时发起 **5 秒微确认**。 |
 | **3. 权威事实层级与组织决策账本 (`DecisionLedger`)** | 严格遵循 `主干代码与单测 (100%) > .ai/DECISIONS.yaml 正式策略 (95%) > 近期合入 PR (85%) > 任务指令 (80%) > 旧文档 (仅供参考)`；支持在网页一键将 Review 结论沉淀为长期团队规则。 |
-| **4. 隔离沙箱交互式循环 (`WorktreeSandbox`)** | 每个任务独占 `ai-agent/{task_id}` Git Worktree；子进程自动剥离所有平台/模型密钥环境变量；自动保持原文件行尾格式（CRLF/LF）确保最小化干净 Diff。 |
-| **5. 证据驱动门禁 (`Evidence-Based Gate`)** | 摒弃多 Agent 玄学打分，强制执行：① 回归单测在 `base_commit` 上**必须失败**、在 `head_commit` 上**必须通过**（`Fail-to-Pass`）；② **测试反作弊扫描**（禁删 `assert`、禁加 `@skip`/`xfail`、禁吞异常）；③ 原有关联测试套件与 Linter 全绿；④ 单审查器诚实披露未验证边界（`Unverified Risks`）。 |
+| **4. 自研白盒 Agent 内核 (`digital_employee.kernel`)** | 双态运行（`de code` 终端 TUI/Headless + 沙箱无人值守）：流式只读并发/写串行分批调度（`StreamingExecutor`）、双层上下文治理（L1 溢写落盘 + L2 锚定摘要与 `RecoveryState` 恢复）、缓存感知三态 MCP（`Eager`/`Native`/`Dispatch`）、`Explore` 子智能体与双层记忆、以及契约级 OS 内核沙箱（macOS `Seatbelt` / Linux `Bubblewrap`）+ 会话断点挂起/恢复。 |
+| **5. 7×24 运维告警排障与多语言门禁 (`Dev + QA + Ops`)** | 内置 `/webhooks/alert` 告警入口、`ops-incident-triage` 技能与 `ops-diagnostics` MCP 诊断服务；门禁强制执行多语言 **`Fail-to-Pass`**（Python/Node/Go）、**测试反作弊扫描**与单审查器盲区披露。 |
 | **6. 免公网 IP 下半场自动跟进 (`Follow-Through Poller`)** | 内置后台 GitHub 轮询器（每 30 秒巡检）与 Webhook 双通道：在 GitHub PR 页面直接留评论或遇线上 CI 失败时，自动唤醒原沙箱追改并推送新 Commit；人类合并 PR 后自动回写 `ACCEPTED_AND_CLOSED` 并核算净节省工时。 |
 | **7. 物理级安全边界 & 缓存感知计费** | 代码层硬拦截向 `main`/`master`/`release` 推送及修改 `.github/workflows/`、`.env`；公有云推理强制经过 DLP 密钥脱敏与 `<untrusted_input>` 防提示词注入隔离；内置 KV-Cache 命中折扣精确计费与任务预算熔断，单次常规修复成本约 `$0.02~$0.06`。 |
 

@@ -13,17 +13,23 @@ from digital_employee.sandbox.worktree_runner import WorktreeSandbox
 from digital_employee.security.dlp import check_path_policy
 
 SKIP_OR_XFAIL_RE = re.compile(
-    r"^\+.*(?:\bpytest\.skip\s*\(|\bpytest\.xfail\s*\(|@pytest\.mark\.skip\b|@pytest\.mark\.xfail\b|@unittest\.skip\b)"
+    r"^\+.*(?:\bpytest\.skip\s*\(|\bpytest\.xfail\s*\(|@pytest\.mark\.skip\b|@pytest\.mark\.xfail\b|"
+    r"@unittest\.skip\b|\b(?:it|test|describe)\.skip\s*\(|\bt\.Skip(?:Now|f)?\s*\()"
 )
-ASSERT_REMOVED_RE = re.compile(r"^-\s*assert\b")
-ASSERT_ADDED_RE = re.compile(r"^\+\s*(?:assert\b|with\s+pytest\.raises\b)")
+ASSERT_REMOVED_RE = re.compile(r"^-\s*(?:assert\b|expect\s*\()")
+ASSERT_ADDED_RE = re.compile(r"^\+\s*(?:assert\b|with\s+pytest\.raises\b|expect\s*\()")
 SWALLOW_EXCEPT_RE = re.compile(r"^\+\s*except\s+(?:Exception|BaseException)?\s*(?::|\s+as\s+\w+:)\s*pass\b")
 
 
 def is_test_path(rel_path: str) -> bool:
     parts = rel_path.replace("\\", "/").split("/")
     name = parts[-1]
-    return "tests" in parts or name.startswith("test_") or name.endswith("_test.py")
+    return (
+        "tests" in parts
+        or "__tests__" in parts
+        or name.startswith("test_")
+        or name.endswith(("_test.py", "_test.go", ".test.ts", ".test.tsx", ".spec.ts", ".test.js"))
+    )
 
 
 def scan_test_diff_for_tampering(diff_text: str) -> list[str]:
@@ -114,10 +120,10 @@ class EvidenceGate:
         if not repro_targets:
             logs.append("[FAIL] Missing `repro_test_target` — cannot establish Fail-to-Pass proof.")
         else:
-            head_repro = self.sandbox.run_pytest(repro_targets)
+            head_repro = self.sandbox.run_test_targets(repro_targets)
             repro_passed_on_head = head_repro.exit_code == 0
             logs.append(
-                f"\n--- [HEAD] pytest {repro_targets} (exit={head_repro.exit_code}) ---\n"
+                f"\n--- [HEAD] test {repro_targets} (exit={head_repro.exit_code}) ---\n"
                 f"{head_repro.combined_output[-2500:]}"
             )
 
@@ -135,16 +141,20 @@ class EvidenceGate:
                         dst_file.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(src_file, dst_file)
 
-                base_repro = self.sandbox.run_pytest(repro_targets, cwd=base_dir)
+                base_repro = self.sandbox.run_test_targets(repro_targets, cwd=base_dir)
                 # Pytest exit code 1 = tests collected and failed (valid Fail-to-Pass!).
                 # Exit code 2/3/4 = interrupted / internal / CLI usage error (invalid!).
-                repro_failed_on_base = base_repro.exit_code == 1 or (
-                    base_repro.exit_code != 0
-                    and ("FAILED" in base_repro.combined_output or "ERRORS" in base_repro.combined_output)
-                    and "usage: pytest" not in base_repro.combined_output
-                )
+                is_pytest_runner = any("pytest" in p for p in self.sandbox.profile.test_cmd)
+                if is_pytest_runner:
+                    repro_failed_on_base = base_repro.exit_code == 1 or (
+                        base_repro.exit_code != 0
+                        and ("FAILED" in base_repro.combined_output or "ERRORS" in base_repro.combined_output)
+                        and "usage: pytest" not in base_repro.combined_output
+                    )
+                else:
+                    repro_failed_on_base = base_repro.exit_code != 0 and not base_repro.timed_out
                 logs.append(
-                    f"\n--- [BASE] pytest {repro_targets} (exit={base_repro.exit_code}) ---\n"
+                    f"\n--- [BASE] test {repro_targets} (exit={base_repro.exit_code}) ---\n"
                     f"{base_repro.combined_output[-2500:]}"
                 )
             finally:
@@ -159,7 +169,7 @@ class EvidenceGate:
             )
         )
         if suite_targets:
-            suite_res = self.sandbox.run_pytest(suite_targets, timeout_seconds=120)
+            suite_res = self.sandbox.run_test_targets(suite_targets, timeout_seconds=120)
             suite_passed = suite_res.exit_code == 0
             logs.append(
                 f"\n--- [SUITE] pytest {suite_targets} (exit={suite_res.exit_code}) ---\n"
