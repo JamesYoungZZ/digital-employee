@@ -172,7 +172,11 @@ def test_web_control_plane_endpoints_and_feishu_challenge(tmp_path: Path) -> Non
     assert dash.status_code == 200
     assert "AI 研发数字员工控制台" in dash.text
 
-    js_asset = client.get("/static/app.js")
+    import re
+
+    asset_match = re.search(r'src="(/static/assets/[^"]+\.js)"', dash.text)
+    assert asset_match is not None
+    js_asset = client.get(asset_match.group(1))
     assert js_asset.status_code == 200
 
     challenge = client.post("/webhooks/feishu", json={"challenge": "lark-verify-xyz"})

@@ -19,3 +19,5 @@ worktrees/
 *.db-wal
 .DS_Store
 /claude-mem/
+frontend/node_modules/
+frontend/.vite/
