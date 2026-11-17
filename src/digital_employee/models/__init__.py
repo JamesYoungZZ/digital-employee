@@ -11,6 +11,7 @@ from digital_employee.models.state import (
     FailureClass,
     HandoffBundle,
     LifecycleStatus,
+    MergeApprovalCard,
     ReviewerReport,
     VerificationEvidence,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "FailureClass",
     "HandoffBundle",
     "LifecycleStatus",
+    "MergeApprovalCard",
     "RepositoryProfile",
     "ReviewerReport",
     "TaskContract",

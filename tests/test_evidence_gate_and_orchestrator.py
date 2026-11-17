@@ -377,7 +377,7 @@ def test_five_gate_auto_merge_and_blocking_pr_review_skill(tmp_path: Path) -> No
             permitted_scopes=["src", "tests"],
         ),
         lifecycle_status="PR_OPEN_FOLLOWING_UP",
-        auto_merge=True,
+        auto_merge=False,
         deliverable_pr_number=9,
         deliverable_pr_url="https://github.com/acme/demo/pull/9",
         head_commit_sha="aaaa11112222",
@@ -385,8 +385,9 @@ def test_five_gate_auto_merge_and_blocking_pr_review_skill(tmp_path: Path) -> No
     )
     orch.store.save_task(state)
 
-    # Gate 2 blocks auto-merge when PR Review Agent verdict is BLOCK
-    res_blocked = orch.try_auto_merge("t-merge-1")
+    # Gate 2 blocks approval card when PR Review Agent verdict is BLOCK
+    res_blocked = orch.check_and_emit_merge_approval("t-merge-1")
+    assert res_blocked["ready"] is False
     assert res_blocked["merged"] is False
 
     # Upgrade report to APPROVE (0 blocking issues)
@@ -401,23 +402,35 @@ def test_five_gate_auto_merge_and_blocking_pr_review_skill(tmp_path: Path) -> No
     orch.github.fetch_pr_state = MagicMock(  # type: ignore[method-assign]
         return_value={"state": "open", "draft": False, "merged": False, "mergeable": True, "head": {"sha": "aaaa11112222"}}
     )
-    # Gate 3 holds auto-merge while GitHub Actions CI is pending
+    # Gate 3 waits while GitHub Actions CI is pending
     orch.github.inspect_commit_ci_status = MagicMock(  # type: ignore[method-assign]
         return_value={"state": "pending", "failed_checks": [], "total": 2}
     )
-    assert orch.try_auto_merge("t-merge-1")["merged"] is False
+    assert orch.check_and_emit_merge_approval("t-merge-1")["ready"] is False
 
-    # Once CI turns green, all 5 Gates pass -> Squash Merge & ACCEPTED_AND_CLOSED!
+    # Once CI turns green, emits MergeApprovalCard & enters WAITING_MERGE_APPROVAL (does NOT auto-merge!)
     orch.github.inspect_commit_ci_status = MagicMock(  # type: ignore[method-assign]
         return_value={"state": "passed", "failed_checks": [], "total": 2}
     )
     orch.github.merge_pull_request = MagicMock(return_value={"sha": "merged9999"})  # type: ignore[method-assign]
     orch.github.post_pr_comment = MagicMock(return_value="ok")  # type: ignore[method-assign]
 
-    merged_res = orch.try_auto_merge("t-merge-1")
+    approval_res = orch.check_and_emit_merge_approval("t-merge-1")
+    assert approval_res["ready"] is True
+    assert approval_res["merged"] is False
+    waiting_state = orch.store.get_task("t-merge-1")
+    assert waiting_state is not None
+    assert waiting_state.lifecycle_status == "WAITING_MERGE_APPROVAL"
+    assert waiting_state.merge_approval_card is not None
+    assert orch.github.merge_pull_request.call_count == 0
+
+    # When human clicks Approve on Console or Feishu Card -> Squash Merge & ACCEPTED_AND_CLOSED!
+    merged_res = orch.approve_and_merge("t-merge-1", approved_by="feishu_card")
     assert merged_res["merged"] is True
     final_state = orch.store.get_task("t-merge-1")
     assert final_state is not None
     assert final_state.lifecycle_status == "ACCEPTED_AND_CLOSED"
     assert final_state.merged_commit_sha == "merged9999"
+    assert final_state.merge_approval_card is not None
+    assert final_state.merge_approval_card.approved_by == "feishu_card"
 

@@ -12,7 +12,7 @@ class CreateTaskPayload(BaseModel):
     accept_defaults: bool = False
     auto_execute: bool = True
     publish_pr: bool = True
-    auto_merge: bool = True
+    auto_merge: bool = False
 
 
 class ClarifyPayload(BaseModel):

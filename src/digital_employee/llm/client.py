@@ -256,7 +256,7 @@ class LLMClient:
         messages: list[dict[str, Any]],
         *,
         model: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
     ) -> tuple[dict[str, Any], LLMCallMetrics]:
         msg, metrics = self.chat(
             messages,
@@ -264,5 +264,29 @@ class LLMClient:
             json_mode=True,
             max_tokens=max_tokens,
         )
-        parsed = extract_json_object(msg.get("content") or "")
+        content = (msg.get("content") or "").strip()
+        if not content:
+            # Reasoning models may exhaust max_tokens in reasoning_content; retry with concise directive
+            retry_msgs = [
+                *messages,
+                {
+                    "role": "user",
+                    "content": "Keep internal reasoning brief and output ONLY the final JSON object now.",
+                },
+            ]
+            msg2, metrics2 = self.chat(
+                retry_msgs,
+                model=model,
+                json_mode=True,
+                max_tokens=8192,
+            )
+            metrics = LLMCallMetrics(
+                prompt_tokens=metrics.prompt_tokens + metrics2.prompt_tokens,
+                completion_tokens=metrics.completion_tokens + metrics2.completion_tokens,
+                estimated_cost_usd=round(
+                    metrics.estimated_cost_usd + metrics2.estimated_cost_usd, 6
+                ),
+            )
+            content = (msg2.get("content") or "").strip()
+        parsed = extract_json_object(content)
         return parsed, metrics

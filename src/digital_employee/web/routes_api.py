@@ -14,6 +14,7 @@ from digital_employee.integrations.feishu_cards import (
     build_clarification_card,
     build_evidence_report_card,
     build_handoff_card,
+    build_merge_approval_card,
     build_test_connection_card,
     parse_feishu_command,
 )
@@ -128,7 +129,12 @@ def build_api_router(
             d["estimated_net_minutes_saved"] = (
                 t.estimated_net_minutes_saved
                 if t.lifecycle_status
-                in ("PR_OPEN_FOLLOWING_UP", "DELIVERED_LOCAL_READY", "ACCEPTED_AND_CLOSED")
+                in (
+                    "PR_OPEN_FOLLOWING_UP",
+                    "WAITING_MERGE_APPROVAL",
+                    "DELIVERED_LOCAL_READY",
+                    "ACCEPTED_AND_CLOSED",
+                )
                 else None
             )
             items.append(d)
@@ -151,6 +157,8 @@ def build_api_router(
         # Build live Feishu card preview matching current lifecycle stage
         if state.lifecycle_status == "WAITING_CLARIFICATION":
             active_card = build_clarification_card(state, orch.web_base_url)
+        elif state.lifecycle_status == "WAITING_MERGE_APPROVAL":
+            active_card = build_merge_approval_card(state, orch.web_base_url)
         elif state.lifecycle_status == "HANDED_OFF_INCOMPLETE":
             active_card = build_handoff_card(state, orch.web_base_url)
         elif state.verification_evidence is not None:

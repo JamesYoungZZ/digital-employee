@@ -19,6 +19,7 @@ export interface MetricsInfo {
   contract_confirmed: number;
   evidence_gate_passed: number;
   delivered_ready: number;
+  pending_merge_approval?: number;
   accepted_without_rework: number;
   handed_off_incomplete: number;
   abandoned_or_reverted: number;
@@ -107,6 +108,21 @@ export interface VerificationEvidence {
   reviewer_report?: ReviewerReport | null;
 }
 
+export interface MergeApprovalCardInfo {
+  pr_number: number;
+  pr_url: string;
+  verified_commit_sha: string;
+  ci_checks_count: number;
+  reviewer_model: string;
+  reviewer_verdict: string;
+  reviewer_summary: string;
+  repro_test_target: string;
+  residual_risk: string;
+  ready_at: string;
+  approved_by?: string | null;
+  approved_at?: string | null;
+}
+
 export interface HandoffBundle {
   reason: string;
   failure_class: string;
@@ -131,6 +147,7 @@ export interface TaskItem {
   worktree_path: string;
   head_commit_sha?: string | null;
   verification_evidence?: VerificationEvidence | null;
+  merge_approval_card?: MergeApprovalCardInfo | null;
   handoff_bundle?: HandoffBundle | null;
   deliverable_pr_url?: string | null;
   deliverable_pr_number?: number | null;

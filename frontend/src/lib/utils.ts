@@ -30,8 +30,9 @@ export const STATUS_META: Record<
   RUNNING_IN_SANDBOX: { label: "沙箱执行中", tone: "blue", pulse: true },
   VERIFYING_EVIDENCE: { label: "门禁验证中", tone: "purple", pulse: true },
   DELIVERED_LOCAL_READY: { label: "本地分支就绪", tone: "emerald" },
-  PR_OPEN_FOLLOWING_UP: { label: "PR 审查/CI 跟进中", tone: "emerald", pulse: true },
-  ACCEPTED_AND_CLOSED: { label: "已自动合入闭环", tone: "emerald" },
+  PR_OPEN_FOLLOWING_UP: { label: "PR 等待 CI 中", tone: "blue", pulse: true },
+  WAITING_MERGE_APPROVAL: { label: "待你审批合入", tone: "emerald", pulse: true },
+  ACCEPTED_AND_CLOSED: { label: "已审批合入闭环", tone: "emerald" },
   HANDED_OFF_INCOMPLETE: { label: "已交接人工", tone: "red" },
   ABANDONED_OR_REVERTED: { label: "已废弃", tone: "zinc" },
 };

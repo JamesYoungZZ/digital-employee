@@ -63,6 +63,31 @@ def build_webhook_router(orch: DelegationOrchestrator) -> APIRouter:
                         "content": f"已确认选项「{ans[:18]}」，沙箱开始执行！",
                     }
                 }
+            if tid and act == "approve_merge":
+                background_tasks.add_task(
+                    orch.approve_and_merge,
+                    tid,
+                    approved_by="feishu_card",
+                )
+                return {
+                    "toast": {
+                        "type": "success",
+                        "content": f"已批准合入！正在自动 Squash Merge 任务 {tid} 的 PR...",
+                    }
+                }
+            if tid and act == "reject_merge":
+                background_tasks.add_task(
+                    orch.update_scope_or_cancel,
+                    tid,
+                    action="abandon",
+                    note="Rejected via Feishu merge approval card",
+                )
+                return {
+                    "toast": {
+                        "type": "info",
+                        "content": f"已拒绝合入任务 {tid}。",
+                    }
+                }
 
         # 3. Feishu Incoming Chat Message (`im.message.receive_v1`)
         if event_type == "im.message.receive_v1":

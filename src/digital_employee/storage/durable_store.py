@@ -230,11 +230,15 @@ class DurableStore:
             for t in tasks
             if t.verification_evidence and t.verification_evidence.passed_all_hard_gates
         )
-        delivered = sum(
-            1
-            for t in tasks
-            if t.lifecycle_status
-            in ("PR_OPEN_FOLLOWING_UP", "DELIVERED_LOCAL_READY", "ACCEPTED_AND_CLOSED")
+        delivered_states = (
+            "PR_OPEN_FOLLOWING_UP",
+            "WAITING_MERGE_APPROVAL",
+            "DELIVERED_LOCAL_READY",
+            "ACCEPTED_AND_CLOSED",
+        )
+        delivered = sum(1 for t in tasks if t.lifecycle_status in delivered_states)
+        pending_approval = sum(
+            1 for t in tasks if t.lifecycle_status == "WAITING_MERGE_APPROVAL"
         )
         accepted = sum(1 for t in tasks if t.lifecycle_status == "ACCEPTED_AND_CLOSED")
         handed_off = sum(1 for t in tasks if t.lifecycle_status == "HANDED_OFF_INCOMPLETE")
@@ -243,8 +247,7 @@ class DurableStore:
         net_minutes_saved = sum(
             t.estimated_net_minutes_saved
             for t in tasks
-            if t.lifecycle_status
-            in ("PR_OPEN_FOLLOWING_UP", "DELIVERED_LOCAL_READY", "ACCEPTED_AND_CLOSED")
+            if t.lifecycle_status in delivered_states
         )
         total_cost = round(sum(t.total_cost_usd for t in tasks), 4)
 
@@ -253,6 +256,7 @@ class DurableStore:
             "contract_confirmed": clarified_or_queued,
             "evidence_gate_passed": evidence_passed,
             "delivered_ready": delivered,
+            "pending_merge_approval": pending_approval,
             "accepted_without_rework": accepted,
             "handed_off_incomplete": handed_off,
             "abandoned_or_reverted": abandoned,

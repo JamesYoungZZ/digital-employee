@@ -53,7 +53,10 @@ class GitHubFollowThroughPoller:
             return 0
 
         actions = 0
-        open_tasks = self.orch.store.list_tasks(status="PR_OPEN_FOLLOWING_UP", limit=30)
+        open_tasks = [
+            *self.orch.store.list_tasks(status="PR_OPEN_FOLLOWING_UP", limit=30),
+            *self.orch.store.list_tasks(status="WAITING_MERGE_APPROVAL", limit=30),
+        ]
         for state in open_tasks:
             if not state.deliverable_pr_number:
                 continue
@@ -143,13 +146,13 @@ class GitHubFollowThroughPoller:
                     actions += 1
                     continue
 
-            # 4. Evaluate 5-Gate Auto-Merge once CI checks pass & PR Review APPROVED
-            if state.auto_merge:
+            # 4. When in PR_OPEN_FOLLOWING_UP, check if Review + CI passed to push Approval Card
+            if state.lifecycle_status == "PR_OPEN_FOLLOWING_UP":
                 try:
-                    merge_res = self.orch.try_auto_merge(state.task_id)
-                    if merge_res.get("merged"):
+                    gate_res = self.orch.check_and_emit_merge_approval(state.task_id)
+                    if gate_res.get("ready") or gate_res.get("merged"):
                         actions += 1
                 except Exception as merge_exc:
-                    logger.warning("Auto-merge check failed for %s: %s", state.task_id, merge_exc)
+                    logger.warning("Approval gate check failed for %s: %s", state.task_id, merge_exc)
 
         return actions

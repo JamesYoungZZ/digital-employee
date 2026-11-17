@@ -43,6 +43,8 @@ export function App() {
   });
   const [taskDetail, setTaskDetail] = React.useState<TaskDetailResponse | null>(null);
   const [syncing, setSyncing] = React.useState(false);
+  const notifiedApprovalsRef = React.useRef<Set<string>>(new Set());
+  const initializedRef = React.useRef<boolean>(false);
 
   React.useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -60,6 +62,23 @@ export function App() {
     setMetrics(m);
     setRepos(r);
     setTasks(t);
+
+    // Push toast notification when a new Merge Approval Card arrives
+    const currentApprovals = t.filter((x) => x.lifecycle_status === "WAITING_MERGE_APPROVAL");
+    if (!initializedRef.current) {
+      currentApprovals.forEach((x) => notifiedApprovalsRef.current.add(x.task_id));
+      initializedRef.current = true;
+    } else {
+      currentApprovals.forEach((x) => {
+        if (!notifiedApprovalsRef.current.has(x.task_id)) {
+          notifiedApprovalsRef.current.add(x.task_id);
+          toast.success(
+            `新合入审批卡已送达：PR #${x.deliverable_pr_number ?? ""} 独立审查与线上 CI 已全绿，请审批合入！`,
+            { duration: 8000 }
+          );
+        }
+      });
+    }
   }, []);
 
   const syncSelectedDetail = React.useCallback(async (tid: string | null) => {
@@ -125,9 +144,9 @@ export function App() {
 
         <nav className="mt-5 space-y-1 flex-1">
           {[
-            { id: "workbench" as const, label: "任务委托工作台", icon: LayoutDashboard },
-            { id: "repos" as const, label: "仓库与决策账本", icon: FolderGit2 },
-            { id: "feishu" as const, label: "飞书交互与通道", icon: MessageSquareShare },
+            { id: "workbench" as const, label: "任务委托工作台", icon: LayoutDashboard, badge: tasks.filter((x) => x.lifecycle_status === "WAITING_MERGE_APPROVAL").length },
+            { id: "repos" as const, label: "仓库与决策账本", icon: FolderGit2, badge: 0 },
+            { id: "feishu" as const, label: "飞书交互与通道", icon: MessageSquareShare, badge: 0 },
           ].map((item) => {
             const Icon = item.icon;
             const active = tab === item.id;
@@ -137,14 +156,21 @@ export function App() {
                 type="button"
                 onClick={() => setTab(item.id)}
                 className={cn(
-                  "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-xs font-medium transition-colors cursor-pointer",
+                  "flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs font-medium transition-colors cursor-pointer",
                   active
                     ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 shadow-2xs"
                     : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
                 )}
               >
-                <Icon className="h-4 w-4 shrink-0" />
-                <span>{item.label}</span>
+                <span className="flex items-center gap-2.5">
+                  <Icon className="h-4 w-4 shrink-0" />
+                  <span>{item.label}</span>
+                </span>
+                {item.badge > 0 && (
+                  <span className="rounded-full bg-emerald-500 px-1.5 py-0.2 text-[10.5px] font-semibold text-white tabular-nums">
+                    {item.badge}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -231,6 +257,7 @@ export function App() {
                 await syncAll();
                 setSelectedTaskId(tid);
               }}
+              onMutated={syncAll}
             />
           )}
 

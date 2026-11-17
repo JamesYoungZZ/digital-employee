@@ -27,6 +27,7 @@ LifecycleStatus = Literal[
     "RUNNING_IN_SANDBOX",
     "VERIFYING_EVIDENCE",
     "PR_OPEN_FOLLOWING_UP",
+    "WAITING_MERGE_APPROVAL",
     "DELIVERED_LOCAL_READY",
     "HANDED_OFF_INCOMPLETE",
     "ACCEPTED_AND_CLOSED",
@@ -102,6 +103,23 @@ class VerificationEvidence(BaseModel):
         )
 
 
+class MergeApprovalCard(BaseModel):
+    """Interactive Merge Approval Card emitted once all 4 automated pre-merge gates pass."""
+
+    pr_number: int
+    pr_url: str
+    verified_commit_sha: str
+    ci_checks_count: int = 0
+    reviewer_model: str = ""
+    reviewer_verdict: str = "APPROVE"
+    reviewer_summary: str = ""
+    repro_test_target: str = ""
+    residual_risk: str = ""
+    ready_at: str = Field(default_factory=utc_now_iso)
+    approved_by: str | None = None
+    approved_at: str | None = None
+
+
 class HandoffBundle(BaseModel):
     """Structured handoff package when a task is cancelled, blocked, or exceeds budget/retries."""
 
@@ -131,7 +149,7 @@ class DurableTaskState(BaseModel):
     contract: TaskContract
     lifecycle_status: LifecycleStatus = "DRAFTING_CONTRACT"
     auto_publish_pr: bool = False
-    auto_merge: bool = True
+    auto_merge: bool = False
 
     # 3. Idempotency & external side-effect ledger
     recorded_operations: dict[str, str] = Field(default_factory=dict)
@@ -142,6 +160,7 @@ class DurableTaskState(BaseModel):
     head_commit_sha: str | None = None
     patch_artifact_uri: str | None = None
     verification_evidence: VerificationEvidence | None = None
+    merge_approval_card: MergeApprovalCard | None = None
     handoff_bundle: HandoffBundle | None = None
     deliverable_pr_url: str | None = None
     deliverable_pr_number: int | None = None

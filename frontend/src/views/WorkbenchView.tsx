@@ -1,10 +1,12 @@
 import React from "react";
 import {
   ArrowUpRight,
+  BellRing,
   CheckCircle2,
   Clock,
   Coins,
   Command,
+  FileDiff,
   GitMerge,
   GitPullRequestDraft,
   Layers,
@@ -28,13 +30,15 @@ interface Props {
   selectedTaskId: string | null;
   onSelectTask: (taskId: string) => void;
   onCreatedTask: (taskId: string) => Promise<void>;
+  onMutated: () => Promise<void>;
 }
 
 const FILTERS = [
   { id: "ALL", label: "全部任务" },
+  { id: "WAITING_MERGE_APPROVAL", label: "待审批合入" },
   { id: "WAITING_CLARIFICATION", label: "待你拍板" },
   { id: "ACTIVE", label: "沙箱运行中" },
-  { id: "READY", label: "待审阅 PR" },
+  { id: "READY", label: "等待 CI 中" },
   { id: "ACCEPTED_AND_CLOSED", label: "已合入闭环" },
   { id: "HANDED_OFF_INCOMPLETE", label: "已交接现场" },
 ] as const;
@@ -67,14 +71,52 @@ export function WorkbenchView({
   selectedTaskId,
   onSelectTask,
   onCreatedTask,
+  onMutated,
 }: Props) {
   const [targetRepo, setTargetRepo] = React.useState("");
   const [prompt, setPrompt] = React.useState("");
   const [publishPr, setPublishPr] = React.useState(true);
-  const [autoMerge, setAutoMerge] = React.useState(true);
   const [acceptDefaults, setAcceptDefaults] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
+  const [mergingId, setMergingId] = React.useState<string | null>(null);
   const [filter, setFilter] = React.useState<string>("ALL");
+
+  const pendingApprovalTasks = React.useMemo(
+    () => tasks.filter((t) => t.lifecycle_status === "WAITING_MERGE_APPROVAL"),
+    [tasks]
+  );
+
+  const handleApproveMerge = async (taskId: string) => {
+    setMergingId(taskId);
+    try {
+      await apiFetch(`/api/tasks/${encodeURIComponent(taskId)}/control`, {
+        method: "POST",
+        body: JSON.stringify({ action: "approve_merge", note: "console_approval_card" }),
+      });
+      toast.success("已批准！系统已在 GitHub 自动完成 Squash Merge 合入");
+      await onMutated();
+    } catch (err: any) {
+      toast.error(`合入失败: ${err.message}`);
+    } finally {
+      setMergingId(null);
+    }
+  };
+
+  const handleRejectMerge = async (taskId: string) => {
+    setMergingId(taskId);
+    try {
+      await apiFetch(`/api/tasks/${encodeURIComponent(taskId)}/control`, {
+        method: "POST",
+        body: JSON.stringify({ action: "abandon", note: "rejected_on_console_card" }),
+      });
+      toast.info("已拒绝该合入请求");
+      await onMutated();
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setMergingId(null);
+    }
+  };
 
   React.useEffect(() => {
     if (!targetRepo && repos.length > 0) {
@@ -93,7 +135,7 @@ export function WorkbenchView({
           target_repo: targetRepo,
           raw_request: prompt.trim(),
           publish_pr: publishPr,
-          auto_merge: autoMerge,
+          auto_merge: false,
           accept_defaults: acceptDefaults,
           auto_execute: true,
         }),
@@ -164,6 +206,126 @@ export function WorkbenchView({
         })}
       </div>
 
+      {/* Interactive Merge Approval Notification Cards (Console + Feishu Sync) */}
+      {pendingApprovalTasks.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+              <BellRing className="h-4 w-4 animate-bounce" />
+              <span>
+                待你审批自动合入 ({pendingApprovalTasks.length} 张审批卡 — 接入飞书后同步推送至手机飞书审批)
+              </span>
+            </div>
+          </div>
+
+          <div className="grid gap-3">
+            {pendingApprovalTasks.map((t) => {
+              const mc = t.merge_approval_card;
+              const ev = t.verification_evidence;
+              const busy = mergingId === t.task_id;
+              return (
+                <div
+                  key={t.task_id}
+                  className="rounded-xl border border-emerald-500/45 bg-gradient-to-r from-emerald-500/8 via-white to-white p-5 shadow-md dark:from-emerald-500/12 dark:via-zinc-900 dark:to-zinc-900 space-y-3.5"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2 py-0.5 text-[11px] font-semibold text-white">
+                          <ShieldCheck className="h-3 w-3" />
+                          审查与线上 CI 已全绿 · 待审批合入
+                        </span>
+                        <span className="font-mono text-xs font-semibold text-zinc-800 dark:text-zinc-200">
+                          {t.task_id}
+                        </span>
+                        <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-600 dark:text-zinc-300">
+                          {t.contract.target_repo} ({t.branch_name} → {t.contract.base_branch})
+                        </code>
+                        {t.deliverable_pr_url && (
+                          <a
+                            href={t.deliverable_pr_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+                          >
+                            PR #{t.deliverable_pr_number}
+                            <ArrowUpRight className="h-3.5 w-3.5" />
+                          </a>
+                        )}
+                      </div>
+                      <h4 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                        {t.contract.objective}
+                      </h4>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        variant="emerald"
+                        size="lg"
+                        disabled={busy}
+                        onClick={() => handleApproveMerge(t.task_id)}
+                      >
+                        {busy ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <GitMerge className="h-4 w-4" />
+                        )}
+                        批准并自动 Squash 合入
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="default"
+                        onClick={() => onSelectTask(t.task_id)}
+                      >
+                        <FileDiff className="h-3.5 w-3.5" />
+                        审阅 Diff / 追改
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="default"
+                        disabled={busy}
+                        onClick={() => handleRejectMerge(t.task_id)}
+                      >
+                        拒绝
+                      </Button>
+                    </div>
+                  </div>
+
+                  {/* Evidence & Independent PR Review Digest */}
+                  <div className="grid sm:grid-cols-3 gap-2.5 text-xs">
+                    <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white/70 dark:bg-zinc-950/60 px-3 py-2">
+                      <span className="text-zinc-400 block text-[11px]">沙箱回归测试 (Fail → Pass)</span>
+                      <span className="font-mono text-[11.5px] text-emerald-600 dark:text-emerald-400 font-medium">
+                        ✅ {mc?.repro_test_target || ev?.repro_test_target}
+                      </span>
+                    </div>
+                    <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white/70 dark:bg-zinc-950/60 px-3 py-2">
+                      <span className="text-zinc-400 block text-[11px]">独立跨模型 PR Review Agent</span>
+                      <span className="font-medium text-emerald-600 dark:text-emerald-400">
+                        ✅ APPROVE · 0 Blocking ({mc?.reviewer_model || ev?.reviewer_report?.reviewer_model})
+                      </span>
+                    </div>
+                    <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white/70 dark:bg-zinc-950/60 px-3 py-2">
+                      <span className="text-zinc-400 block text-[11px]">线上 GitHub Actions CI</span>
+                      <span className="font-medium text-emerald-600 dark:text-emerald-400">
+                        ✅ {mc?.ci_checks_count ?? 2} 项流水线检查全绿
+                      </span>
+                    </div>
+                  </div>
+
+                  {(mc?.reviewer_summary || ev?.reviewer_report?.summary) && (
+                    <p className="text-xs text-zinc-600 dark:text-zinc-300 leading-relaxed">
+                      <b className="text-zinc-800 dark:text-zinc-200">PR Review 简报：</b>
+                      {mc?.reviewer_summary || ev?.reviewer_report?.summary}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Command-Bar Delegation Composer */}
       <SurfaceCard className="p-5">
         <form onSubmit={handleSubmit} className="space-y-3.5">
@@ -228,12 +390,7 @@ export function WorkbenchView({
 
               <label className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
                 <Switch checked={publishPr} onCheckedChange={setPublishPr} />
-                <span>自动创建正式 PR</span>
-              </label>
-
-              <label className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
-                <Switch checked={autoMerge} onCheckedChange={setAutoMerge} disabled={!publishPr} />
-                <span>Review + CI 全绿自动合入</span>
+                <span>自动创建正式 PR（过审+CI全绿后推合入审批卡）</span>
               </label>
 
               <label className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">

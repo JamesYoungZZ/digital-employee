@@ -210,14 +210,25 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
               )
             )}
 
-            <Button
-              variant="emerald"
-              disabled={!!busyAction || t.lifecycle_status === "ACCEPTED_AND_CLOSED"}
-              onClick={() => runControl("accept")}
-            >
-              <CheckCircle2 className="h-3.5 w-3.5" />
-              采纳合入
-            </Button>
+            {t.lifecycle_status === "WAITING_MERGE_APPROVAL" ? (
+              <Button
+                variant="emerald"
+                disabled={!!busyAction}
+                onClick={() => runControl("approve_merge")}
+              >
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                批准并自动 Squash 合入
+              </Button>
+            ) : (
+              <Button
+                variant="emerald"
+                disabled={!!busyAction || t.lifecycle_status === "ACCEPTED_AND_CLOSED"}
+                onClick={() => runControl("accept")}
+              >
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                标记已采纳
+              </Button>
+            )}
 
             <Button
               variant="outline"
@@ -236,6 +247,27 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
         {/* Scrollable Body */}
         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
           {/* Active Running Banner */}
+          {t.lifecycle_status === "WAITING_MERGE_APPROVAL" && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-3.5 text-xs text-emerald-800 dark:text-emerald-200">
+              <div>
+                <div className="font-semibold text-sm">
+                  🛎️ 全部 4 道前置门禁与线上 GitHub Actions CI 已通过，等待你的合入审批
+                </div>
+                <div className="mt-0.5 opacity-85">
+                  点击右侧按钮（或在飞书审批卡上点批准）将立即执行 SHA 锁定的自动 Squash Merge。
+                </div>
+              </div>
+              <Button
+                variant="emerald"
+                disabled={!!busyAction}
+                onClick={() => runControl("approve_merge")}
+              >
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                批准并自动 Squash 合入
+              </Button>
+            </div>
+          )}
+
           {isRunning && (
             <div className="flex items-center gap-3 rounded-xl border border-blue-500/30 bg-blue-500/8 px-4 py-3 text-xs text-blue-700 dark:text-blue-300">
               <Loader2 className="h-4 w-4 animate-spin shrink-0 text-blue-500" />

@@ -202,6 +202,83 @@ def build_evidence_report_card(
     }
 
 
+def build_merge_approval_card(
+    state: DurableTaskState, web_base_url: str = "http://127.0.0.1:8020"
+) -> dict[str, Any]:
+    """Build interactive Merge Approval Card pushed once PR Review + GitHub CI both pass."""
+    mc = state.merge_approval_card
+    ev = state.verification_evidence
+    pr_num = mc.pr_number if mc else (state.deliverable_pr_number or 0)
+    pr_url = (mc.pr_url if mc else state.deliverable_pr_url) or web_base_url
+    rev_model = mc.reviewer_model if mc else (
+        ev.reviewer_report.reviewer_model if (ev and ev.reviewer_report) else ""
+    )
+    rev_summary = mc.reviewer_summary if mc else (
+        ev.reviewer_report.summary if (ev and ev.reviewer_report) else ""
+    )
+    ci_cnt = mc.ci_checks_count if mc else 0
+    risk_line = mc.residual_risk if mc else (
+        ev.unverified_risks[0] if (ev and ev.unverified_risks) else "无额外未覆盖风险"
+    )
+
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "header": {
+                "title": {
+                    "tag": "plain_text",
+                    "content": f"🛎️ 待你审批合入 | PR #{pr_num} 审查与 CI 已全绿",
+                },
+                "template": "green",
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"**任务目标**：{state.contract.objective}\n"
+                        f"**目标分支**：`{state.branch_name}` → `{state.contract.base_branch}` (`{(state.head_commit_sha or '')[:8]}`)\n"
+                        f"- **回归门禁 (`Fail → Pass`)**：`{ev.repro_test_target if ev else ''}` ✅\n"
+                        f"- **独立跨模型 PR Review (`{rev_model}`)**：`APPROVE · 0 Blocking` ✅\n"
+                        f"- **线上 GitHub Actions CI**：`{ci_cnt} 项检查全部通过` ✅\n\n"
+                        f"**审查摘要**：{rev_summary}\n"
+                        f"**残余边界提示**：{risk_line}\n\n"
+                        f"*点击下方「批准并自动合入」或直接回复 `批准` / `#{state.task_id} 批准`，系统将立即执行 Squash Merge。*"
+                    ),
+                },
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "✅ 批准并自动合入"},
+                            "type": "primary",
+                            "value": {
+                                "action": "approve_merge",
+                                "task_id": state.task_id,
+                            },
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "查看 GitHub PR"},
+                            "type": "default",
+                            "url": pr_url,
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "暂缓 / 拒绝"},
+                            "type": "default",
+                            "value": {
+                                "action": "reject_merge",
+                                "task_id": state.task_id,
+                            },
+                        },
+                    ],
+                },
+            ],
+        },
+    }
+
+
 def build_handoff_card(
     state: DurableTaskState, web_base_url: str = "http://127.0.0.1:8020"
 ) -> dict[str, Any]:
@@ -286,15 +363,21 @@ def parse_feishu_command(
     if not cleaned:
         return {"intent": "empty"}
 
+    # 0. Quick merge approval reply ("批准", "同意合入", "合入", "approve", "merge")
+    if cleaned.lower() in {"批准", "同意合入", "合入", "批准合入", "approve", "merge", "lgtm"}:
+        return {"intent": "quick_approve_merge"}
+
     # 1. Quick clarification reply ("默认", "继续", "1", "2")
     if cleaned.lower() in {"默认", "继续", "确认", "default", "ok", "yes", "1", "2"}:
         return {"intent": "quick_clarify", "choice": cleaned}
 
-    # 2. Follow-up on specific task ID ("#t-20261116-abcdef 补充单测")
+    # 2. Follow-up or targeted approval on specific task ID ("#t-20261116-abcdef 补充单测")
     task_match = TASK_TAG_RE.search(cleaned)
     if task_match:
         tid = task_match.group(1).lower()
         rest = (cleaned[: task_match.start()] + cleaned[task_match.end() :]).strip(" :：,，")
+        if rest.lower() in {"批准", "同意合入", "合入", "批准合入", "approve", "merge", "lgtm"}:
+            return {"intent": "task_approve_merge", "task_id": tid}
         if rest in {"默认", "继续", "default"}:
             return {"intent": "task_clarify_default", "task_id": tid}
         if rest:
