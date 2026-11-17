@@ -19,6 +19,7 @@ from digital_employee.integrations.feishu_cards import (
     build_evidence_report_card,
     build_handoff_card,
     build_merge_approval_card,
+    build_noop_verified_card,
     parse_feishu_command,
 )
 from digital_employee.integrations.github_client import (
@@ -31,6 +32,7 @@ from digital_employee.models.state import (
     FailureClass,
     HandoffBundle,
     MergeApprovalCard,
+    VerificationEvidence,
     utc_now_iso,
 )
 from digital_employee.sandbox.worktree_runner import WorktreeSandbox
@@ -321,6 +323,85 @@ class DelegationOrchestrator:
             if not outcome.completed:
                 feedback = "Coding loop exhausted step limit without calling `finish_task`. Focus directly on minimal fix + `finish_task`."
                 continue
+
+            if outcome.is_noop:
+                dirty_files = sandbox.modified_files(state.contract.base_commit_sha)
+                if dirty_files:
+                    feedback = (
+                        f"`finish_noop` rejected: worktree has modified files {dirty_files}. "
+                        "Either revert unintended edits before `finish_noop`, or verify via `finish_task`."
+                    )
+                    self.store.save_task(
+                        state,
+                        step_name=f"noop_rejected_{attempt}",
+                        note=feedback[:300],
+                    )
+                    continue
+
+                noop_targets = outcome.noop_test_targets or ["tests"]
+                state.lifecycle_status = "VERIFYING_EVIDENCE"
+                self.store.save_task(
+                    state,
+                    step_name=f"verifying_noop_{attempt}",
+                    note=f"Deterministically verifying No-Op claim on {noop_targets}",
+                )
+                noop_res = sandbox.run_pytest(noop_targets, timeout_seconds=120)
+                if noop_res.exit_code != 0 or "passed" not in noop_res.combined_output:
+                    feedback = (
+                        f"`finish_noop` rejected: independent pytest run on {noop_targets} "
+                        f"exited with code {noop_res.exit_code}.\n{noop_res.combined_output[-1500:]}"
+                    )
+                    self.store.save_task(
+                        state,
+                        step_name=f"noop_rejected_{attempt}",
+                        note=feedback[:400],
+                    )
+                    continue
+
+                full_noop_log = (
+                    "=== Agent Trace ===\n"
+                    + "\n".join(all_traces)
+                    + f"\n\n=== Deterministic No-Op Verification ({noop_targets}) ===\n"
+                    + f"exit_code={noop_res.exit_code}\n{noop_res.combined_output}"
+                )
+                log_uri = self.store.write_artifact(
+                    task_id, f"verification_noop_{attempt}.log", full_noop_log
+                )
+                state.head_commit_sha = state.contract.base_commit_sha
+                state.verification_evidence = VerificationEvidence(
+                    verified_commit_sha=state.contract.base_commit_sha,
+                    repro_test_target=", ".join(noop_targets),
+                    repro_test_failed_on_base=False,
+                    repro_test_passed_on_head=True,
+                    existing_test_suite_passed=True,
+                    tests_weakened_check=True,
+                    scope_compliance_check=True,
+                    static_analysis_passed=True,
+                    noop_verified=True,
+                    noop_summary=outcome.summary,
+                    artifact_log_uri=log_uri,
+                )
+                state.failure_class = "NONE"
+                state.failure_reason = None
+                state.handoff_bundle = None
+                state.lifecycle_status = "ACCEPTED_AND_CLOSED"
+
+                noop_card = build_noop_verified_card(state, self.web_base_url)
+                self.store.write_artifact(task_id, "feishu_noop_card.json", noop_card)
+                try:
+                    self.store.run_idempotent(
+                        state,
+                        "notify_noop_card",
+                        lambda nc=noop_card: self.feishu.send_card(nc, chat_id=state.feishu_chat_id),
+                    )
+                except Exception:
+                    pass
+
+                return self.store.save_task(
+                    state,
+                    step_name="noop_verified_and_closed",
+                    note=f"No-Op verified (`{', '.join(noop_targets)}` passed with 0 edits): {outcome.summary[:240]}",
+                )
 
             # Commit changes on `ai-agent/{task_id}` and save patch artifact
             try:

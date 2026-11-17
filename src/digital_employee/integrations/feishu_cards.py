@@ -321,6 +321,51 @@ def build_handoff_card(
     }
 
 
+def build_noop_verified_card(
+    state: DurableTaskState, web_base_url: str = "http://127.0.0.1:8020"
+) -> dict[str, Any]:
+    """Build clean No-Op completion card when sandbox test suite is already 100% green."""
+    ev = state.verification_evidence
+    summary = ev.noop_summary if (ev and ev.noop_summary) else "目标测试集已在基线全部通过，无需修改代码。"
+    target = ev.repro_test_target if ev else "tests"
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "header": {
+                "title": {
+                    "tag": "plain_text",
+                    "content": f"✅ 体检通过・无需改动 (No-Op) | #{state.task_id}",
+                },
+                "template": "green",
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"**任务目标**：{state.contract.objective}\n"
+                        f"**目标仓库**：`{state.contract.target_repo}` (`{state.contract.base_branch}` @ `{state.contract.base_commit_sha[:8]}`)\n"
+                        f"- **独立沙箱实测目标**：`{target}` (`exit_code=0` ✅)\n"
+                        f"- **文件变更数**：`0 个文件（保持干净，未发起多余 PR）`\n\n"
+                        f"**体检结论**：{summary}\n"
+                        f"**花费**：`${state.total_cost_usd:.4f}`"
+                    ),
+                },
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "打开控制台查看验证日志"},
+                            "type": "default",
+                            "url": f"{web_base_url}/#task={state.task_id}",
+                        }
+                    ],
+                },
+            ],
+        },
+    }
+
+
 def build_test_connection_card(web_base_url: str = "http://127.0.0.1:8020") -> dict[str, Any]:
     """Sample card sent when user clicks 'Send Test Card to Feishu' in Console."""
     return {

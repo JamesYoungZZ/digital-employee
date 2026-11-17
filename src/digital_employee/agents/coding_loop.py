@@ -152,6 +152,32 @@ CODING_TOOLS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "finish_noop",
+            "description": (
+                "Call ONLY when the task's target condition is ALREADY 100% satisfied on base_commit_sha "
+                "with ZERO code changes needed (e.g., delegator asked to run & fix failing tests, and `run_pytest` "
+                "proved the entire suite already passes with exit_code=0). NEVER use this to skip implementing a requested feature or fixing an actual failing test."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "verified_test_targets": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Test directory/files verified to pass with exit_code=0 (e.g. ['tests']).",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Concise verification summary (e.g. '604 passed, 7 skipped, 0 failed on base commit').",
+                    },
+                },
+                "required": ["verified_test_targets", "summary"],
+            },
+        },
+    },
 ]
 
 CODING_SYSTEM_PROMPT = """You are the Sandbox Coding Agent of a Dependable Engineering Delegation System.
@@ -164,12 +190,15 @@ MANDATORY WORKFLOW:
 4. NEVER weaken existing tests: do NOT delete `assert` lines, do NOT add `@pytest.mark.skip` / `xfail`, and do NOT swallow exceptions.
 5. Re-run `run_pytest` on both the target regression test and its broader test module to verify zero regressions.
 6. Call `finish_task` with the exact `repro_test_target` (prefer specific pytest node ID like `tests/unit/test_foo.py::TestBar::test_baz`) that fails on `base_commit_sha` and passes on your fix.
+7. **NO-OP CLEAN EXIT**: If the task asks to run/fix failing tests (or fix a bug that no longer reproduces) and `run_pytest` proves the suite is ALREADY 100% green (`exit_code=0`, 0 failures) on `base_commit_sha` with zero file modifications needed, do NOT call `request_clarification` and do NOT make spurious edits — call `finish_noop` directly with the verified test targets and summary!
 """
 
 
 @dataclass
 class CodingLoopOutcome:
     completed: bool
+    is_noop: bool = False
+    noop_test_targets: list[str] = field(default_factory=list)
     repro_test_target: str = ""
     commit_message: str = ""
     root_cause: str = ""
@@ -270,6 +299,19 @@ class SandboxCodingAgent:
                         default_assumption=str(args.get("default_assumption", "Proceed conservatively")),
                         impact_scope=str(args.get("impact_scope", "task scope")),
                     )
+                    return outcome
+
+                if fn_name == "finish_noop":
+                    outcome.completed = True
+                    outcome.is_noop = True
+                    outcome.noop_test_targets = [
+                        str(t).strip()
+                        for t in (args.get("verified_test_targets") or ["tests"])
+                        if str(t).strip()
+                    ] or ["tests"]
+                    outcome.summary = str(
+                        args.get("summary") or "All tests already passed on base commit; zero changes required."
+                    ).strip()
                     return outcome
 
                 if fn_name == "finish_task":

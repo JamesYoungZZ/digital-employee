@@ -102,6 +102,8 @@ export interface VerificationEvidence {
   tests_weakened_check: boolean;
   scope_compliance_check: boolean;
   static_analysis_passed: boolean;
+  noop_verified?: boolean;
+  noop_summary?: string;
   anti_tampering_violations: string[];
   scope_violations: string[];
   unverified_risks: string[];

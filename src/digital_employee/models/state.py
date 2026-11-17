@@ -76,6 +76,8 @@ class VerificationEvidence(BaseModel):
     tests_weakened_check: bool
     scope_compliance_check: bool = True
     static_analysis_passed: bool = True
+    noop_verified: bool = False
+    noop_summary: str = ""
     anti_tampering_violations: list[str] = Field(default_factory=list)
     scope_violations: list[str] = Field(default_factory=list)
     unverified_risks: list[str] = Field(default_factory=list)
@@ -84,6 +86,8 @@ class VerificationEvidence(BaseModel):
 
     @property
     def passed_all_hard_gates(self) -> bool:
+        if self.noop_verified:
+            return self.existing_test_suite_passed and self.scope_compliance_check
         reviewer_ok = True
         if self.reviewer_report is not None:
             reviewer_ok = (

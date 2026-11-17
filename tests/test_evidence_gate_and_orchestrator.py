@@ -434,3 +434,92 @@ def test_five_gate_auto_merge_and_blocking_pr_review_skill(tmp_path: Path) -> No
     assert final_state.merge_approval_card is not None
     assert final_state.merge_approval_card.approved_by == "feishu_card"
 
+
+def test_noop_clean_exit_verified_vs_rejected_when_tests_fail(tmp_path: Path) -> None:
+    """Verify `finish_noop` closes cleanly ONLY when pytest exits 0 with 0 edits, and rejects lazy claims when tests fail."""
+    from unittest.mock import MagicMock
+
+    from digital_employee.agents.coding_loop import CodingLoopOutcome
+    from digital_employee.models.state import DurableTaskState
+    from digital_employee.orchestrator import DelegationOrchestrator
+
+    repo_dir = tmp_path / "green_repo"
+    base_sha = _init_mini_buggy_repo(repo_dir)
+
+    repo_cfg = tmp_path / "repos.yaml"
+    repo_cfg.write_text(
+        "repositories:\n"
+        "  green_repo:\n"
+        f"    github_repo: acme/green_repo\n"
+        f"    local_path: {repo_dir}\n"
+        f"    python_bin: {sys.executable}\n"
+        f"    pytest_cmd: [{sys.executable}, -m, pytest]\n",
+        encoding="utf-8",
+    )
+    cfg = Settings(
+        data_dir=tmp_path / "data",
+        repo_registry_path=repo_cfg,
+        llm_api_key="dummy",
+        max_self_heal_attempts=1,
+    )
+    cfg.ensure_dirs()
+    orch = DelegationOrchestrator(cfg)
+
+    # Case 1: Suite actually passes (`tests/test_pricing.py` passes) -> `finish_noop` accepted & closed!
+    state_ok = DurableTaskState(
+        task_id="t-noop-ok",
+        trace_id="tr-noop-1",
+        raw_request="跑一下单测，修复测试",
+        contract=TaskContract(
+            objective="Run unit tests and fix failures if any",
+            target_repo="green_repo",
+            base_branch="main",
+            base_commit_sha=base_sha,
+            reproduction_evidence="none",
+            permitted_scopes=["src", "tests"],
+        ),
+        lifecycle_status="QUEUED",
+    )
+    orch.store.save_task(state_ok)
+    orch.coder.run = MagicMock(  # type: ignore[method-assign]
+        return_value=CodingLoopOutcome(
+            completed=True,
+            is_noop=True,
+            noop_test_targets=["tests/test_pricing.py"],
+            summary="All unit tests passed (1 passed, 0 failed).",
+        )
+    )
+    done = orch.execute_task("t-noop-ok")
+    assert done.lifecycle_status == "ACCEPTED_AND_CLOSED"
+    assert done.verification_evidence is not None
+    assert done.verification_evidence.noop_verified is True
+    assert done.verification_evidence.passed_all_hard_gates is True
+
+    # Case 2: Lazy agent claims `finish_noop` on a non-existent/failing target -> deterministically rejected!
+    state_bad = DurableTaskState(
+        task_id="t-noop-bad",
+        trace_id="tr-noop-2",
+        raw_request="跑一下单测，修复测试",
+        contract=TaskContract(
+            objective="Run unit tests",
+            target_repo="green_repo",
+            base_branch="main",
+            base_commit_sha=base_sha,
+            reproduction_evidence="none",
+            permitted_scopes=["src", "tests"],
+        ),
+        lifecycle_status="QUEUED",
+    )
+    orch.store.save_task(state_bad)
+    orch.coder.run = MagicMock(  # type: ignore[method-assign]
+        return_value=CodingLoopOutcome(
+            completed=True,
+            is_noop=True,
+            noop_test_targets=["tests/non_existent_failing_suite.py"],
+            summary="Pretending tests passed.",
+        )
+    )
+    rejected = orch.execute_task("t-noop-bad")
+    assert rejected.lifecycle_status == "HANDED_OFF_INCOMPLETE"
+
+

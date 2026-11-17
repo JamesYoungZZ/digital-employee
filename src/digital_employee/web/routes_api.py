@@ -15,6 +15,7 @@ from digital_employee.integrations.feishu_cards import (
     build_evidence_report_card,
     build_handoff_card,
     build_merge_approval_card,
+    build_noop_verified_card,
     build_test_connection_card,
     parse_feishu_command,
 )
@@ -161,6 +162,8 @@ def build_api_router(
             active_card = build_merge_approval_card(state, orch.web_base_url)
         elif state.lifecycle_status == "HANDED_OFF_INCOMPLETE":
             active_card = build_handoff_card(state, orch.web_base_url)
+        elif state.verification_evidence is not None and state.verification_evidence.noop_verified:
+            active_card = build_noop_verified_card(state, orch.web_base_url)
         elif state.verification_evidence is not None:
             active_card = build_evidence_report_card(state, orch.web_base_url)
         else:

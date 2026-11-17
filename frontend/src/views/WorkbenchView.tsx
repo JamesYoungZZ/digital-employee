@@ -526,6 +526,11 @@ export function WorkbenchView({
                       <td className="px-3 py-3.5 whitespace-nowrap">
                         {!ev ? (
                           <span className="text-zinc-400">—</span>
+                        ) : ev.noop_verified ? (
+                          <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400 font-medium">
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                            No-Op · 全绿无需改
+                          </span>
                         ) : f2pPassed ? (
                           <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400 font-medium">
                             <CheckCircle2 className="h-3.5 w-3.5" />

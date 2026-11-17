@@ -354,6 +354,19 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
               </div>
             )}
 
+          {/* Verified No-Op Banner */}
+          {ev?.noop_verified && (
+            <div className="rounded-xl border border-emerald-500/35 bg-emerald-500/8 p-4 space-y-1.5 text-xs">
+              <div className="flex items-center gap-2 font-semibold text-emerald-700 dark:text-emerald-300">
+                <CheckCircle2 className="h-4 w-4" />
+                沙箱独立实测已全绿 · 无需代码改动 (No-Op Clean Exit)
+              </div>
+              <p className="text-zinc-600 dark:text-zinc-300 leading-relaxed">
+                {ev.noop_summary || "目标测试集已在远端基准分支全部通过，未产生多余改动或无效 PR。"}
+              </p>
+            </div>
+          )}
+
           {/* Handoff Bundle Alert */}
           {t.handoff_bundle && (
             <div className="rounded-xl border border-red-500/35 bg-red-500/8 p-4 space-y-2 text-xs">
