@@ -2,17 +2,15 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass, field
-from enum import Enum
-import os
 import time
+from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
-from typing import Optional
 
 from digital_employee.kernel.teams.progress import TeammateProgress
 
 
-class BackendType(str, Enum):
+class BackendType(StrEnum):
     TMUX = "tmux"
     ITERM2 = "iterm2"
     IN_PROCESS = "in-process"
@@ -28,7 +26,7 @@ class TeammateInfo:
     backend_type: str  # BackendType value
     is_active: bool | None = None
     joined_at: int = 0
-    progress: Optional[TeammateProgress] = None
+    progress: TeammateProgress | None = None
 
     def to_dict(self) -> dict:
         # config.json 里的键名一律用驼峰。

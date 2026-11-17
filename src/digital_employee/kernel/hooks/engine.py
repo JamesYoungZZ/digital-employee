@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass
 
 from digital_employee.kernel.hooks.executors import execute_action
-from digital_employee.kernel.hooks.models import ActionResult, Hook, HookContext, ToolRejectedError
+from digital_employee.kernel.hooks.models import Hook, HookContext, ToolRejectedError
 
 log = logging.getLogger(__name__)
 

@@ -4,7 +4,7 @@ import secrets
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from digital_employee.kernel.worktree.manager import WorktreeManager
+    pass
 
 
 WORKTREE_NOTICE_TEMPLATE = """\

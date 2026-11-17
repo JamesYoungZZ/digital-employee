@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -53,7 +54,7 @@ class InstallSkillTool(Tool):
     async def execute(self, params: BaseModel) -> ToolResult:
         assert isinstance(params, InstallSkillParams)
 
-        from digital_employee.kernel.skills.install import parse_skill_url, install_skill
+        from digital_employee.kernel.skills.install import install_skill, parse_skill_url
 
         # 解析 URL
         try:

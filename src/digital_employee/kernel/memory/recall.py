@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Awaitable, Callable
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -75,7 +74,7 @@ class RecallResult:
     paths: list[str] = field(default_factory=list)
 
     @classmethod
-    def of(cls, memories: list[RelevantMemory]) -> "RecallResult":
+    def of(cls, memories: list[RelevantMemory]) -> RecallResult:
         """把选中的记忆渲染成 reminder，并带上它们的路径。"""
         if not memories:
             return cls()
@@ -235,7 +234,7 @@ def format_memory_manifest(memories: list[MemoryHeader]) -> str:
         scope_tag = f"[{m.scope}-scope] " if m.scope else ""
         type_tag = f"[{m.type}] " if m.type else ""
         ts = datetime.fromtimestamp(
-            m.mtime_ms / 1000, tz=timezone.utc
+            m.mtime_ms / 1000, tz=UTC
         ).strftime("%Y-%m-%dT%H:%M:%S.") + f"{m.mtime_ms % 1000:03d}Z"
         path = m.file_path if m.file_path else m.filename
         if m.description:

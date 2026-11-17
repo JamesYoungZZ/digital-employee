@@ -1,13 +1,13 @@
 """Skill 系统的测试 —— 包括 parser、loader、executor 以及 LoadSkill 工具。"""
 from __future__ import annotations
 
-import json
 import textwrap
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from digital_employee.kernel.skills.loader import SkillLoader
 from digital_employee.kernel.skills.parser import (
     SkillDef,
     SkillParseError,
@@ -15,7 +15,6 @@ from digital_employee.kernel.skills.parser import (
     parse_skill_file,
     substitute_arguments,
 )
-from digital_employee.kernel.skills.loader import SkillLoader
 from digital_employee.kernel.tools import ToolRegistry
 
 # ---------------------------------------------------------------------------

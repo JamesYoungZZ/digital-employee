@@ -7,10 +7,9 @@
 from __future__ import annotations
 
 import pytest
-
-from digital_employee.kernel.__main__ import _build_teammate_registry
 from pydantic import BaseModel
 
+from digital_employee.kernel.__main__ import _build_teammate_registry
 from digital_employee.kernel.teams.manager import TeamManager
 from digital_employee.kernel.tools import ToolRegistry
 from digital_employee.kernel.tools.base import Tool

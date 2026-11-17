@@ -61,7 +61,7 @@ class AskUserTool(Tool):
 
         try:
             answers = await asyncio.wait_for(future, timeout=300)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return ToolResult(
                 output="User did not respond within 5 minutes", is_error=True
             )

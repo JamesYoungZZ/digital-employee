@@ -11,10 +11,10 @@ from unittest.mock import MagicMock
 from digital_employee.kernel.agents.tool_filter import apply_coordinator_filter
 from digital_employee.kernel.teams.manager import TeamManager
 from digital_employee.kernel.teams.models import resolve_team_dir
-from digital_employee.kernel.tools.team_create import TeamCreateTool, TeamCreateParams
-from digital_employee.kernel.tools.team_delete import TeamDeleteTool, TeamDeleteParams
 from digital_employee.kernel.tools import ToolRegistry
 from digital_employee.kernel.tools.base import Tool, ToolResult
+from digital_employee.kernel.tools.team_create import TeamCreateParams, TeamCreateTool
+from digital_employee.kernel.tools.team_delete import TeamDeleteParams, TeamDeleteTool
 
 
 class DummyTool(Tool):

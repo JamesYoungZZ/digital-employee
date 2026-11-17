@@ -6,13 +6,12 @@ from digital_employee.kernel.commands.handlers.help import HELP_COMMAND
 from digital_employee.kernel.commands.handlers.mcp import MCP_COMMAND
 from digital_employee.kernel.commands.handlers.memory import MEMORY_COMMAND
 from digital_employee.kernel.commands.handlers.plan import PLAN_COMMAND
+from digital_employee.kernel.commands.handlers.rewind import REWIND_COMMAND
 from digital_employee.kernel.commands.handlers.sandbox import SANDBOX_COMMAND
 from digital_employee.kernel.commands.handlers.session import SESSION_COMMAND
 from digital_employee.kernel.commands.handlers.skill import SKILL_COMMAND
-from digital_employee.kernel.commands.handlers.rewind import REWIND_COMMAND
 from digital_employee.kernel.commands.handlers.status import STATUS_COMMAND
 from digital_employee.kernel.commands.registry import CommandRegistry
-
 
 ALL_COMMANDS = [
     HELP_COMMAND,

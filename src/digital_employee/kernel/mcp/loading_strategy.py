@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import os
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -40,7 +40,7 @@ _OFFICIAL_HOSTS = frozenset({"api.anthropic.com"})
 _ENV_OVERRIDE = "DE_KERNEL_MCP_LOADING"
 
 
-class McpLoadingMode(str, Enum):
+class McpLoadingMode(StrEnum):
     EAGER = "eager"
     NATIVE = "native"
     DISPATCH = "dispatch"

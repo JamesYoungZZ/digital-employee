@@ -15,7 +15,6 @@ from digital_employee.kernel.hooks.models import (
     ToolRejectedError,
 )
 
-
 __all__ = [
     "Action",
     "ActionResult",

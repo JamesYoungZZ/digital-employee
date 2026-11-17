@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import websockets
-from websockets.asyncio.server import Server as WSServer, ServerConnection
+from websockets.asyncio.server import ServerConnection
 from websockets.http11 import Request, Response
 
 from digital_employee.kernel.agent import (
@@ -36,7 +36,7 @@ from digital_employee.kernel.agent import (
     TurnComplete,
     UsageEvent,
 )
-from digital_employee.kernel.client import create_client, resolve_context_window
+from digital_employee.kernel.client import create_client
 from digital_employee.kernel.commands import CommandContext, CommandRegistry, CommandType
 from digital_employee.kernel.commands.handlers import register_all_commands
 from digital_employee.kernel.commands.parser import parse_command
@@ -57,8 +57,8 @@ from digital_employee.kernel.permissions import (
 from digital_employee.kernel.skills.loader import SkillLoader
 from digital_employee.kernel.tools import ToolRegistry, create_default_registry
 from digital_employee.kernel.tools.impl.tool_search import ToolSearchTool
-from digital_employee.kernel.tools.mcp_call import McpCallTool
 from digital_employee.kernel.tools.load_skill import LoadSkill
+from digital_employee.kernel.tools.mcp_call import McpCallTool
 from digital_employee.kernel.web_content import INDEX_HTML
 
 log = logging.getLogger(__name__)

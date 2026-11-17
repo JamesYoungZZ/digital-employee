@@ -4,28 +4,31 @@ from __future__ import annotations
 
 import asyncio
 import textwrap
-import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from digital_employee.kernel.agents.parser import AgentDef, AgentParseError, parse_agent_file, parse_frontmatter
-from digital_employee.kernel.agents.loader import AgentLoader
-from digital_employee.kernel.agents.tool_filter import (
-    ALL_AGENT_DISALLOWED_TOOLS,
-    ASYNC_AGENT_ALLOWED_TOOLS,
-    resolve_agent_tools,
-)
 from digital_employee.kernel.agents.fork import (
     FORK_BOILERPLATE_TAG,
     ForkError,
     build_forked_messages,
 )
-from digital_employee.kernel.agents.trace import TraceManager, TraceNode
-from digital_employee.kernel.agents.task_manager import BackgroundTask, TaskManager
+from digital_employee.kernel.agents.loader import AgentLoader
 from digital_employee.kernel.agents.notification import format_task_notification, inject_task_notifications
-from digital_employee.kernel.conversation import ConversationManager, Message, ToolResultBlock, ToolUseBlock
+from digital_employee.kernel.agents.parser import (
+    AgentDef,
+    AgentParseError,
+    parse_agent_file,
+    parse_frontmatter,
+)
+from digital_employee.kernel.agents.task_manager import BackgroundTask, TaskManager
+from digital_employee.kernel.agents.tool_filter import (
+    ASYNC_AGENT_ALLOWED_TOOLS,
+    resolve_agent_tools,
+)
+from digital_employee.kernel.agents.trace import TraceManager
+from digital_employee.kernel.conversation import ConversationManager, ToolUseBlock
 from digital_employee.kernel.tools import ToolRegistry
 from digital_employee.kernel.tools.base import Tool, ToolResult
 

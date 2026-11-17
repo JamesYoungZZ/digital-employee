@@ -9,8 +9,8 @@ import yaml
 from digital_employee.kernel.skills.parser import (
     SkillDef,
     SkillParseError,
-    resolve_mode_and_context,
     parse_skill_file,
+    resolve_mode_and_context,
 )
 
 log = logging.getLogger(__name__)

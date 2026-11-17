@@ -1,11 +1,7 @@
 """Git Worktree 管理系统的测试（第 13 章）。"""
 from __future__ import annotations
 
-import asyncio
-import json
-import os
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -262,7 +258,7 @@ class TestWorktreeManager:
 
     @pytest.mark.asyncio
     async def test_exit_remove_clean(self, manager):
-        wt = await manager.create("exit-rm")
+        await manager.create("exit-rm")
         await manager.enter("exit-rm")
         await manager.exit("exit-rm", action="remove", discard_changes=True)
         assert "exit-rm" not in manager.active

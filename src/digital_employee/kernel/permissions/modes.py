@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from digital_employee.kernel.tools.base import ToolCategory
 
-
 DecisionEffect = Literal["allow", "deny", "ask"]
 
 
-class PermissionMode(str, Enum):
+class PermissionMode(StrEnum):
     DEFAULT = "default"
     ACCEPT_EDITS = "acceptEdits"
     PLAN = "plan"

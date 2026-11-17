@@ -1,10 +1,10 @@
 """五层权限系统的测试。"""
 from __future__ import annotations
 
-import asyncio
 import tempfile
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 import pytest
 import yaml
@@ -13,8 +13,8 @@ from digital_employee.kernel.agent import (
     Agent,
     ErrorEvent,
     LoopComplete,
-    PermissionRequest,
     PermissionReply,
+    PermissionRequest,
     PermissionResponse,
     StreamText,
     ToolResultEvent,
@@ -25,7 +25,6 @@ from digital_employee.kernel.agent import (
 from digital_employee.kernel.client import LLMClient
 from digital_employee.kernel.conversation import ConversationManager
 from digital_employee.kernel.permissions import (
-    Decision,
     DangerousCommandDetector,
     PathSandbox,
     PermissionChecker,

@@ -178,7 +178,11 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         TurnComplete,
         UsageEvent,
     )
+    from digital_employee.kernel.agents.loader import AgentLoader
+    from digital_employee.kernel.agents.task_manager import TaskManager
+    from digital_employee.kernel.agents.trace import TraceManager
     from digital_employee.kernel.client import create_client, resolve_context_window
+    from digital_employee.kernel.config import WorktreeConfig
     from digital_employee.kernel.conversation import ConversationManager
     from digital_employee.kernel.memory.instructions import load_instructions
     from digital_employee.kernel.permissions import (
@@ -187,19 +191,14 @@ async def _run_prompt(config, permission_mode, hook_engine, prompt: str, output_
         PermissionChecker,
         RuleEngine,
     )
+    from digital_employee.kernel.teams.manager import TeamManager
     from digital_employee.kernel.tools import create_default_registry
-    from digital_employee.kernel.agents.loader import AgentLoader
-    from digital_employee.kernel.agents.task_manager import TaskManager
-    from digital_employee.kernel.agents.trace import TraceManager
     from digital_employee.kernel.tools.agent_tool import AgentTool
     from digital_employee.kernel.tools.impl.tool_search import ToolSearchTool
     from digital_employee.kernel.tools.mcp_call import McpCallTool
-    from digital_employee.kernel.teams.manager import TeamManager
-    from digital_employee.kernel.teams.models import BackendType
     from digital_employee.kernel.tools.team_create import TeamCreateTool
     from digital_employee.kernel.tools.team_delete import TeamDeleteTool
     from digital_employee.kernel.worktree import WorktreeManager
-    from digital_employee.kernel.config import WorktreeConfig
 
     is_json = output_format == "stream-json"
 
@@ -484,7 +483,7 @@ def _parse_teammate_flags(args: list[str]) -> tuple[str, str] | None:
 async def _build_teammate_registry(
     work_dir: str,
     protocol: str,
-    team_manager: "TeamManager",
+    team_manager: object,
     team_name: str,
     agent_name: str,
     mcp_servers: list,
@@ -506,9 +505,9 @@ async def _build_teammate_registry(
     from digital_employee.kernel.tools.enter_worktree import EnterWorktreeTool
     from digital_employee.kernel.tools.exit_worktree import ExitWorktreeTool
     from digital_employee.kernel.tools.impl.tool_search import ToolSearchTool
-    from digital_employee.kernel.tools.mcp_call import McpCallTool
     from digital_employee.kernel.tools.install_skill import InstallSkillTool
     from digital_employee.kernel.tools.load_skill import LoadSkill
+    from digital_employee.kernel.tools.mcp_call import McpCallTool
     from digital_employee.kernel.tools.send_message import SendMessageTool
     from digital_employee.kernel.tools.synthetic_output import SyntheticOutputTool
     from digital_employee.kernel.tools.task_create import TaskCreateTool

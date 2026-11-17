@@ -5,8 +5,8 @@ import os
 import random
 import threading
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -113,7 +113,7 @@ class Mailbox:
                     if time.monotonic() >= deadline:
                         raise TimeoutError(
                             f"mailbox {agent_id}: 等待文件锁超过 {LOCK_ACQUIRE_TIMEOUT}s，消息未写入"
-                        )
+                        ) from None
                     time.sleep(backoff + random.uniform(0, backoff))
                     backoff = min(backoff * 2, MAX_LOCK_BACKOFF)
 
@@ -152,7 +152,7 @@ class Mailbox:
         def _append(msgs: list[MailboxMessage]) -> list[MailboxMessage]:
             message.read = False
             if not message.timestamp:
-                message.timestamp = datetime.now(timezone.utc).isoformat()
+                message.timestamp = datetime.now(UTC).isoformat()
             msgs.append(message)
             return msgs
         self._with_lock(agent_id, _append)
@@ -209,7 +209,7 @@ def create_message(
     return MailboxMessage(
         from_agent=from_agent,
         text=text,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
         type=message_type,
         request_id=request_id,
         approve=approve,

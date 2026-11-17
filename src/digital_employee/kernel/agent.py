@@ -4,10 +4,11 @@ import asyncio
 import logging
 import time
 import uuid
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -23,17 +24,19 @@ from digital_employee.kernel.context import (
     is_spill_readback,
 )
 from digital_employee.kernel.conversation import ConversationManager, ToolResultBlock, ToolUseBlock
-from digital_employee.kernel.conversation_pairing import rejected_tool_result
 from digital_employee.kernel.conversation import ThinkingBlock as ConvThinkingBlock
+from digital_employee.kernel.conversation_pairing import rejected_tool_result
+from digital_employee.kernel.hooks import HookContext, HookEngine
 from digital_employee.kernel.memory.auto_memory import MemoryManager
 from digital_employee.kernel.permissions import (
-    Decision,
     PermissionChecker,
     PermissionMode,
 )
-from digital_employee.kernel.hooks import HookContext, HookEngine, ToolRejectedError
-from digital_employee.kernel.hooks.engine import HookNotification
-from digital_employee.kernel.prompts import build_environment_context, build_plan_mode_reminder, build_system_prompt
+from digital_employee.kernel.prompts import (
+    build_environment_context,
+    build_plan_mode_reminder,
+    build_system_prompt,
+)
 from digital_employee.kernel.tools import ToolRegistry
 from digital_employee.kernel.tools.base import (
     MAX_OUTPUT_CHARS,
@@ -120,7 +123,7 @@ class CompactNotification:
     message: str
     # 结构化 boundary（摘要 + 原文保留尾部），UI/session 层用它持久化 compact_boundary 记录。
     # 失败路径下为 None。
-    boundary: "CompactBoundary | None" = None
+    boundary: CompactBoundary | None = None
 
 
 @dataclass
@@ -325,7 +328,7 @@ class StreamingExecutor:
                 gathered = await asyncio.gather(
                     *(run_one(tc) for tc in batch.calls), return_exceptions=True
                 )
-                for tc, r in zip(batch.calls, gathered):
+                for tc, r in zip(batch.calls, gathered, strict=False):
                     out.append(
                         self._error_result(tc, r)
                         if isinstance(r, BaseException)
@@ -493,8 +496,8 @@ class Agent:
     def _get_plan_path(self) -> Path:
         if self._plan_path_cache is not None:
             return self._plan_path_cache
-        import random
         import datetime
+        import random
         _ADJECTIVES = ["bold", "bright", "calm", "cool", "deep", "fair", "fast", "fine",
                        "glad", "keen", "kind", "lean", "mild", "neat", "pure", "safe",
                        "slim", "soft", "tall", "warm", "wise", "grand", "swift", "vivid"]
@@ -1131,7 +1134,7 @@ class Agent:
         if not p.is_absolute() and self.work_dir:
             p = Path(self.work_dir) / p
         try:
-            with open(p, "r", encoding="utf-8", errors="replace") as fh:
+            with open(p, encoding="utf-8", errors="replace") as fh:
                 content = fh.read()
         except OSError:
             return

@@ -3,18 +3,22 @@ from __future__ import annotations
 import asyncio
 import os
 import random
+import re
 import time as _time
 from pathlib import Path
 from typing import Any
 
 from rich.markup import escape
+from rich.text import Text as RichText
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message as TMessage
+from textual.theme import Theme
 from textual.widgets import Markdown, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
+from digital_employee.kernel import crashlog
 from digital_employee.kernel.agent import (
     Agent,
     CompactNotification,
@@ -22,7 +26,6 @@ from digital_employee.kernel.agent import (
     HookEvent,
     LoopComplete,
     PermissionRequest,
-    PermissionResponse,
     RetryEvent,
     StreamText,
     ThinkingText,
@@ -31,6 +34,10 @@ from digital_employee.kernel.agent import (
     TurnComplete,
     UsageEvent,
 )
+from digital_employee.kernel.agents.loader import AgentLoader
+from digital_employee.kernel.agents.notification import inject_task_notifications
+from digital_employee.kernel.agents.task_manager import TaskManager
+from digital_employee.kernel.agents.trace import TraceManager
 from digital_employee.kernel.client import (
     AuthenticationError,
     LLMClient,
@@ -44,19 +51,21 @@ from digital_employee.kernel.commands import (
     complete,
     parse_command,
 )
-from digital_employee.kernel import crashlog
 from digital_employee.kernel.commands.completion import CompletionPopup
 from digital_employee.kernel.commands.handlers import register_all_commands
+from digital_employee.kernel.commands.handlers.skill_register import register_skill_commands
+from digital_employee.kernel.commands.handlers.tasks import create_tasks_command
+from digital_employee.kernel.commands.handlers.worktree import create_worktree_command
 from digital_employee.kernel.config import MCPServerConfig, ProviderConfig
-from digital_employee.kernel.hooks import HookContext, HookEngine, load_hooks
 from digital_employee.kernel.conversation import ConversationManager, Message
+from digital_employee.kernel.hooks import HookContext, HookEngine
 from digital_employee.kernel.mcp import ConnectResult, MCPManager
 from digital_employee.kernel.mcp.tool_wrapper import mcp_tool_name_prefix
 from digital_employee.kernel.memory import (
     MemoryManager,
+    RecallResult,
     Session,
     SessionManager,
-    RecallResult,
     find_relevant_memories,
     generate_session_summary,
     load_instructions,
@@ -69,29 +78,18 @@ from digital_employee.kernel.permissions import (
     PermissionMode,
     RuleEngine,
 )
-from digital_employee.kernel.agents.loader import AgentLoader
-from digital_employee.kernel.agents.task_manager import TaskManager
-from digital_employee.kernel.agents.trace import TraceManager
-from digital_employee.kernel.agents.notification import inject_task_notifications
-from digital_employee.kernel.commands.handlers.tasks import create_tasks_command
 from digital_employee.kernel.skills.executor import SkillExecutor
 from digital_employee.kernel.skills.loader import SkillLoader
-from digital_employee.kernel.commands.handlers.skill_register import register_skill_commands
-from rich.text import Text as RichText
-from textual.theme import Theme
+from digital_employee.kernel.teammate_tree import TeammateTree
 from digital_employee.kernel.tools import ToolRegistry, create_default_registry
 from digital_employee.kernel.tools.agent_tool import AgentTool
 from digital_employee.kernel.tools.ask_user import AskUserEvent, AskUserTool
 from digital_employee.kernel.tools.impl.tool_search import ToolSearchTool
-from digital_employee.kernel.tools.mcp_call import McpCallTool
 from digital_employee.kernel.tools.install_skill import InstallSkillTool
 from digital_employee.kernel.tools.load_skill import LoadSkill
+from digital_employee.kernel.tools.mcp_call import McpCallTool
 from digital_employee.kernel.worktree.cleanup import start_stale_cleanup_task
 from digital_employee.kernel.worktree.manager import WorktreeManager
-from digital_employee.kernel.commands.handlers.worktree import create_worktree_command
-from digital_employee.kernel.teammate_tree import TeammateTree
-
-import re
 
 MAX_TRUNCATED_LINES = 20
 MAX_AT_REF_BYTES = 10240
@@ -171,7 +169,7 @@ class ChatInput(TextArea):
         if self._history_file.exists():
             try:
                 lines = self._history_file.read_text(encoding="utf-8").splitlines()
-                self._history = [l for l in lines if l.strip()]
+                self._history = [ln for ln in lines if ln.strip()]
             except Exception:
                 pass
 
@@ -1237,7 +1235,6 @@ class DECodeApp(App):
                 block._render_expanded()
 
         for summary in self.query(ToolGroupSummary):
-            was_expanded = summary._expanded
             summary.toggle()
             parent = summary.parent
             if parent:
@@ -1316,7 +1313,7 @@ class DECodeApp(App):
             )
             # 这里只选和渲染，选中的路径随结果一起交给 agent，注入时再记为已注入
             return RecallResult.of(results)
-        except (asyncio.TimeoutError, Exception):
+        except (TimeoutError, Exception):
             return RecallResult()
 
     def _refresh_skills_if_needed(self) -> None:
@@ -1649,7 +1646,7 @@ class DECodeApp(App):
             pass
 
     def on_inline_plan_widget_responded(
-        self, event: "InlinePlanWidget.Responded"
+        self, event: Any
     ) -> None:
         from digital_employee.kernel.plan_dialog import InlinePlanWidget, PlanChoice
         from digital_employee.kernel.prompts import build_plan_mode_exit_reminder
@@ -1719,7 +1716,7 @@ class DECodeApp(App):
             pass
 
     def on_inline_ask_user_widget_responded(
-        self, event: "InlineAskUserWidget.Responded"
+        self, event: Any
     ) -> None:
         from digital_employee.kernel.askuser_dialog import InlineAskUserWidget
 
@@ -1842,7 +1839,7 @@ class DECodeApp(App):
             pass
 
     def on_inline_permission_widget_responded(
-        self, event: "InlinePermissionWidget.Responded"
+        self, event: Any
     ) -> None:
         req = getattr(self, "_pending_perm_request", None)
         # future 可能已经结束（本轮被取消时会被 cancel），此时不能再回填结果

@@ -12,12 +12,13 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from digital_employee.agents.coding_loop import CodingLoopOutcome
+from digital_employee.agents.runtime import CodingLoopOutcome
 from digital_employee.context.decision_ledger import DecisionLedger
 from digital_employee.kernel.agent import (
     Agent,
     CompactNotification,
     ErrorEvent,
+    ThinkingText,
     ToolResultEvent,
     ToolUseEvent,
 )
@@ -783,21 +784,65 @@ class NativeKernelRuntime:
                 except Exception:
                     pass
 
+        def _describe_kernel_tool(tool_name: str, args: dict[str, Any]) -> tuple[str, str]:
+            if tool_name == "ReadFile":
+                return "📖", f"读取源码 `{args.get('file_path') or args.get('path', '')}`"
+            if tool_name == "EditFile":
+                return "✏️", f"修改文件 `{args.get('file_path') or args.get('path', '')}`"
+            if tool_name == "WriteFile":
+                return "📝", f"写入文件 `{args.get('file_path') or args.get('path', '')}`"
+            if tool_name == "Grep":
+                return "🔎", f"全局搜索 `{args.get('pattern', '')}`"
+            if tool_name == "Glob":
+                return "📂", f"扫描文件 `{args.get('pattern', '')}`"
+            if tool_name == "Bash":
+                cmd_str = str(args.get("command") or "")[:90]
+                return "🧪", f"沙箱终端执行 `{cmd_str}`"
+            if tool_name == "Agent":
+                sub_type = args.get("subagent_type") or "explore"
+                return "🤖", f"派发子智能体 (`{sub_type}`) · {str(args.get('description', ''))[:60]}"
+            if tool_name == "LoadSkill":
+                return "📚", f"加载专业技能 `{args.get('skill_name', '')}`"
+            if tool_name == "finish_task":
+                return "🏁", f"完成编码，提交门禁验证 (`{args.get('repro_test_target', '')}`)"
+            if tool_name == "finish_noop":
+                return "✅", "确认基线已满足条件，发起 No-Op 校验"
+            if tool_name == "request_clarification":
+                return "⏸️", "发现关键业务歧义，挂起会话请求拍板"
+            return "🛠️", f"Kernel · `{tool_name}`"
+
+        thought_buf = ""
+        last_tool_name = ""
+
         try:
             while turn_count < self.max_turns:
                 async for event in agent.run(conv):
-                    if isinstance(event, ToolUseEvent):
+                    if isinstance(event, ThinkingText):
+                        thought_buf += event.text
+                    elif isinstance(event, ToolUseEvent):
+                        if thought_buf.strip():
+                            one_line = " ".join(thought_buf.split())[:180]
+                            _emit_live(
+                                outcome.steps_used + 1,
+                                "thought",
+                                "💭",
+                                f"Step {outcome.steps_used + 1}/{self.max_turns} · 内核推理摘要",
+                                one_line,
+                            )
+                            thought_buf = ""
                         outcome.steps_used += 1
+                        last_tool_name = event.tool_name
                         arg_preview = json.dumps(event.arguments, ensure_ascii=False)[:220]
                         outcome.trace_log.append(
                             f"[Kernel Step {outcome.steps_used}] {event.tool_name}({arg_preview})"
                         )
+                        t_icon, t_title = _describe_kernel_tool(event.tool_name, event.arguments)
                         _emit_live(
                             outcome.steps_used,
                             "tool_call",
-                            "🛠️",
-                            f"Kernel · {event.tool_name}",
-                            arg_preview,
+                            t_icon,
+                            f"Step {outcome.steps_used}/{self.max_turns} · {t_title}",
+                            "" if event.tool_name in ("ReadFile", "EditFile", "WriteFile") else arg_preview,
                         )
                     elif isinstance(event, ToolResultEvent):
                         if event.is_error and "Permission denied" in event.output:
@@ -808,6 +853,15 @@ class NativeKernelRuntime:
                                 "🛡️",
                                 "契约权限硬拦截",
                                 event.output[:300],
+                            )
+                        elif last_tool_name == "Bash" and event.output.strip():
+                            tail_lines = [ln.strip() for ln in event.output.splitlines() if ln.strip()]
+                            tail = tail_lines[-1][:140] if tail_lines else ""
+                            _emit_live(
+                                outcome.steps_used,
+                                "tool_result",
+                                "❌" if event.is_error else "✅",
+                                f"Step {outcome.steps_used}/{self.max_turns} · 终端返回: {tail}",
                             )
                     elif isinstance(event, CompactNotification):
                         outcome.trace_log.append(

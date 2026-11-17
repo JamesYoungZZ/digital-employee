@@ -8,24 +8,18 @@ import json
 import os
 import shutil
 import tempfile
-import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from digital_employee.kernel.teams.models import (
-    AgentTeam,
-    BackendType,
-    TeammateInfo,
-    resolve_team_dir,
-    unique_team_name,
+from digital_employee.kernel.agents.tool_filter import (
+    COORDINATOR_MODE_ALLOWED_TOOLS,
+    IN_PROCESS_TEAMMATE_ALLOWED_TOOLS,
+    TEAMMATE_COORDINATION_TOOLS,
+    apply_coordinator_filter,
 )
-from digital_employee.kernel.teams.shared_task import SharedTask, SharedTaskStore
-from digital_employee.kernel.teams.mailbox import Mailbox, MailboxMessage, create_message
-from digital_employee.kernel.teams.registry import AgentNameRegistry
 from digital_employee.kernel.teams.backend_detect import (
-    BackendDetectionError,
     detect_backend,
     detect_backend_from_env,
     detect_pane_backend,
@@ -34,13 +28,15 @@ from digital_employee.kernel.teams.coordinator import (
     get_coordinator_system_prompt,
     get_coordinator_user_context,
 )
-from digital_employee.kernel.agents.tool_filter import (
-    COORDINATOR_MODE_ALLOWED_TOOLS,
-    IN_PROCESS_TEAMMATE_ALLOWED_TOOLS,
-    TEAMMATE_COORDINATION_TOOLS,
-    build_teammate_tools,
-    apply_coordinator_filter,
+from digital_employee.kernel.teams.mailbox import Mailbox, create_message
+from digital_employee.kernel.teams.models import (
+    AgentTeam,
+    BackendType,
+    TeammateInfo,
+    unique_team_name,
 )
+from digital_employee.kernel.teams.registry import AgentNameRegistry
+from digital_employee.kernel.teams.shared_task import SharedTaskStore
 from digital_employee.kernel.tools import ToolRegistry
 from digital_employee.kernel.tools.base import Tool, ToolResult
 
@@ -625,7 +621,7 @@ class TestTranscript:
 
 class TestAgentCoordinatorIntegration:
     def test_normal_prompt(self):
-        from digital_employee.kernel.prompts import build_system_prompt, IDENTITY_SECTION
+        from digital_employee.kernel.prompts import IDENTITY_SECTION, build_system_prompt
         prompt = build_system_prompt()
         # 验证 identity section 内容包含在 prompt 中
         assert "DECode" in prompt
@@ -634,7 +630,7 @@ class TestAgentCoordinatorIntegration:
     def test_coordinator_guidance_is_a_reminder_not_a_replacement(self):
         # 调度指引每轮以 system-reminder 注入，系统提示词本身不受影响：
         # Lead 进了 coordinator 也仍然需要身份、环境、项目指令这些基础段落
-        from digital_employee.kernel.prompts import build_system_prompt, IDENTITY_SECTION
+        from digital_employee.kernel.prompts import IDENTITY_SECTION, build_system_prompt
         from digital_employee.kernel.teams.coordinator import get_coordinator_system_prompt
 
         prompt = build_system_prompt()
@@ -662,7 +658,6 @@ class TestTaskStopTool:
     """TaskStop 让 Lead 在派错方向时及时止损。"""
 
     def _mgr_with_member(self, backend="in-process", active=True):
-        from unittest.mock import MagicMock
         from digital_employee.kernel.teams.manager import TeamManager
 
         mgr = TeamManager()
@@ -676,7 +671,7 @@ class TestTaskStopTool:
 
     @pytest.mark.asyncio
     async def test_stops_in_process_teammate(self):
-        from digital_employee.kernel.tools.task_stop import TaskStopTool, TaskStopParams
+        from digital_employee.kernel.tools.task_stop import TaskStopParams, TaskStopTool
 
         mgr, _, member = self._mgr_with_member()
         handle = MagicMock()
@@ -691,7 +686,7 @@ class TestTaskStopTool:
     async def test_stops_pane_teammate(self):
         # tmux / iTerm2 的队员是独立进程，不走 in-process 句柄，
         # 只认句柄就会漏掉这一类队员
-        from digital_employee.kernel.tools.task_stop import TaskStopTool, TaskStopParams
+        from digital_employee.kernel.tools.task_stop import TaskStopParams, TaskStopTool
 
         mgr, _, member = self._mgr_with_member(backend="tmux")
         mgr.register_pane_id(member.agent_id, "%42")
@@ -704,7 +699,7 @@ class TestTaskStopTool:
 
     @pytest.mark.asyncio
     async def test_unknown_teammate_is_an_error(self):
-        from digital_employee.kernel.tools.task_stop import TaskStopTool, TaskStopParams
+        from digital_employee.kernel.tools.task_stop import TaskStopParams, TaskStopTool
 
         mgr, _, _ = self._mgr_with_member()
         res = await TaskStopTool(team_manager=mgr).execute(TaskStopParams(teammate="ghost"))
@@ -713,7 +708,7 @@ class TestTaskStopTool:
     @pytest.mark.asyncio
     async def test_idle_teammate_is_not_an_error(self):
         # 已经停下的队员再停一次不该报错，免得模型拿着报错反复重试
-        from digital_employee.kernel.tools.task_stop import TaskStopTool, TaskStopParams
+        from digital_employee.kernel.tools.task_stop import TaskStopParams, TaskStopTool
 
         mgr, _, _ = self._mgr_with_member()
         res = await TaskStopTool(team_manager=mgr).execute(TaskStopParams(teammate="scout"))

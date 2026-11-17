@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import json
 import subprocess
-import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -21,7 +19,6 @@ from digital_employee.kernel.memory.instructions import (
     process_includes,
 )
 from digital_employee.kernel.memory.session import (
-    ResumeResult,
     Session,
     SessionManager,
     SessionMeta,
@@ -275,7 +272,7 @@ class TestSessionManager:
     def test_cleanup_removes_old_sessions(self, tmp_path: Path) -> None:
         mgr = SessionManager(str(tmp_path))
         s = mgr.create()
-        s.meta.last_active = datetime.now(timezone.utc) - timedelta(days=31)
+        s.meta.last_active = datetime.now(UTC) - timedelta(days=31)
         s.meta.save(mgr._sessions_dir / f"{s.session_id}.meta")
         s.close()
 
@@ -294,8 +291,8 @@ class TestSessionManager:
 # D. 会话恢复
 # =========================================================================
 
-def _rec(role: str, content: str = "", **kw: Any) -> SessionRecord:
-    return SessionRecord(role=role, content=content, timestamp=datetime.now(timezone.utc), **kw)
+def _rec(role: str, content: str = "", **kw: object) -> SessionRecord:
+    return SessionRecord(role=role, content=content, timestamp=datetime.now(UTC), **kw)  # type: ignore[arg-type]
 
 
 class TestRecordsToMessages:
@@ -443,7 +440,7 @@ class TestCompactBoundaryRoundTrip:
     def test_parse_malformed_boundary_degrades(self) -> None:
         bad = SessionRecord(
             role="system", content="not a dict",
-            timestamp=datetime.now(timezone.utc), type="compact_boundary",
+            timestamp=datetime.now(UTC), type="compact_boundary",
         )
         summary, keep_msgs = parse_compact_boundary(bad)
         assert summary == ""
@@ -784,7 +781,11 @@ class TestConversationInjection:
 class TestMemoryExtraction:
     def test_memory_types_aligned_with_go(self, tmp_path: Path) -> None:
         """验证四种记忆类型枚举。"""
-        from digital_employee.kernel.memory.auto_memory import VALID_TYPES, _USER_LEVEL_TYPES, _PROJECT_LEVEL_TYPES
+        from digital_employee.kernel.memory.auto_memory import (
+            _PROJECT_LEVEL_TYPES,
+            _USER_LEVEL_TYPES,
+            VALID_TYPES,
+        )
 
         assert VALID_TYPES == {"user", "feedback", "project", "reference"}
         assert _USER_LEVEL_TYPES == {"user", "feedback"}

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from digital_employee.kernel.conversation import (
     ConversationManager,
@@ -707,9 +707,9 @@ async def auto_compact(
     max_retries = 3
     llm_output: str | None = None
 
-    for attempt in range(max_retries):
+    for _attempt in range(max_retries):
         try:
-            from digital_employee.kernel.tools.base import StreamEnd, StreamEvent, TextDelta
+            from digital_employee.kernel.tools.base import StreamEnd, TextDelta
 
             collected_text = ""
             async for event in client.stream(summary_conv, system=SUMMARY_PROMPT, tools=tool_schemas):

@@ -1,7 +1,6 @@
 """Slash Command 框架测试——registry、parser、补全、handler。"""
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,7 +12,6 @@ from digital_employee.kernel.commands.registry import (
     CommandContext,
     CommandRegistry,
     CommandType,
-    UIController,
 )
 
 # ---------------------------------------------------------------------------

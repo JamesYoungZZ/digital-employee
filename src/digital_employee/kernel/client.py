@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
 from digital_employee.kernel.config import ProviderConfig
 from digital_employee.kernel.conversation import ConversationManager
-from digital_employee.kernel.mcp.loading_strategy import NATIVE_TOOL_SEARCH_BETA
 from digital_employee.kernel.conversation_pairing import ensure_tool_pairing
+from digital_employee.kernel.mcp.loading_strategy import NATIVE_TOOL_SEARCH_BETA
 from digital_employee.kernel.serialization import (
     build_anthropic_messages,
     build_chat_completion_messages,
@@ -26,7 +27,6 @@ from digital_employee.kernel.tools.base import (
     ToolCallDelta,
     ToolCallStart,
 )
-
 
 # 限制自动拉取模型元数据的超时时间，防止慢响应或挂起的
 # /v1/models 端点拖延启动。超时后降级为 None（即"未知"），
@@ -126,7 +126,7 @@ class LLMClient(ABC):
     ) -> AsyncIterator[StreamEvent]:
         yield TextDelta("")
 
-    def set_max_output_tokens(self, tokens: int) -> None:
+    def set_max_output_tokens(self, tokens: int) -> None:  # noqa: B027
         pass
 
 

@@ -4,7 +4,6 @@ from digital_employee.kernel.permissions.modes import DecisionEffect, Permission
 from digital_employee.kernel.permissions.rules import Rule, RuleEngine, extract_content, parse_rule
 from digital_employee.kernel.permissions.sandbox import PathSandbox
 
-
 __all__ = [
     "Decision",
     "DecisionEffect",

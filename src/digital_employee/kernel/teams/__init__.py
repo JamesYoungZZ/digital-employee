@@ -10,7 +10,6 @@ from digital_employee.kernel.teams.progress import TeammateProgress, ToolActivit
 from digital_employee.kernel.teams.registry import AgentNameRegistry
 from digital_employee.kernel.teams.shared_task import SharedTask, SharedTaskStore
 
-
 __all__ = [
     "AgentTeam",
     "AgentNameRegistry",

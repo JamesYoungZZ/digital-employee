@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 
@@ -11,8 +12,8 @@ from digital_employee.kernel.agent import (
     Agent,
     ErrorEvent,
     LoopComplete,
-    PermissionRequest,
     PermissionReply,
+    PermissionRequest,
     PermissionResponse,
     StreamText,
     ToolResultEvent,
@@ -21,9 +22,13 @@ from digital_employee.kernel.agent import (
     UsageEvent,
     partition_tool_calls,
 )
-from digital_employee.kernel.prompts import build_environment_context, build_plan_mode_reminder, build_system_prompt
 from digital_employee.kernel.client import LLMClient
 from digital_employee.kernel.conversation import ConversationManager
+from digital_employee.kernel.prompts import (
+    build_environment_context,
+    build_plan_mode_reminder,
+    build_system_prompt,
+)
 from digital_employee.kernel.serialization import build_anthropic_messages
 from digital_employee.kernel.tools import create_default_registry
 from digital_employee.kernel.tools.base import (

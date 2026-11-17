@@ -522,7 +522,7 @@ class MemoryManager:
             return "当前没有任何自动记忆。"
 
         parts: list[str] = []
-        parts.append(f"记忆目录：")
+        parts.append("记忆目录：")
         parts.append(f"  用户级: {self._user_mem_dir}")
         parts.append(f"  项目级: {self._mem_dir}")
         parts.append("")

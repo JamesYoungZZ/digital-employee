@@ -3,14 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any, AsyncIterator
 from unittest.mock import patch
 
 import pytest
 
 from digital_employee.kernel.hooks import (
     Action,
-    ActionResult,
     Condition,
     ConditionGroup,
     ConditionParseError,
@@ -514,7 +512,7 @@ class TestAgentHookIntegration:
         from digital_employee.kernel.client import LLMClient
         from digital_employee.kernel.conversation import ConversationManager
         from digital_employee.kernel.tools import create_default_registry
-        from digital_employee.kernel.tools.base import StreamEnd, StreamEvent, TextDelta, ToolCallComplete
+        from digital_employee.kernel.tools.base import StreamEnd, TextDelta, ToolCallComplete
 
         class MockClient(LLMClient):
             def __init__(self):

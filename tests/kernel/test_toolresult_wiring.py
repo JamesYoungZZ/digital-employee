@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
+from test_agent import MockLLMClient
 
 from digital_employee.kernel.agent import Agent
 from digital_employee.kernel.conversation import ConversationManager
@@ -17,8 +18,6 @@ from digital_employee.kernel.tools.base import (
     ToolCallComplete,
     ToolResult,
 )
-
-from test_agent import MockLLMClient
 
 
 class _EmptyParams(BaseModel):

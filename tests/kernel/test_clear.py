@@ -1,13 +1,12 @@
 """验证 /clear 命令正确重置所有会话级状态。"""
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import MagicMock
 
 import pytest
 
-from digital_employee.kernel.commands.registry import CommandContext, UIController
 from digital_employee.kernel.commands.handlers.clear import handle_clear
+from digital_employee.kernel.commands.registry import CommandContext
 from digital_employee.kernel.conversation import ConversationManager
 from digital_employee.kernel.memory.session import SessionManager
 

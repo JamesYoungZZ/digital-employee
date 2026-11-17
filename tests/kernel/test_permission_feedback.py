@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
 
 import pytest
 from textual import events
 from textual.app import App, ComposeResult
-from textual.containers import VerticalScroll
 
 from digital_employee.kernel.agent import (
     Agent,
@@ -23,7 +23,13 @@ from digital_employee.kernel.config import ProviderConfig
 from digital_employee.kernel.conversation import ConversationManager
 from digital_employee.kernel.conversation_pairing import REJECTED_TOOL_RESULT, rejected_tool_result
 from digital_employee.kernel.permission_dialog import InlinePermissionWidget
-from digital_employee.kernel.permissions import DangerousCommandDetector, PathSandbox, PermissionChecker, PermissionMode, RuleEngine
+from digital_employee.kernel.permissions import (
+    DangerousCommandDetector,
+    PathSandbox,
+    PermissionChecker,
+    PermissionMode,
+    RuleEngine,
+)
 from digital_employee.kernel.tools import create_default_registry
 from digital_employee.kernel.tools.base import StreamEnd, StreamEvent, TextDelta, ToolCallComplete
 

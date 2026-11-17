@@ -7,7 +7,7 @@ from digital_employee.kernel.conversation import ConversationManager, Message
 from digital_employee.kernel.skills.parser import SkillDef, substitute_arguments
 
 if TYPE_CHECKING:
-    from digital_employee.kernel.agent import Agent, AgentEvent
+    from digital_employee.kernel.agent import Agent
     from digital_employee.kernel.client import LLMClient
 
 log = logging.getLogger(__name__)
@@ -56,7 +56,8 @@ class SkillExecutor:
 
         fork_conv.add_user_message(prompt)
 
-        from digital_employee.kernel.agent import Agent as AgentClass, StreamText, LoopComplete, ErrorEvent
+        from digital_employee.kernel.agent import Agent as AgentClass
+        from digital_employee.kernel.agent import ErrorEvent, LoopComplete, StreamText
 
         fork_agent = AgentClass(
             client=self.client,

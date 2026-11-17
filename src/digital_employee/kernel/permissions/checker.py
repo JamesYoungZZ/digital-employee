@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from digital_employee.kernel.permissions.dangerous import DangerousCommandDetector, is_safe_command

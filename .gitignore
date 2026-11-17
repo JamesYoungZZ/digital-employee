@@ -18,7 +18,6 @@ worktrees/
 *.db
 *.db-shm
 *.db-wal
-.DS_Store
-/claude-mem/
+*.DS_Store
 frontend/node_modules/
 frontend/.vite/

@@ -9,7 +9,6 @@ from digital_employee.kernel.commands.registry import (
     UIController,
 )
 
-
 __all__ = [
     "Command",
     "CommandContext",

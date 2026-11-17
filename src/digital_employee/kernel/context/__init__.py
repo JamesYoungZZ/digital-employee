@@ -7,16 +7,15 @@ from digital_employee.kernel.context.manager import (
     SkillInvocationRecord,
     UsageAnchor,
     apply_tool_result_budget,
-    is_spill_readback,
-    spill_dir,
     auto_compact,
     build_compact_messages,
     build_recovery_attachment,
     cleanup_tool_results,
     compute_compact_threshold,
     ensure_session_dir,
+    is_spill_readback,
+    spill_dir,
 )
-
 
 __all__ = [
     "CompactBoundary",

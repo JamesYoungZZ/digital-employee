@@ -1,4 +1,4 @@
-"""Pluggable CodingRuntime abstraction: Native White-Box Kernel vs External CLI vs Lite Loop."""
+"""Pluggable CodingRuntime abstraction: Native White-Box Kernel (`mewcode`) vs External CLI."""
 
 from __future__ import annotations
 
@@ -6,15 +6,33 @@ import json
 import shutil
 import subprocess
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from digital_employee.agents.coding_loop import CodingLoopOutcome, SandboxCodingAgent
 from digital_employee.llm.client import LLMClient
-from digital_employee.models.contract import TaskContract
+from digital_employee.models.contract import TaskContract, UnresolvedDecision
 from digital_employee.sandbox.worktree_runner import WorktreeSandbox, build_sandbox_env
 from digital_employee.security.dlp import redact_sensitive_text, wrap_untrusted_input
 from digital_employee.settings import Settings
+
+
+@dataclass
+class CodingLoopOutcome:
+    """Structured execution outcome returned by any `CodingRuntime` implementation."""
+
+    completed: bool
+    is_noop: bool = False
+    noop_test_targets: list[str] = field(default_factory=list)
+    repro_test_target: str = ""
+    commit_message: str = ""
+    root_cause: str = ""
+    summary: str = ""
+    needs_clarification: UnresolvedDecision | None = None
+    policy_violation: str | None = None
+    cost_usd: float = 0.0
+    steps_used: int = 0
+    trace_log: list[str] = field(default_factory=list)
 
 
 @runtime_checkable
@@ -138,11 +156,8 @@ def create_coding_runtime(
     *,
     llm: LLMClient | None = None,
 ) -> CodingRuntime:
-    """Instantiate the configured sandbox coding runtime (`kernel` | `lite` | `external_cli`)."""
+    """Instantiate the configured sandbox coding runtime (`kernel` | `external_cli`)."""
     mode = getattr(settings, "coding_runtime", "kernel")
-    if mode == "lite":
-        client = llm or LLMClient(settings)
-        return SandboxCodingAgent(client, max_steps=settings.max_coding_steps)
     if mode == "external_cli":
         cli_bin = getattr(settings, "external_coding_cli", "claude")
         return ExternalCLIRuntime(cli_bin=cli_bin)

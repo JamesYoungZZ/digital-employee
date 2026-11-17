@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 
 def get_coordinator_system_prompt(agent_catalog: list[tuple[str, str]] | None = None) -> str:
     if agent_catalog:

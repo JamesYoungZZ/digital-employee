@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from digital_employee.kernel.teams.backend_detect import BackendDetectionError, detect_backend
+from digital_employee.kernel.teams.backend_detect import detect_backend
 from digital_employee.kernel.teams.mailbox import Mailbox, create_message
 from digital_employee.kernel.teams.models import (
     AgentTeam,
@@ -20,7 +19,7 @@ from digital_employee.kernel.teams.shared_task import SharedTaskStore
 from digital_employee.kernel.teams.spawn_inprocess import InProcessTeammateHandle
 
 if TYPE_CHECKING:
-    from digital_employee.kernel.agent import Agent
+    pass
 
 log = logging.getLogger(__name__)
 

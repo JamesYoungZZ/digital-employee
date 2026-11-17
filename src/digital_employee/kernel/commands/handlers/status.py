@@ -4,7 +4,6 @@ import os
 
 from digital_employee.kernel.commands.registry import Command, CommandContext, CommandType
 
-
 VERSION = "v0.9.0"
 
 

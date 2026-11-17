@@ -83,6 +83,7 @@ def build_api_router(
         repos = list(cfg.load_repositories().keys())
         return {
             "status": "ok",
+            "coding_runtime": cfg.coding_runtime,
             "inference_mode": cfg.inference_mode,
             "fast_model": cfg.fast_model,
             "reasoning_model": cfg.reasoning_model,

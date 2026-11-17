@@ -87,7 +87,7 @@ def test_lock_reclaims_dead_pid():
 
 
 def test_lock_rollback_deletes_on_zero():
-    from digital_employee.kernel.memory.consolidation import _try_acquire_lock, _rollback_lock
+    from digital_employee.kernel.memory.consolidation import _rollback_lock, _try_acquire_lock
 
     with tempfile.TemporaryDirectory() as d:
         _try_acquire_lock(d)
@@ -97,7 +97,8 @@ def test_lock_rollback_deletes_on_zero():
 
 def test_lock_rollback_restores_mtime():
     import time
-    from digital_employee.kernel.memory.consolidation import _try_acquire_lock, _rollback_lock
+
+    from digital_employee.kernel.memory.consolidation import _rollback_lock, _try_acquire_lock
 
     with tempfile.TemporaryDirectory() as d:
         lock_file = os.path.join(d, ".consolidate-lock")
@@ -258,9 +259,11 @@ def test_e2e_consolidation_merges_duplicates():
 
 
 async def _run_consolidation(work_dir, api_key, base_url, model, mem_dir):
-    from digital_employee.kernel.memory.consolidation import _build_consolidation_prompt
     from digital_employee.kernel.agent import Agent
+    from digital_employee.kernel.client import OpenAICompatClient
+    from digital_employee.kernel.config import ProviderConfig
     from digital_employee.kernel.conversation import ConversationManager
+    from digital_employee.kernel.memory.consolidation import _build_consolidation_prompt
     from digital_employee.kernel.permissions.checker import PermissionChecker
     from digital_employee.kernel.tools import ToolRegistry
     from digital_employee.kernel.tools.bash import Bash
@@ -269,9 +272,6 @@ async def _run_consolidation(work_dir, api_key, base_url, model, mem_dir):
     from digital_employee.kernel.tools.grep import Grep
     from digital_employee.kernel.tools.read_file import ReadFile
     from digital_employee.kernel.tools.write_file import WriteFile
-
-    from digital_employee.kernel.config import ProviderConfig
-    from digital_employee.kernel.client import OpenAICompatClient
 
     cfg = ProviderConfig(
         name="test",
@@ -287,10 +287,10 @@ async def _run_consolidation(work_dir, api_key, base_url, model, mem_dir):
     for tool_cls in [ReadFile, WriteFile, EditFile, Glob, Grep, Bash]:
         registry.register(tool_cls())
 
-    from digital_employee.kernel.permissions.sandbox import PathSandbox
-    from digital_employee.kernel.permissions.rules import RuleEngine
-    from digital_employee.kernel.permissions.dangerous import DangerousCommandDetector
     from digital_employee.kernel.permissions.checker import PermissionMode
+    from digital_employee.kernel.permissions.dangerous import DangerousCommandDetector
+    from digital_employee.kernel.permissions.rules import RuleEngine
+    from digital_employee.kernel.permissions.sandbox import PathSandbox
     sandbox = PathSandbox(mem_dir)
     checker = PermissionChecker(
         detector=DangerousCommandDetector(),
@@ -322,7 +322,7 @@ async def _run_consolidation(work_dir, api_key, base_url, model, mem_dir):
     index_content = Path(os.path.join(mem_dir, "MEMORY.md")).read_text()
     print(f"  MEMORY.md:\n{index_content}")
 
-    index_lines = [l for l in index_content.strip().split("\n") if l.strip()]
+    index_lines = [ln for ln in index_content.strip().split("\n") if ln.strip()]
     print(f"  Index lines: {len(index_lines)}")
 
     # 验证：索引应该被更新了（合并重复后行数减少）

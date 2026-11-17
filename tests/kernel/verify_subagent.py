@@ -8,27 +8,25 @@ SubAgent 系统端到端验证脚本。
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
 # 确保项目根目录在 sys.path 中
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from digital_employee.kernel.agents.fork import FORK_BOILERPLATE_TAG, ForkError, build_forked_messages
 from digital_employee.kernel.agents.loader import AgentLoader
+from digital_employee.kernel.agents.notification import format_task_notification, inject_task_notifications
+from digital_employee.kernel.agents.task_manager import TaskManager
 from digital_employee.kernel.agents.tool_filter import (
-    ALL_AGENT_DISALLOWED_TOOLS,
     ASYNC_AGENT_ALLOWED_TOOLS,
     resolve_agent_tools,
 )
-from digital_employee.kernel.agents.fork import FORK_BOILERPLATE_TAG, ForkError, build_forked_messages
 from digital_employee.kernel.agents.trace import TraceManager
-from digital_employee.kernel.agents.task_manager import TaskManager
-from digital_employee.kernel.agents.notification import format_task_notification, inject_task_notifications
+from digital_employee.kernel.config import load_config
 from digital_employee.kernel.conversation import ConversationManager, ToolUseBlock
 from digital_employee.kernel.tools import ToolRegistry
 from digital_employee.kernel.tools.base import Tool, ToolResult
-from digital_employee.kernel.config import load_config
 
 PASS = "\033[32m✓\033[0m"
 FAIL = "\033[31m✗\033[0m"
@@ -298,7 +296,7 @@ def verify_trace():
 async def verify_task_manager():
     print("\n== 5. TaskManager 后台任务 ==")
 
-    from unittest.mock import MagicMock, AsyncMock
+    from unittest.mock import AsyncMock, MagicMock
 
     agent = MagicMock()
     agent.total_input_tokens = 200
@@ -418,8 +416,9 @@ def verify_permission():
 # ---------------------------------------------------------------------------
 def verify_agent_fields():
     print("\n== 9. Agent 扩展字段 ==")
-    from digital_employee.kernel.agent import Agent
     from unittest.mock import MagicMock
+
+    from digital_employee.kernel.agent import Agent
 
     agent = Agent(
         client=MagicMock(),
@@ -438,7 +437,7 @@ def verify_agent_fields():
 # ---------------------------------------------------------------------------
 def verify_agent_tool():
     print("\n== 10. AgentTool 参数与 schema ==")
-    from digital_employee.kernel.tools.agent_tool import AgentTool, AgentToolParams
+    from digital_employee.kernel.tools.agent_tool import AgentToolParams
 
     params = AgentToolParams(
         prompt="探索项目结构",

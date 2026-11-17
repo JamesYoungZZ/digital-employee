@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -67,7 +65,7 @@ class TestMakePersistedPreview:
         content = "a" * 5_000
         preview = make_persisted_preview(content, tmp_path / "test.txt")
         lines = preview.split("\n")
-        preview_line = [l for l in lines if l.startswith("aaa")]
+        preview_line = [ln for ln in lines if ln.startswith("aaa")]
         assert len(preview_line) == 1
         assert len(preview_line[0]) == 2_000
 
@@ -128,7 +126,7 @@ class TestApplyToolResultBudget:
         apply_tool_result_budget(batch1, tmp_path)
         apply_tool_result_budget(batch2, tmp_path)
 
-        for a, b in zip(batch1, batch2):
+        for a, b in zip(batch1, batch2, strict=False):
             assert a.content == b.content
 
     def test_idempotent_on_processed_batch(self, tmp_path: Path) -> None:
@@ -530,7 +528,7 @@ class _SummaryClient:
 def _make_long_conversation(n_tail: int = 6, tail_tokens: int = 4000) -> ConversationManager:
     conv = ConversationManager()
     # 值得做摘要的旧前缀（远高于 MIN_SUMMARIZE_PREFIX_TOKENS）。
-    for i in range(8):
+    for _i in range(8):
         conv.history.append(_user(3000))
         conv.history.append(_assistant(3000))
     # 一些可区分的、最近的尾部消息，我们将断言它们会原文保留下来。
@@ -590,7 +588,7 @@ class TestAutoCompactKeepRecent:
 
     async def test_tool_pair_not_split(self, tmp_path: Path) -> None:
         conv = ConversationManager()
-        for i in range(8):
+        for _i in range(8):
             conv.history.append(_user(3000))
             conv.history.append(_assistant(3000))
         # 最近的尾部以一对 tool_use/tool_result 结尾。

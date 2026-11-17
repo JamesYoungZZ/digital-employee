@@ -439,7 +439,7 @@ def test_noop_clean_exit_verified_vs_rejected_when_tests_fail(tmp_path: Path) ->
     """Verify `finish_noop` closes cleanly ONLY when pytest exits 0 with 0 edits, and rejects lazy claims when tests fail."""
     from unittest.mock import MagicMock
 
-    from digital_employee.agents.coding_loop import CodingLoopOutcome
+    from digital_employee.agents.runtime import CodingLoopOutcome
     from digital_employee.models.state import DurableTaskState
     from digital_employee.orchestrator import DelegationOrchestrator
 

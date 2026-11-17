@@ -27,7 +27,6 @@ from digital_employee.kernel.memory.session import (
     parse_compact_boundary,
 )
 
-
 __all__ = [
     "ENTRYPOINT_NAME",
     "MemoryFile",

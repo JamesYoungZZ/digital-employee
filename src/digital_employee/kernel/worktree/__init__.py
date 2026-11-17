@@ -10,7 +10,6 @@ from digital_employee.kernel.worktree.models import Worktree, WorktreeSession
 from digital_employee.kernel.worktree.session import load_worktree_session, save_worktree_session
 from digital_employee.kernel.worktree.slug import flatten_slug, validate_slug
 
-
 __all__ = [
     "Changes",
     "CleanupResult",

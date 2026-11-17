@@ -60,7 +60,7 @@ class Settings(BaseModel):
     default_max_budget_usd: float = 1.50
     max_coding_steps: int = 32
     max_self_heal_attempts: int = 3
-    coding_runtime: Literal["kernel", "lite", "external_cli"] = "kernel"
+    coding_runtime: Literal["kernel", "external_cli"] = "kernel"
     external_coding_cli: str = "claude"
     enable_os_sandbox: bool = False
     enable_ops_mcp: bool = True
@@ -257,7 +257,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         max_self_heal_attempts=int(get_val("DE_MAX_SELF_HEAL_ATTEMPTS", "3")),
         coding_runtime=(
             get_val("DE_CODING_RUNTIME", "kernel")  # type: ignore[arg-type]
-            if get_val("DE_CODING_RUNTIME", "kernel") in ("kernel", "lite", "external_cli")
+            if get_val("DE_CODING_RUNTIME", "kernel") in ("kernel", "external_cli")
             else "kernel"
         ),
         external_coding_cli=get_val("DE_EXTERNAL_CODING_CLI", "claude"),

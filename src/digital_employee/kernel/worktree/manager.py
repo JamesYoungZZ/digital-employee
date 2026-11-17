@@ -4,13 +4,10 @@ import asyncio
 import logging
 import os
 import subprocess
-import time
-from datetime import datetime
 from pathlib import Path
 
 from digital_employee.kernel.worktree.changes import (
     CleanupResult,
-    Changes,
     count_worktree_changes,
     has_worktree_changes,
 )

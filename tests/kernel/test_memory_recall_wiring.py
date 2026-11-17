@@ -7,14 +7,13 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from test_agent import MockLLMClient
 
 from digital_employee.kernel.agent import Agent
 from digital_employee.kernel.conversation import ConversationManager
 from digital_employee.kernel.memory import RecallResult
 from digital_employee.kernel.tools import create_default_registry
 from digital_employee.kernel.tools.base import StreamEnd, TextDelta, ToolCallComplete
-
-from test_agent import MockLLMClient
 
 REMINDER = "## Memory: a.md"
 

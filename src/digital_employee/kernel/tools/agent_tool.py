@@ -131,17 +131,16 @@ class AgentTool(Tool):
         if isolation == "worktree":
             return await self._execute_with_worktree(p)
 
+        from digital_employee.kernel.agent import Agent as AgentClass
         from digital_employee.kernel.agents.fork import ForkError, build_forked_messages
         from digital_employee.kernel.agents.parser import AgentDef
         from digital_employee.kernel.agents.tool_filter import clone_registry_for_fork, resolve_agent_tools
-        from digital_employee.kernel.agent import Agent as AgentClass
         from digital_employee.kernel.conversation import ConversationManager
         from digital_employee.kernel.permissions import (
             DangerousCommandDetector,
             PathSandbox,
             PermissionChecker,
             PermissionMode,
-            RuleEngine,
         )
 
         definition: AgentDef | None = None
@@ -299,17 +298,16 @@ class AgentTool(Tool):
         if self._worktree_manager is None:
             return ToolResult(output="WorktreeManager not configured for team spawn.", is_error=True)
 
+        from digital_employee.kernel.agent import Agent as AgentClass
         from digital_employee.kernel.agents.fork import ForkError, build_forked_messages
         from digital_employee.kernel.agents.parser import AgentDef
         from digital_employee.kernel.agents.tool_filter import build_teammate_tools
-        from digital_employee.kernel.agent import Agent as AgentClass
         from digital_employee.kernel.conversation import ConversationManager
         from digital_employee.kernel.permissions import (
             DangerousCommandDetector,
             PathSandbox,
             PermissionChecker,
             PermissionMode,
-            RuleEngine,
         )
         from digital_employee.kernel.teams.models import BackendType, TeammateInfo
         from digital_employee.kernel.teams.registry import AgentNameRegistry
@@ -544,9 +542,8 @@ class AgentTool(Tool):
     def _select_llm(
         self,
         params: AgentToolParams,
-        definition: AgentDef,
+        definition: Any,
     ) -> LLMClient:
-        from digital_employee.kernel.agents.parser import AgentDef
 
         model_override = params.model or (
             definition.model if definition.model != "inherit" else None
@@ -567,16 +564,14 @@ class AgentTool(Tool):
                 is_error=True,
             )
 
+        from digital_employee.kernel.agent import Agent as AgentClass
         from digital_employee.kernel.agents.parser import AgentDef
         from digital_employee.kernel.agents.tool_filter import resolve_agent_tools
-        from digital_employee.kernel.agent import Agent as AgentClass
-        from digital_employee.kernel.conversation import ConversationManager
         from digital_employee.kernel.permissions import (
             DangerousCommandDetector,
             PathSandbox,
             PermissionChecker,
             PermissionMode,
-            RuleEngine,
         )
         from digital_employee.kernel.worktree.integration import (
             build_worktree_notice,

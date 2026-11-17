@@ -4,7 +4,7 @@ import json
 import random
 import string
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import IO, Any
 
@@ -95,9 +95,9 @@ class SessionRecord:
             return None
         ts_raw = data.get("ts")
         if isinstance(ts_raw, (int, float)):
-            ts = datetime.fromtimestamp(ts_raw, tz=timezone.utc)
+            ts = datetime.fromtimestamp(ts_raw, tz=UTC)
         else:
-            ts = datetime.now(timezone.utc)
+            ts = datetime.now(UTC)
         return cls(
             role=data["role"],
             content=data.get("content", ""),
@@ -115,7 +115,7 @@ class SessionRecord:
             cls(
                 role=message.role,
                 content=message.content,
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
                 tool_uses=_tool_uses_to_dicts(message),
                 tool_results=_tool_results_to_dicts(message),
             )
@@ -173,7 +173,7 @@ def make_compact_boundary(summary: str, keep: list[Message]) -> SessionRecord:
     return SessionRecord(
         role="system",
         content=payload,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         type=TYPE_COMPACT_BOUNDARY,
     )
 
@@ -248,8 +248,8 @@ class SessionMeta:
     summary: str = ""
     message_count: int = 0
     total_tokens: int = 0
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    last_active: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    last_active: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def save(self, path: Path) -> None:
         data = {
@@ -307,7 +307,7 @@ class Session:
         self._file.flush()
 
         self.meta.message_count += 1
-        self.meta.last_active = datetime.now(timezone.utc)
+        self.meta.last_active = datetime.now(UTC)
 
         if not self.meta.title and message.role == "user" and message.content:
             self.meta.title = message.content[:TITLE_MAX_LENGTH]
@@ -323,7 +323,7 @@ class Session:
         """
         self._file.write(record.to_jsonl() + "\n")
         self._file.flush()
-        self.meta.last_active = datetime.now(timezone.utc)
+        self.meta.last_active = datetime.now(UTC)
         self.meta.save(self._sessions_dir / f"{self.session_id}.meta")
 
 
@@ -485,7 +485,7 @@ class SessionManager:
         return deleted
 
     def cleanup(self, max_age_days: int = DEFAULT_MAX_AGE_DAYS) -> int:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
         removed = 0
 
         for meta_path in list(self._sessions_dir.glob("*.meta")):

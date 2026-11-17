@@ -152,7 +152,7 @@ class Bash(Tool):
                 env=self.env,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await proc.wait()
             return ToolResult(output=f"Error: command timed out after {timeout}s", is_error=True)
