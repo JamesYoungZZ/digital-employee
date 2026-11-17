@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -210,6 +211,41 @@ class CodingLoopOutcome:
     trace_log: list[str] = field(default_factory=list)
 
 
+def _summarize_tool_start(fn_name: str, args: dict[str, Any]) -> tuple[str, str]:
+    if fn_name == "read_file":
+        return "📖", f"读取源码 `{args.get('path', '')}` (L{args.get('start_line', 1)}-{args.get('end_line', 220)})"
+    if fn_name == "search_code":
+        return "🔎", f"搜索符号 `{args.get('pattern', '')}`"
+    if fn_name == "list_files":
+        return "📂", f"扫描目录 `{args.get('prefix', '') or '/'}`"
+    if fn_name == "edit_file":
+        return "✏️", f"修改文件 `{args.get('path', '')}`"
+    if fn_name == "write_file":
+        return "📝", f"写入文件 `{args.get('path', '')}`"
+    if fn_name == "run_pytest":
+        targets = ", ".join(str(x) for x in (args.get("targets") or []))
+        return "🧪", f"运行单测 `{targets}`"
+    if fn_name == "git_diff":
+        return "📋", "检查当前 git diff"
+    return "⚙️", f"调用工具 `{fn_name}`"
+
+
+def _summarize_tool_result(fn_name: str, tool_output: str) -> tuple[str, str]:
+    if tool_output.startswith("POLICY_VIOLATION:"):
+        return "🚫", tool_output[:200]
+    if tool_output.startswith("TOOL_ERROR"):
+        return "⚠️", tool_output[:200]
+    if fn_name == "run_pytest":
+        lines = [ln.strip() for ln in tool_output.splitlines() if ln.strip()]
+        exit_part = lines[0] if lines else "exit_code=?"
+        tail = lines[-1] if len(lines) > 1 else ""
+        ok = exit_part == "exit_code=0"
+        return ("✅" if ok else "❌"), f"pytest {'通过' if ok else '未通过'} ({exit_part}) · {tail[:120]}"
+    if fn_name in ("edit_file", "write_file"):
+        return "✅", tool_output.splitlines()[0][:140] if tool_output else "已更新文件"
+    return "✓", ""
+
+
 class SandboxCodingAgent:
     """Executes the bounded interactive probe -> edit -> test loop inside `WorktreeSandbox`."""
 
@@ -225,7 +261,33 @@ class SandboxCodingAgent:
         prior_feedback: str = "",
         followup_comment: str = "",
         remaining_budget_usd: float = 1.50,
+        on_step: Callable[[dict[str, Any]], None] | None = None,
     ) -> CodingLoopOutcome:
+        def _emit(
+            *,
+            step: int,
+            kind: str,
+            icon: str,
+            title: str,
+            detail: str = "",
+            step_cost_usd: float = 0.0,
+        ) -> None:
+            if on_step is not None:
+                try:
+                    on_step(
+                        {
+                            "step": step,
+                            "max_steps": self.max_steps,
+                            "kind": kind,
+                            "icon": icon,
+                            "title": title,
+                            "detail": detail[:800],
+                            "step_cost_usd": step_cost_usd,
+                        }
+                    )
+                except Exception:
+                    pass
+
         ledger = DecisionLedger.from_repo(
             Path(sandbox.profile.local_path), sandbox.profile.decision_ledger_path
         )
@@ -258,6 +320,13 @@ class SandboxCodingAgent:
                 )
                 return outcome
 
+            _emit(
+                step=step,
+                kind="thinking",
+                icon="🧠",
+                title=f"Step {step}/{self.max_steps} · 模型推理规划中 ({self.llm.settings.reasoning_model})…",
+            )
+
             assistant_msg, metrics = self.llm.chat(
                 messages,
                 model=self.llm.settings.reasoning_model,
@@ -267,6 +336,20 @@ class SandboxCodingAgent:
             outcome.cost_usd = round(outcome.cost_usd + metrics.estimated_cost_usd, 6)
             outcome.steps_used = step
             messages.append(assistant_msg)
+
+            thought_raw = str(
+                assistant_msg.get("reasoning_content") or assistant_msg.get("content") or ""
+            ).strip()
+            if thought_raw:
+                one_line_thought = " ".join(thought_raw.split())[:180]
+                _emit(
+                    step=step,
+                    kind="thought",
+                    icon="💭",
+                    title=f"Step {step}/{self.max_steps} · 思考摘要",
+                    detail=one_line_thought,
+                    step_cost_usd=metrics.estimated_cost_usd,
+                )
 
             tool_calls = assistant_msg.get("tool_calls") or []
             if not tool_calls:
@@ -293,6 +376,13 @@ class SandboxCodingAgent:
                 outcome.trace_log.append(f"[Step {step}] {fn_name}({json.dumps(args, ensure_ascii=False)[:240]})")
 
                 if fn_name == "request_clarification":
+                    _emit(
+                        step=step,
+                        kind="clarify",
+                        icon="⏸️",
+                        title=f"Step {step}/{self.max_steps} · 发现关键歧义，请求你拍板",
+                        detail=str(args.get("question", "")),
+                    )
                     outcome.needs_clarification = UnresolvedDecision(
                         question=str(args.get("question", "")),
                         options=[str(o) for o in (args.get("options") or [])],
@@ -302,6 +392,13 @@ class SandboxCodingAgent:
                     return outcome
 
                 if fn_name == "finish_noop":
+                    _emit(
+                        step=step,
+                        kind="finish_noop",
+                        icon="✅",
+                        title=f"Step {step}/{self.max_steps} · 基线已满足条件，发起 No-Op 校验",
+                        detail=str(args.get("summary", "")),
+                    )
                     outcome.completed = True
                     outcome.is_noop = True
                     outcome.noop_test_targets = [
@@ -315,6 +412,13 @@ class SandboxCodingAgent:
                     return outcome
 
                 if fn_name == "finish_task":
+                    _emit(
+                        step=step,
+                        kind="finish_task",
+                        icon="🏁",
+                        title=f"Step {step}/{self.max_steps} · 编码完成，提交进入硬核证据门禁",
+                        detail=f"回归目标: {args.get('repro_test_target', '')} | {args.get('summary', '')}",
+                    )
                     outcome.completed = True
                     outcome.repro_test_target = str(
                         args.get("repro_test_target") or contract.target_repro_test
@@ -326,7 +430,25 @@ class SandboxCodingAgent:
                     outcome.summary = str(args.get("summary") or "").strip()
                     return outcome
 
+                t_icon, t_title = _summarize_tool_start(fn_name, args)
+                _emit(
+                    step=step,
+                    kind="tool_run",
+                    icon=t_icon,
+                    title=f"Step {step}/{self.max_steps} · {t_title}",
+                )
+
                 tool_output = self._dispatch_tool(sandbox, contract, fn_name, args, outcome)
+                r_icon, r_title = _summarize_tool_result(fn_name, tool_output)
+                if r_title:
+                    _emit(
+                        step=step,
+                        kind="tool_result",
+                        icon=r_icon,
+                        title=f"Step {step}/{self.max_steps} · {r_title}",
+                        detail=tool_output[-500:] if fn_name == "run_pytest" else "",
+                    )
+
                 if outcome.policy_violation:
                     # Still feed violation back once unless repeated; let agent correct path if simply outside scope
                     outcome.trace_log.append(f"  -> POLICY BLOCKED: {outcome.policy_violation}")

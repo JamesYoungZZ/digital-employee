@@ -158,11 +158,27 @@ export interface TaskItem {
   failure_class: string;
   failure_reason?: string | null;
   sandbox_attempt_count: number;
+  current_step?: number;
+  max_steps?: number;
+  current_activity?: string;
+  worker_alive?: boolean;
   total_cost_usd: number;
   agent_elapsed_seconds: number;
   estimated_net_minutes_saved?: number | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface LiveStreamEvent {
+  ts: string;
+  attempt: number;
+  step: number;
+  max_steps: number;
+  kind: string;
+  icon: string;
+  title: string;
+  detail?: string;
+  cost_usd?: number;
 }
 
 export interface CheckpointItem {
@@ -200,6 +216,7 @@ export interface FeishuCardPayload {
 export interface TaskDetailResponse {
   task: TaskItem;
   checkpoints: CheckpointItem[];
+  live_events?: LiveStreamEvent[];
   diff: string;
   verification_log: string;
   feishu_card_preview: FeishuCardPayload;

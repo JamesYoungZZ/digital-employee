@@ -98,7 +98,7 @@ export function App() {
     syncAll().catch((e) => toast.error(e.message));
     const timer = setInterval(() => {
       syncAll().catch(() => {});
-    }, 3000);
+    }, 2000);
     return () => clearInterval(timer);
   }, [syncAll]);
 
@@ -108,7 +108,7 @@ export function App() {
       syncSelectedDetail(selectedTaskId);
       const timer = setInterval(() => {
         syncSelectedDetail(selectedTaskId);
-      }, 3000);
+      }, 1800);
       return () => clearInterval(timer);
     } else {
       if (window.location.hash.startsWith("#task=")) {

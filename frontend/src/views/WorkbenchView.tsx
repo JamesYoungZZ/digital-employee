@@ -523,8 +523,25 @@ export function WorkbenchView({
                           {t.contract.target_repo}
                         </code>
                       </td>
-                      <td className="px-3 py-3.5 max-w-md truncate text-zinc-800 dark:text-zinc-200 font-medium">
-                        {t.contract.objective}
+                      <td className="px-3 py-3.5 max-w-md text-zinc-800 dark:text-zinc-200 font-medium">
+                        <div className="truncate">{t.contract.objective}</div>
+                        {["QUEUED", "RUNNING_IN_SANDBOX", "VERIFYING_EVIDENCE"].includes(
+                          t.lifecycle_status
+                        ) && (
+                          <div className="mt-1 flex items-center gap-1.5 truncate text-[11px] font-normal text-blue-600 dark:text-blue-400">
+                            {t.worker_alive ? (
+                              <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+                            ) : (
+                              <span className="h-2 w-2 rounded-full bg-amber-500 shrink-0" />
+                            )}
+                            <span className="truncate">
+                              {t.current_activity ||
+                                (t.worker_alive
+                                  ? `第 ${t.sandbox_attempt_count || 1} 轮沙箱执行中…`
+                                  : "后台执行线程已离线（点开可一键唤醒）")}
+                            </span>
+                          </div>
+                        )}
                       </td>
                       <td className="px-3 py-3.5 whitespace-nowrap">
                         <StatusBadge status={t.lifecycle_status} />

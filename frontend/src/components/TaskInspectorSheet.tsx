@@ -45,8 +45,17 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
   const [ruleText, setRuleText] = React.useState("");
   const [showLedgerForm, setShowLedgerForm] = React.useState(false);
   const [busyAction, setBusyAction] = React.useState<string | null>(null);
+  const liveContainerRef = React.useRef<HTMLDivElement | null>(null);
 
   const taskId = detail?.task.task_id;
+  const liveCount = detail?.live_events?.length ?? 0;
+
+  React.useEffect(() => {
+    const el = liveContainerRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [liveCount, taskId]);
 
   React.useEffect(() => {
     if (!detail) return;
@@ -230,6 +239,19 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
               </Button>
             )}
 
+            {((isRunning && !t.worker_alive) ||
+              t.lifecycle_status === "HANDED_OFF_INCOMPLETE" ||
+              (ev?.reviewer_report?.verdict === "BLOCK" && !t.worker_alive)) && (
+              <Button
+                variant="primary"
+                disabled={!!busyAction}
+                onClick={() => runControl("retry")}
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                {ev?.reviewer_report?.verdict === "BLOCK" ? "按 Review 意见自动返修" : "重新唤醒执行"}
+              </Button>
+            )}
+
             <Button
               variant="outline"
               disabled={!!busyAction || t.lifecycle_status === "HANDED_OFF_INCOMPLETE"}
@@ -268,16 +290,80 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
             </div>
           )}
 
-          {isRunning && (
-            <div className="flex items-center gap-3 rounded-xl border border-blue-500/30 bg-blue-500/8 px-4 py-3 text-xs text-blue-700 dark:text-blue-300">
-              <Loader2 className="h-4 w-4 animate-spin shrink-0 text-blue-500" />
-              <div>
-                <span className="font-semibold">
-                  隔离沙箱正在异步执行（第 {t.sandbox_attempt_count || 1} 轮尝试）
-                </span>
-                <span className="ml-2 opacity-80">
-                  状态流每 3 秒自动无感同步，跑过 Fail-to-Pass 门禁后自动创建线上 GitHub Draft PR。
-                </span>
+          {/* Real-Time Agent Loop Live Stream Terminal */}
+          {(isRunning || (detail.live_events && detail.live_events.length > 0)) && (
+            <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 text-zinc-100 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/90 bg-zinc-900/90 px-4 py-2.5 text-xs">
+                <div className="flex items-center gap-2 font-medium">
+                  {isRunning && t.worker_alive ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-400" />
+                      <span className="text-emerald-400">Agent Loop 实时运行中</span>
+                    </>
+                  ) : isRunning && !t.worker_alive ? (
+                    <>
+                      <span className="h-2 w-2 rounded-full bg-amber-400" />
+                      <span className="text-amber-300">后台线程曾中断（点击右上角「重新唤醒执行」立即恢复）</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="h-3.5 w-3.5 text-zinc-400" />
+                      <span className="text-zinc-300">Agent Loop 执行实况回放</span>
+                    </>
+                  )}
+                  <span className="font-mono text-[11px] text-zinc-400">
+                    · 第 {t.sandbox_attempt_count || 1} 轮 · Step {t.current_step || 0}/{t.max_steps || 32} · 实时花费 ${t.total_cost_usd.toFixed(4)}
+                  </span>
+                </div>
+                {isRunning && (t.max_steps ?? 32) > 0 && (
+                  <div className="h-1.5 w-28 overflow-hidden rounded-full bg-zinc-800">
+                    <div
+                      className="h-full bg-emerald-500 transition-all duration-300"
+                      style={{
+                        width: `${Math.min(100, Math.round(((t.current_step || 1) / (t.max_steps || 32)) * 100))}%`,
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+
+              <div
+                ref={liveContainerRef}
+                className="max-h-60 overflow-y-auto px-4 py-3 space-y-2 font-mono text-[11.5px] leading-relaxed"
+              >
+                {(!detail.live_events || detail.live_events.length === 0) ? (
+                  <div className="text-zinc-500">正在等待首个沙箱动作事件写入…</div>
+                ) : (
+                  detail.live_events.map((evItem, idx) => {
+                    const timeStr = evItem.ts ? evItem.ts.slice(11, 19) : "";
+                    return (
+                      <div key={idx} className="space-y-0.5 border-l-2 border-zinc-800 pl-2.5">
+                        <div className="flex items-start gap-2">
+                          <span className="text-zinc-500 shrink-0">{timeStr}</span>
+                          <span className="shrink-0">{evItem.icon}</span>
+                          <span
+                            className={cn(
+                              "text-zinc-200",
+                              evItem.kind === "thinking" && "text-blue-300",
+                              evItem.kind === "thought" && "text-zinc-400 italic",
+                              evItem.kind === "gate_rejected" && "text-amber-300",
+                              evItem.kind === "error" && "text-red-400",
+                              (evItem.kind === "finish_task" || evItem.kind === "deliver") &&
+                                "text-emerald-300 font-semibold"
+                            )}
+                          >
+                            {evItem.title}
+                          </span>
+                        </div>
+                        {evItem.detail && (
+                          <div className="pl-16 text-[11px] text-zinc-400 whitespace-pre-wrap break-words">
+                            {evItem.detail}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
               </div>
             </div>
           )}

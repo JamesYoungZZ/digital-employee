@@ -175,6 +175,9 @@ class DurableTaskState(BaseModel):
     failure_class: FailureClass = "NONE"
     failure_reason: str | None = None
     sandbox_attempt_count: int = 0
+    current_step: int = 0
+    max_steps: int = 32
+    current_activity: str = ""
     total_cost_usd: float = 0.0
     agent_elapsed_seconds: float = 0.0
     human_interaction_seconds: int = 0

@@ -129,6 +129,7 @@ def build_api_router(
         items: list[dict[str, Any]] = []
         for t in orch.store.list_tasks(status=status, limit=limit):
             d = t.model_dump()
+            d["worker_alive"] = orch.is_task_actively_running(t.task_id)
             d["estimated_net_minutes_saved"] = (
                 t.estimated_net_minutes_saved
                 if t.lifecycle_status
@@ -172,10 +173,12 @@ def build_api_router(
             active_card = build_accepted_receipt_card(state, orch.web_base_url)
 
         dumped = state.model_dump()
+        dumped["worker_alive"] = orch.is_task_actively_running(task_id)
         dumped["estimated_net_minutes_saved"] = state.estimated_net_minutes_saved
         return {
             "task": dumped,
             "checkpoints": orch.store.list_checkpoints(task_id),
+            "live_events": orch.read_live_events(task_id, limit=120),
             "diff": diff_text,
             "verification_log": log_text,
             "feishu_card_preview": active_card,
@@ -229,7 +232,48 @@ def build_api_router(
         return state.model_dump()
 
     @router.post("/tasks/{task_id}/control")
-    def api_control_task(task_id: str, payload: ControlPayload) -> dict[str, Any]:
+    def api_control_task(
+        task_id: str,
+        payload: ControlPayload,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        if payload.action == "retry":
+            state = orch.store.get_task(task_id)
+            if state is None:
+                raise HTTPException(status_code=404, detail="Task not found")
+            if orch.is_task_actively_running(task_id):
+                return state.model_dump()
+
+            followup = payload.note.strip()
+            ev = state.verification_evidence
+            if not followup and ev and ev.reviewer_report and ev.reviewer_report.blocking_issues:
+                issues_txt = "\n".join(
+                    f"- [{b.severity}] {b.path}:{b.line or ''} {b.message}"
+                    for b in ev.reviewer_report.blocking_issues
+                )
+                followup = f"Resolve all blocking Code Review issues:\n{issues_txt}"
+
+            state.lifecycle_status = "QUEUED"
+            state.failure_class = "NONE"
+            state.failure_reason = None
+            state.handoff_bundle = None
+            orch.append_live_event(
+                state,
+                attempt=state.sandbox_attempt_count + 1,
+                kind="retry",
+                icon="🔄",
+                title="已手动唤醒沙箱继续执行…",
+                detail=followup[:240],
+            )
+            orch.store.save_task(state, step_name="manual_retry_queued", note=followup[:200] or "Manual retry")
+            background_tasks.add_task(
+                orch.execute_task,
+                task_id,
+                publish_pr=state.auto_publish_pr or orch.github.is_configured,
+                followup_comment=followup,
+            )
+            return state.model_dump()
+
         try:
             state = orch.update_scope_or_cancel(
                 task_id,

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from digital_employee.agents.coding_loop import SandboxCodingAgent
 from digital_employee.agents.contract_drafter import ContractDrafter
@@ -87,6 +89,100 @@ class DelegationOrchestrator:
             app_secret=self.settings.feishu_app_secret,
             default_chat_id=self.settings.feishu_default_chat_id,
         )
+        self._active_lock = threading.Lock()
+        self._active_tasks: set[str] = set()
+
+    def is_task_actively_running(self, task_id: str) -> bool:
+        with self._active_lock:
+            return task_id in self._active_tasks
+
+    def _live_stream_file(self, task_id: str) -> Path:
+        tdir = self.settings.artifacts_dir / task_id
+        tdir.mkdir(parents=True, exist_ok=True)
+        return tdir / "live_stream.jsonl"
+
+    def append_live_event(
+        self,
+        state: DurableTaskState,
+        *,
+        attempt: int = 1,
+        step: int = 0,
+        max_steps: int = 32,
+        kind: str = "info",
+        icon: str = "•",
+        title: str,
+        detail: str = "",
+        step_cost_usd: float = 0.0,
+    ) -> None:
+        entry = {
+            "ts": utc_now_iso(),
+            "attempt": attempt,
+            "step": step,
+            "max_steps": max_steps,
+            "kind": kind,
+            "icon": icon,
+            "title": title,
+            "detail": detail,
+            "cost_usd": round(state.total_cost_usd + step_cost_usd, 6),
+        }
+        try:
+            with self._live_stream_file(state.task_id).open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        if step > 0:
+            state.current_step = step
+        state.max_steps = max_steps
+        state.current_activity = f"{icon} {title}"
+        self.store.save_task(state)
+
+    def read_live_events(self, task_id: str, limit: int = 120) -> list[dict[str, Any]]:
+        fp = self.settings.artifacts_dir / task_id / "live_stream.jsonl"
+        if not fp.is_file():
+            return []
+        out: list[dict[str, Any]] = []
+        for ln in fp.read_text(encoding="utf-8").splitlines()[-limit:]:
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                out.append(json.loads(ln))
+            except json.JSONDecodeError:
+                continue
+        return out
+
+    def recover_orphaned_tasks(self) -> list[str]:
+        """Auto-resume tasks left in `RUNNING_IN_SANDBOX`/`VERIFYING_EVIDENCE`/`QUEUED` after a daemon restart."""
+        resumed: list[str] = []
+        for st_name in ("RUNNING_IN_SANDBOX", "VERIFYING_EVIDENCE", "QUEUED"):
+            for st in self.store.list_tasks(status=st_name, limit=20):
+                if self.is_task_actively_running(st.task_id):
+                    continue
+                if st_name in ("RUNNING_IN_SANDBOX", "VERIFYING_EVIDENCE") and st.sandbox_attempt_count > 0:
+                    st.sandbox_attempt_count = max(0, st.sandbox_attempt_count - 1)
+                self.append_live_event(
+                    st,
+                    attempt=st.sandbox_attempt_count + 1,
+                    step=0,
+                    max_steps=self.settings.max_coding_steps,
+                    kind="recovery",
+                    icon="🔄",
+                    title="检测到服务重启中断，已自动恢复沙箱后台执行…",
+                )
+                self.store.save_task(
+                    st,
+                    step_name="auto_resumed_after_restart",
+                    note="Automatically resumed orphaned in-flight task after daemon restart.",
+                )
+                threading.Thread(
+                    target=self.execute_task,
+                    args=(st.task_id,),
+                    kwargs={"publish_pr": st.auto_publish_pr or self.github.is_configured},
+                    name=f"de-recover-{st.task_id}",
+                    daemon=True,
+                ).start()
+                resumed.append(st.task_id)
+        return resumed
 
     def bind_feishu_default_chat_id(self, chat_id: str) -> None:
         """Auto-bind the active Feishu chat_id so Web/CLI tasks also push approval cards to Feishu."""
@@ -257,6 +353,25 @@ class DelegationOrchestrator:
         publish_pr: bool = False,
         followup_comment: str = "",
     ) -> DurableTaskState:
+        with self._active_lock:
+            if task_id in self._active_tasks:
+                return self._require_task(task_id)
+            self._active_tasks.add(task_id)
+        try:
+            return self._execute_task_inner(
+                task_id, publish_pr=publish_pr, followup_comment=followup_comment
+            )
+        finally:
+            with self._active_lock:
+                self._active_tasks.discard(task_id)
+
+    def _execute_task_inner(
+        self,
+        task_id: str,
+        *,
+        publish_pr: bool = False,
+        followup_comment: str = "",
+    ) -> DurableTaskState:
         state = self._require_task(task_id)
         profile = self.settings.resolve_repository(state.contract.target_repo)
         sandbox = WorktreeSandbox(
@@ -267,6 +382,15 @@ class DelegationOrchestrator:
         )
 
         # Idempotently provision isolated git worktree
+        self.append_live_event(
+            state,
+            attempt=1,
+            step=0,
+            max_steps=self.settings.max_coding_steps,
+            kind="provision",
+            icon="📦",
+            title=f"正在准备独立隔离沙箱 git worktree (`{profile.repo_id}` @ `{state.contract.base_commit_sha[:8]}`)…",
+        )
         try:
             self.store.run_idempotent(
                 state,
@@ -291,6 +415,16 @@ class DelegationOrchestrator:
         for attempt in range(1, max_attempts + 1):
             state.sandbox_attempt_count += 1
             state.lifecycle_status = "RUNNING_IN_SANDBOX"
+            self.append_live_event(
+                state,
+                attempt=attempt,
+                step=0,
+                max_steps=self.settings.max_coding_steps,
+                kind="attempt_start",
+                icon="🚀",
+                title=f"启动第 {attempt}/{max_attempts} 轮交互式编码循环…",
+                detail=feedback[:300] if feedback else "",
+            )
             self.store.save_task(
                 state,
                 step_name=f"sandbox_attempt_{attempt}",
@@ -315,10 +449,28 @@ class DelegationOrchestrator:
                     prior_feedback=feedback,
                     followup_comment=followup_comment if attempt == 1 else "",
                     remaining_budget_usd=remaining_budget,
+                    on_step=lambda ev, att=attempt: self.append_live_event(
+                        state,
+                        attempt=att,
+                        step=int(ev.get("step", 0)),
+                        max_steps=int(ev.get("max_steps", self.settings.max_coding_steps)),
+                        kind=str(ev.get("kind", "step")),
+                        icon=str(ev.get("icon", "•")),
+                        title=str(ev.get("title", "")),
+                        detail=str(ev.get("detail", "")),
+                        step_cost_usd=float(ev.get("step_cost_usd", 0.0)),
+                    ),
                 )
             except TransientLLMError as exc:
                 state.failure_class = "TRANSIENT_INFRA"
                 state.failure_reason = str(exc)
+                self.append_live_event(
+                    state,
+                    attempt=attempt,
+                    kind="error",
+                    icon="⚠️",
+                    title=f"模型网络/接口异常: {str(exc)[:140]}",
+                )
                 self.store.save_task(state, step_name="transient_infra_error", note=str(exc))
                 raise
 
@@ -448,6 +600,13 @@ class DelegationOrchestrator:
 
             # Run Deterministic Evidence Gate (Fail-to-Pass + Anti-Tampering + Suite + Lint)
             state.lifecycle_status = "VERIFYING_EVIDENCE"
+            self.append_live_event(
+                state,
+                attempt=attempt,
+                kind="gate",
+                icon="🛡️",
+                title=f"正在执行硬核证据门禁 (`Fail-to-Pass` 基线对比 `{outcome.repro_test_target}`)…",
+            )
             self.store.save_task(
                 state,
                 step_name=f"verifying_evidence_{attempt}",
@@ -477,6 +636,13 @@ class DelegationOrchestrator:
                 and evidence.scope_compliance_check
                 and evidence.static_analysis_passed
             ):
+                self.append_live_event(
+                    state,
+                    attempt=attempt,
+                    kind="review",
+                    icon="🔍",
+                    title=f"单测门禁通过！正在调用独立 AI Reviewer (`{self.settings.reviewer_model}`) 审查代码…",
+                )
                 rev_t0 = time.monotonic()
                 reviewer_report, rev_cost = self.reviewer.review(
                     contract=state.contract,
@@ -489,12 +655,27 @@ class DelegationOrchestrator:
                 )
                 evidence.reviewer_report = reviewer_report
                 evidence.unverified_risks = list(reviewer_report.unverified_risks)
+                self.append_live_event(
+                    state,
+                    attempt=attempt,
+                    kind="review_done",
+                    icon="✅" if reviewer_report.verdict == "APPROVE" else "🛑",
+                    title=f"独立 Code Review 完成：`{reviewer_report.verdict}` ({len(reviewer_report.blocking_issues)} 阻断项)",
+                    detail=reviewer_report.summary,
+                )
 
             state.verification_evidence = evidence
 
             if evidence.passed_all_hard_gates:
                 state.failure_class = "NONE"
                 state.failure_reason = None
+                self.append_live_event(
+                    state,
+                    attempt=attempt,
+                    kind="deliver",
+                    icon="🚀",
+                    title="所有本地门禁与 AI Review 已通过！正在推送分支并创建正式 PR…",
+                )
                 return self._deliver_verified_result(
                     state,
                     sandbox=sandbox,
@@ -504,6 +685,14 @@ class DelegationOrchestrator:
 
             # Prepare concise diagnostic feedback for the next self-heal iteration
             feedback = self._format_gate_failures(evidence, gate_res.diagnostic_log)
+            self.append_live_event(
+                state,
+                attempt=attempt,
+                kind="gate_rejected",
+                icon="↩️",
+                title=f"第 {attempt} 轮门禁未通过，正在携带报错反馈进入自愈修正…",
+                detail=feedback[:400],
+            )
             self.store.save_task(
                 state,
                 step_name=f"gate_rejected_{attempt}",

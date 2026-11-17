@@ -276,13 +276,18 @@ class LLMClient:
         sub_env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{sub_env.get('PATH', '')}"
 
         if os.path.isfile(agy_bin):
+            agy_model = (
+                "gemini-3.8-flash-high"
+                if chosen_model == "gemini-3.8-flash"
+                else chosen_model
+            )
             cmd = [
                 agy_bin,
                 "--disable-slash-commands",
                 "--effort",
                 "medium",
                 "--model",
-                chosen_model,
+                agy_model,
                 "-p",
                 combined_prompt,
             ]
@@ -294,14 +299,25 @@ class LLMClient:
                 timeout=max(120.0, self.settings.llm_timeout_seconds),
                 check=False,
             )
-            if proc.returncode != 0:
-                raise TransientLLMError(
-                    f"agy CLI ({chosen_model}) exited {proc.returncode}: {(proc.stderr or proc.stdout)[:320]}"
+            if proc.returncode == 0 and proc.stdout.strip():
+                return {"role": "assistant", "content": proc.stdout.strip()}, LLMCallMetrics(
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    estimated_cost_usd=0.0,
                 )
-            return {"role": "assistant", "content": proc.stdout.strip()}, LLMCallMetrics(
-                prompt_tokens=0,
-                completion_tokens=0,
-                estimated_cost_usd=0.0,
+            err_detail = (proc.stderr or proc.stdout or "").strip()
+            # Graceful fallback if current VPN region blocks agy CLI or not yet signed in
+            if self.settings.llm_api_key:
+                fallback_client = LLMClient(
+                    self.settings,
+                    provider="openai_compatible",
+                    base_url=self.settings.llm_base_url,
+                    api_key=self.settings.llm_api_key,
+                    default_model=self.settings.fast_model,
+                )
+                return fallback_client.chat(messages, model=self.settings.fast_model, json_mode=True, max_tokens=8192)
+            raise TransientLLMError(
+                f"agy CLI ({agy_model}) exited {proc.returncode}: {err_detail[:320]}"
             )
 
         gemini_bin = shutil.which("gemini") or "/opt/homebrew/bin/gemini"

@@ -39,6 +39,7 @@ def create_app(
         if enable_background_daemons:
             poller.start()
             feishu_ws_active = start_feishu_long_connection_if_configured(orch)
+            orch.recover_orphaned_tasks()
         try:
             yield
         finally:
