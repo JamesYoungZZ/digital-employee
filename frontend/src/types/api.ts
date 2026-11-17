@@ -206,6 +206,7 @@ export interface FeishuIntegrationStatus {
   webhook_masked: string;
   app_id: string;
   app_secret_configured: boolean;
+  default_chat_id?: string;
   ws_active: boolean;
   callback_webhook_path: string;
 }

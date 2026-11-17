@@ -19,6 +19,7 @@ from digital_employee.integrations.feishu_cards import (
     build_test_connection_card,
     parse_feishu_command,
 )
+from digital_employee.integrations.feishu_ws import start_feishu_long_connection_if_configured
 from digital_employee.onboarding import onboard_repository
 from digital_employee.orchestrator import DelegationOrchestrator
 from digital_employee.settings import PROJECT_ROOT, Settings
@@ -285,6 +286,7 @@ def build_api_router(
             "webhook_masked": masked_wh,
             "app_id": orch.feishu.app_id,
             "app_secret_configured": bool(orch.feishu.app_secret),
+            "default_chat_id": orch.feishu.default_chat_id,
             "ws_active": bool(feishu_ws_fn()),
             "callback_webhook_path": f"{orch.web_base_url}/webhooks/feishu",
         }
@@ -302,30 +304,55 @@ def build_api_router(
             updates["DE_FEISHU_APP_SECRET"] = payload.app_secret.strip()
             cfg.feishu_app_secret = payload.app_secret.strip()
 
-        if updates:
-            _upsert_dotenv_keys(PROJECT_ROOT / ".env", updates)
-
-        orch.feishu = FeishuNotifier(
+        candidate = FeishuNotifier(
             cfg.feishu_webhook_url,
             app_id=cfg.feishu_app_id,
             app_secret=cfg.feishu_app_secret,
+            default_chat_id=cfg.feishu_default_chat_id,
         )
-        return {"ok": True, "feishu_configured": orch.feishu.is_configured}
+        # Validate App ID & Secret immediately against Feishu Auth API if both are present
+        if candidate.app_id and candidate.app_secret:
+            try:
+                candidate.verify_app_credentials()
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"飞书 App ID / App Secret 校验失败: {exc}",
+                ) from exc
+
+        if updates:
+            _upsert_dotenv_keys(PROJECT_ROOT / ".env", updates)
+
+        orch.feishu = candidate
+        ws_started = start_feishu_long_connection_if_configured(orch)
+        return {
+            "ok": True,
+            "feishu_configured": orch.feishu.is_configured,
+            "ws_active": ws_started,
+        }
 
     @router.post("/integrations/feishu/test")
     def api_test_feishu_push() -> dict[str, Any]:
         card = build_test_connection_card(orch.web_base_url)
-        if not orch.feishu.webhook_url:
+        if not orch.feishu.is_configured:
             return {
                 "ok": False,
-                "message": "尚未配置 DE_FEISHU_WEBHOOK_URL，已在下方返回卡片仿真预览。",
+                "message": "尚未配置飞书 Webhook 或自建应用凭证，已在下方返回卡片仿真预览。",
                 "card_preview": card,
             }
         try:
             delivery = orch.feishu.send_card(card)
+            if delivery == "local_artifact_only":
+                return {
+                    "ok": False,
+                    "message": "飞书应用凭证已连通，但尚未绑定会话！请在手机/电脑飞书里找到你的机器人发一句「连接」（或将机器人拉入群聊），即可自动绑定并接收卡片。",
+                    "card_preview": card,
+                }
+            if orch.feishu.default_chat_id:
+                orch.bind_feishu_default_chat_id(orch.feishu.default_chat_id)
             return {
                 "ok": True,
-                "message": f"测试卡片已成功推送至飞书群 ({delivery})！",
+                "message": f"测试卡片已成功推送至飞书 ({delivery})！",
                 "card_preview": card,
             }
         except Exception as exc:

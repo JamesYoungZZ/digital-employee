@@ -408,7 +408,11 @@ def parse_feishu_command(
     if not cleaned:
         return {"intent": "empty"}
 
-    # 0. Quick merge approval reply ("批准", "同意合入", "合入", "approve", "merge")
+    # 0. Greeting / connection ping ("连接", "绑定", "你好", "hi", "ping", "help", "帮助")
+    if cleaned.lower() in {"连接", "绑定", "测试", "你好", "您好", "hi", "hello", "ping", "help", "帮助", "?"}:
+        return {"intent": "bind_ping"}
+
+    # 0b. Quick merge approval reply ("批准", "同意合入", "合入", "approve", "merge")
     if cleaned.lower() in {"批准", "同意合入", "合入", "批准合入", "approve", "merge", "lgtm"}:
         return {"intent": "quick_approve_merge"}
 
@@ -453,10 +457,12 @@ class FeishuNotifier:
         *,
         app_id: str = "",
         app_secret: str = "",
+        default_chat_id: str = "",
     ) -> None:
         self.webhook_url = webhook_url.strip()
         self.app_id = app_id.strip()
         self.app_secret = app_secret.strip()
+        self.default_chat_id = default_chat_id.strip()
 
     @property
     def is_configured(self) -> bool:
@@ -473,23 +479,57 @@ class FeishuNotifier:
             raise RuntimeError(f"Feishu auth error: {data.get('msg')}")
         return str(data["tenant_access_token"])
 
+    def verify_app_credentials(self) -> str:
+        """Validate `app_id` & `app_secret` against Feishu Auth API; returns token prefix."""
+        if not (self.app_id and self.app_secret):
+            raise ValueError("Missing Feishu App ID or App Secret")
+        with httpx.Client(timeout=10.0) as client:
+            tok = self._fetch_tenant_token(client)
+            return tok[:10]
+
+    def _auto_discover_bot_chat_id(self, client: httpx.Client, token: str) -> str:
+        """Discover the first group chat the bot belongs to when `default_chat_id` is unset."""
+        try:
+            resp = client.get(
+                "https://open.feishu.cn/open-apis/im/v1/chats",
+                params={"page_size": 5},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if resp.status_code < 400:
+                items = (resp.json().get("data") or {}).get("items") or []
+                if items:
+                    cid = str(items[0].get("chat_id") or "")
+                    if cid:
+                        self.default_chat_id = cid
+                        return cid
+        except Exception:
+            pass
+        return ""
+
     def send_card(self, card_payload: dict[str, Any], *, chat_id: str = "") -> str:
         results: list[str] = []
         with httpx.Client(timeout=15.0) as client:
-            if chat_id and self.app_id and self.app_secret:
+            target_chat_id = chat_id.strip() or self.default_chat_id
+            if self.app_id and self.app_secret:
                 token = self._fetch_tenant_token(client)
-                resp = client.post(
-                    "https://open.feishu.cn/open-apis/im/v1/messages",
-                    params={"receive_id_type": "chat_id"},
-                    headers={"Authorization": f"Bearer {token}"},
-                    json={
-                        "receive_id": chat_id,
-                        "msg_type": "interactive",
-                        "content": json.dumps(card_payload["card"], ensure_ascii=False),
-                    },
-                )
-                resp.raise_for_status()
-                results.append(f"openapi_chat:{resp.status_code}")
+                if not target_chat_id:
+                    target_chat_id = self._auto_discover_bot_chat_id(client, token)
+                if target_chat_id:
+                    resp = client.post(
+                        "https://open.feishu.cn/open-apis/im/v1/messages",
+                        params={"receive_id_type": "chat_id"},
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={
+                            "receive_id": target_chat_id,
+                            "msg_type": "interactive",
+                            "content": json.dumps(card_payload["card"], ensure_ascii=False),
+                        },
+                    )
+                    resp.raise_for_status()
+                    body = resp.json()
+                    if isinstance(body, dict) and body.get("code", 0) not in (0, None):
+                        raise RuntimeError(f"Feishu OpenAPI send error: {body}")
+                    results.append(f"openapi_chat:{target_chat_id[:12]}")
 
             if self.webhook_url:
                 resp = client.post(self.webhook_url, json=card_payload)

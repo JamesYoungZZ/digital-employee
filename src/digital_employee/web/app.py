@@ -9,7 +9,10 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from digital_employee.integrations.feishu_ws import start_feishu_long_connection_if_configured
+from digital_employee.integrations.feishu_ws import (
+    is_feishu_ws_running,
+    start_feishu_long_connection_if_configured,
+)
 from digital_employee.integrations.github_poller import GitHubFollowThroughPoller
 from digital_employee.orchestrator import DelegationOrchestrator
 from digital_employee.settings import Settings, load_settings
@@ -53,7 +56,7 @@ def create_app(
             cfg,
             orch,
             poller_enabled_fn=lambda: enable_background_daemons and orch.github.is_configured,
-            feishu_ws_fn=lambda: feishu_ws_active,
+            feishu_ws_fn=lambda: feishu_ws_active or is_feishu_ws_running(),
         )
     )
     app.include_router(build_webhook_router(orch))

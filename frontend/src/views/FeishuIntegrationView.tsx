@@ -2,7 +2,9 @@ import React from "react";
 import {
   ArrowRight,
   CheckCircle2,
+  Copy,
   Cpu,
+  ExternalLink,
   MessageSquareCode,
   Play,
   Send,
@@ -13,6 +15,23 @@ import type { FeishuCardPayload, FeishuIntegrationStatus } from "../types/api";
 import { apiFetch } from "../lib/utils";
 import { Button, SurfaceCard } from "../components/ui/primitives";
 import { FeishuCardPreview } from "../components/FeishuCardPreview";
+
+const FEISHU_PERMISSIONS_JSON = JSON.stringify(
+  {
+    scopes: {
+      tenant: [
+        "im:message",
+        "im:message:send_as_bot",
+        "im:message.p2p_msg:readonly",
+        "im:message.group_at_msg:readonly",
+        "im:chat:readonly",
+      ],
+      user: [],
+    },
+  },
+  null,
+  2
+);
 
 interface Props {
   onTaskDispatched: () => Promise<void>;
@@ -215,9 +234,56 @@ export function FeishuIntegrationView({ onTaskDispatched }: Props) {
               </div>
             </div>
 
-            <div className="rounded-lg bg-zinc-50 dark:bg-zinc-950 p-3 text-[11.5px] text-zinc-500">
-              群 Webhook 状态：<b>{status?.webhook_configured ? "已连通" : "待配置"}</b> · 自建应用：
-              <b>{status?.app_secret_configured ? "已配置" : "待配置"}</b>
+            <div className="rounded-lg bg-zinc-50 dark:bg-zinc-950 p-3 space-y-1 text-[11.5px] text-zinc-600 dark:text-zinc-400">
+              <div>
+                长连接状态：{" "}
+                <b className={status?.ws_active ? "text-emerald-600 dark:text-emerald-400" : ""}>
+                  {status?.ws_active ? "🟢 WebSocket 已在线（收消息 + 点卡片按钮均免公网）" : "⚪ 待填入 App ID & Secret"}
+                </b>
+              </div>
+              <div>
+                群 Webhook：<b>{status?.webhook_configured ? "已连通" : "可选（未配也可走应用直推）"}</b>
+                {" · "}默认推送会话：
+                <b>{status?.default_chat_id ? `已绑定 (${status.default_chat_id.slice(0, 12)}…)` : "给机器人发句「连接」自动绑定"}</b>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-blue-500/25 bg-blue-500/5 p-3.5 space-y-2 text-[11.5px] text-zinc-700 dark:text-zinc-300 leading-relaxed">
+              <div className="flex items-center justify-between font-semibold text-blue-700 dark:text-blue-300">
+                <span>⚡ 3 分钟零公网接入飞书自建机器人指南</span>
+                <a
+                  href="https://open.feishu.cn/app"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 underline hover:opacity-80"
+                >
+                  打开飞书开放平台 <ExternalLink className="h-3 w-3" />
+                </a>
+              </div>
+              <ol className="list-decimal pl-4 space-y-1">
+                <li>
+                  创建<b>企业自建应用</b> → 左侧「添加应用能力」开启<b>机器人</b> → 在「凭证与基础信息」复制 <code>App ID</code> 和 <code>App Secret</code> 先填到上方保存（<b>先让本地长连接跑起来</b>，飞书后台下一步才能校验通过！）。
+                </li>
+                <li>
+                  左侧「权限管理」→ 点<b>批量导入/导出权限</b>，粘贴下方权限 JSON 并申请开通：
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(FEISHU_PERMISSIONS_JSON);
+                      toast.success("已复制飞书权限 JSON，直接去「批量导入权限」粘贴即可！");
+                    }}
+                    className="ml-2 inline-flex items-center gap-1 rounded bg-blue-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-blue-500 cursor-pointer"
+                  >
+                    <Copy className="h-2.5 w-2.5" /> 一键复制权限 JSON
+                  </button>
+                </li>
+                <li>
+                  左侧「事件与回调」→ <b>事件配置</b>选<b>「使用长连接接收事件」</b>添加 <code>im.message.receive_v1</code>（接收消息）；<b>回调配置</b>同样选<b>「使用长连接接收回调」</b>添加 <code>card.action.trigger</code>（卡片交互）→ 点顶部「创建版本并发布」。
+                </li>
+                <li>
+                  打开手机/电脑飞书搜到该机器人，发一句 <code>连接</code>，即可自动绑定会话并收到绿色欢迎卡！
+                </li>
+              </ol>
             </div>
 
             <div className="flex flex-wrap gap-2 pt-1">

@@ -85,7 +85,30 @@ class DelegationOrchestrator:
             self.settings.feishu_webhook_url,
             app_id=self.settings.feishu_app_id,
             app_secret=self.settings.feishu_app_secret,
+            default_chat_id=self.settings.feishu_default_chat_id,
         )
+
+    def bind_feishu_default_chat_id(self, chat_id: str) -> None:
+        """Auto-bind the active Feishu chat_id so Web/CLI tasks also push approval cards to Feishu."""
+        cid = chat_id.strip()
+        if not cid or cid == self.settings.feishu_default_chat_id:
+            return
+        self.settings.feishu_default_chat_id = cid
+        self.feishu.default_chat_id = cid
+        env_path = self.settings.data_dir.parent / ".env"
+        if env_path.is_file():
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+            updated = False
+            out: list[str] = []
+            for ln in lines:
+                if ln.strip().startswith("DE_FEISHU_DEFAULT_CHAT_ID="):
+                    out.append(f"DE_FEISHU_DEFAULT_CHAT_ID={cid}")
+                    updated = True
+                else:
+                    out.append(ln)
+            if not updated:
+                out.append(f"DE_FEISHU_DEFAULT_CHAT_ID={cid}")
+            env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
     @property
     def web_base_url(self) -> str:
@@ -781,6 +804,17 @@ class DelegationOrchestrator:
         intent = parsed.get("intent")
 
         if intent == "empty":
+            return None
+
+        if intent == "bind_ping":
+            if chat_id:
+                self.bind_feishu_default_chat_id(chat_id)
+            from digital_employee.integrations.feishu_cards import build_test_connection_card
+
+            try:
+                self.feishu.send_card(build_test_connection_card(self.web_base_url), chat_id=chat_id)
+            except Exception:
+                pass
             return None
 
         if intent == "quick_approve_merge":

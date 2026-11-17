@@ -66,6 +66,7 @@ class Settings(BaseModel):
     feishu_app_id: str = ""
     feishu_app_secret: str = Field(default="", repr=False)
     feishu_verification_token: str = Field(default="", repr=False)
+    feishu_default_chat_id: str = ""
 
     web_host: str = "127.0.0.1"
     web_port: int = 8020
@@ -233,6 +234,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         feishu_app_id=get_val("DE_FEISHU_APP_ID", ""),
         feishu_app_secret=get_val("DE_FEISHU_APP_SECRET", ""),
         feishu_verification_token=get_val("DE_FEISHU_VERIFICATION_TOKEN", ""),
+        feishu_default_chat_id=get_val("DE_FEISHU_DEFAULT_CHAT_ID", ""),
         web_host=get_val("DE_WEB_HOST", "127.0.0.1"),
         web_port=int(get_val("DE_WEB_PORT", "8020")),
     )
