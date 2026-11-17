@@ -183,6 +183,10 @@ export interface FeishuCardPayload {
     elements?: Array<{
       tag: string;
       content?: string;
+      fields?: Array<{
+        is_short?: boolean;
+        text?: { tag?: string; content?: string };
+      }>;
       actions?: Array<{
         tag: string;
         type?: string;

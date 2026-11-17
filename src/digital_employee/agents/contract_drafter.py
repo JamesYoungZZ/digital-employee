@@ -24,7 +24,11 @@ CRITICAL RULES:
 3. **SINGLE COHESIVE SLICE RULE (CRITICAL)**: Every PR must be small, atomic, and reviewable (1 bug or 1 cohesive module per task). If the delegator gives a broad/backlog request (e.g., "fix all remaining 11 failing tests" or "fix broken unit tests" without naming one file), DO NOT draft an all-at-once contract for the whole repository! Instead, run/use the discovered failing test snapshot below to select **ONE concrete, code-fixable failing unit test module** (skipping tests that only fail due to missing optional third-party C/system libraries like `PyMuPDF`) as this task's bounded `objective` and `target_repro_test`, and put the remaining unrelated test modules into `out_of_scope` for subsequent PRs! Set `"unresolved_decisions": []` when scoping a clear failing unit test so execution proceeds immediately without unnecessary friction. If the live pytest snapshot shows **0 failures (`exit_code=0`, all tests already passing)** on a test-fixing request, set `"unresolved_decisions": []`, `"target_repro_test": ""`, and state in `objective` to verify the suite in the isolated worktree and conclude cleanly via `finish_noop` if zero failures exist.
 4. `permitted_scopes`: list minimal directory/file prefixes needed (always include both the relevant source module and `tests/` directory so regression tests can be added or updated). NEVER include `.github/workflows/`, `.env`, or `.ai/DECISIONS.yaml`.
 5. `unresolved_decisions`: ONLY add a question (maximum 2) if there is a genuine business/behavioral ambiguity within the single chosen module that CANNOT be determined from existing tests, code, or DecisionLedger. If existing unit tests or clear bug symptoms already specify expected behavior, return `"unresolved_decisions": []`!
-6. Output valid JSON with exact keys:
+6. **LANGUAGE & BREVITY RULE (CRITICAL FOR MOBILE FEISHU CARDS)**:
+   - Write ALL human-facing fields (`objective`, `reproduction_evidence`, `acceptance_criteria`, `out_of_scope`, `unresolved_decisions[].question`, `options`, `default_assumption`, `impact_scope`) in **简洁直白的中文**! NEVER output long academic English paragraphs!
+   - `objective`: **严格一句话中文标题（≤ 45 字）**，例如 `"修复 sparse_encoder 连字符与数字分词错误"`。
+   - `unresolved_decisions[].question`: **≤ 35 字直白中文提问**；每个 `option` **≤ 18 字中文短语**；`impact_scope` **≤ 12 字**。
+7. Output valid JSON with exact keys:
 {
   "objective": "string",
   "reproduction_evidence": "string",

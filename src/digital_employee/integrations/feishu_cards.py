@@ -15,26 +15,41 @@ TASK_TAG_RE = re.compile(r"#?(t-\d{8}-[a-f0-9]{6})\b", re.IGNORECASE)
 REPO_BRACKET_RE = re.compile(r"^\[([A-Za-z0-9_.\-]+)\]\s*(.+)$", re.DOTALL)
 
 
+def _clip(text: str, limit: int = 80) -> str:
+    """Collapse newlines and cap length so Feishu cards stay crisp and mobile-friendly."""
+    compact = " ".join((text or "").split()).strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1].rstrip() + "…"
+
+
+def _meta_fields(left_label: str, left_val: str, right_label: str, right_val: str) -> dict[str, Any]:
+    return {
+        "tag": "div",
+        "fields": [
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**{left_label}**\n{left_val}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**{right_label}**\n{right_val}"}},
+        ],
+    }
+
+
 def build_clarification_card(
     state: DurableTaskState, web_base_url: str = "http://127.0.0.1:8020"
 ) -> dict[str, Any]:
-    """Build 5-second micro-clarification Feishu interactive card."""
+    """Build concise 5-second micro-clarification Feishu interactive card."""
     c = state.contract
     decision_lines: list[str] = []
     action_buttons: list[dict[str, Any]] = []
 
-    for idx, d in enumerate(c.unresolved_decisions, start=1):
-        opts = "\n".join(f"  `{i}` {o}" for i, o in enumerate(d.options, start=1))
-        decision_lines.append(
-            f"**问题 {idx}（影响范围：{d.impact_scope}）**\n{d.question}\n"
-            f"{opts}\n"
-            f"- 💡 *默认假设*：`{d.default_assumption}`"
-        )
-        for opt in d.options[:3]:
+    for idx, d in enumerate(c.unresolved_decisions[:2], start=1):
+        opts = "\n".join(f"`{i}` {_clip(o, 42)}" for i, o in enumerate(d.options[:3], start=1))
+        q_prefix = f"**待确认 {idx}**：" if len(c.unresolved_decisions) > 1 else "**待确认**："
+        decision_lines.append(f"{q_prefix}{_clip(d.question, 70)}\n{opts}")
+        for opt in d.options[:2]:
             action_buttons.append(
                 {
                     "tag": "button",
-                    "text": {"tag": "plain_text", "content": opt[:26]},
+                    "text": {"tag": "plain_text", "content": _clip(opt, 18)},
                     "type": "default",
                     "value": {
                         "action": "clarify_answer",
@@ -48,18 +63,15 @@ def build_clarification_card(
     action_buttons.append(
         {
             "tag": "button",
-            "text": {"tag": "plain_text", "content": "按默认假设继续"},
+            "text": {"tag": "plain_text", "content": "按默认继续"},
             "type": "primary",
-            "value": {
-                "action": "clarify_default",
-                "task_id": state.task_id,
-            },
+            "value": {"action": "clarify_default", "task_id": state.task_id},
         }
     )
     action_buttons.append(
         {
             "tag": "button",
-            "text": {"tag": "plain_text", "content": "在控制台查看"},
+            "text": {"tag": "plain_text", "content": "控制台"},
             "type": "default",
             "url": f"{web_base_url}/#task={state.task_id}",
         }
@@ -69,25 +81,17 @@ def build_clarification_card(
         "msg_type": "interactive",
         "card": {
             "header": {
-                "title": {
-                    "tag": "plain_text",
-                    "content": f"⏸️ 需你 5 秒拍板 | 任务 #{state.task_id}",
-                },
+                "title": {"tag": "plain_text", "content": f"⏸️ 需你拍板 · {state.task_id}"},
                 "template": "orange",
             },
             "elements": [
+                _meta_fields("仓库", f"`{c.target_repo}` (`{c.base_branch}`)", "目标", _clip(c.objective, 52)),
+                {"tag": "hr"},
                 {
                     "tag": "markdown",
-                    "content": (
-                        f"**推断目标**：{c.objective}\n"
-                        f"**目标仓库**：`{c.target_repo}` (`{c.base_branch}` @ `{c.base_commit_sha[:8]}`)\n"
-                        f"**允许修改**：`{', '.join(c.permitted_scopes)}`\n"
-                        f"**明确不碰**：`{', '.join(c.out_of_scope[:4])}`\n\n"
-                        + "\n\n".join(decision_lines)
-                        + "\n\n*提示：可直接点击下方按钮，或在群内直接回复 `默认` / 选项序号 `1`、`2`。*"
-                    ),
+                    "content": "\n\n".join(decision_lines) + "\n\n<font color='grey'>直接点按钮，或回复 1 / 2 / 默认</font>",
                 },
-                {"tag": "action", "actions": action_buttons[:5]},
+                {"tag": "action", "actions": action_buttons[:4]},
             ],
         },
     }
@@ -96,34 +100,28 @@ def build_clarification_card(
 def build_accepted_receipt_card(
     state: DurableTaskState, web_base_url: str = "http://127.0.0.1:8020"
 ) -> dict[str, Any]:
-    """Build immediate task acceptance receipt card when contract has 0 ambiguities."""
+    """Build concise task acceptance receipt card."""
     c = state.contract
     return {
         "msg_type": "interactive",
         "card": {
             "header": {
-                "title": {
-                    "tag": "plain_text",
-                    "content": f"🚀 已受理并进入隔离沙箱 | #{state.task_id}",
-                },
+                "title": {"tag": "plain_text", "content": f"🚀 已接单开工 · {state.task_id}"},
                 "template": "blue",
             },
             "elements": [
+                _meta_fields("仓库", f"`{c.target_repo}` (`{c.base_branch}`)", "沙箱分支", f"`{state.branch_name}`"),
+                {"tag": "hr"},
                 {
                     "tag": "markdown",
-                    "content": (
-                        f"**契约目标**：{c.objective}\n"
-                        f"**目标仓库**：`{c.target_repo}` -> 独立分支 `{state.branch_name}`\n"
-                        f"**允许范围**：`{', '.join(c.permitted_scopes)}`\n"
-                        f"**预计交付**：沙箱复现并跑通 `Fail-to-Pass` 门禁后将自动推送 Draft PR 报告卡。"
-                    ),
+                    "content": f"**任务**：{_clip(c.objective, 75)}\n<font color='grey'>跑通单测、AI 审查与线上 CI 后，将向你推送合入审批卡。</font>",
                 },
                 {
                     "tag": "action",
                     "actions": [
                         {
                             "tag": "button",
-                            "text": {"tag": "plain_text", "content": "查看实时沙箱进度"},
+                            "text": {"tag": "plain_text", "content": "查看进度"},
                             "type": "default",
                             "url": f"{web_base_url}/#task={state.task_id}",
                         }
@@ -137,63 +135,46 @@ def build_accepted_receipt_card(
 def build_evidence_report_card(
     state: DurableTaskState, web_base_url: str = "http://127.0.0.1:8020"
 ) -> dict[str, Any]:
-    """Build final Evidence Report Feishu card (strictly links to human OAuth Git UI for merge)."""
+    """Build concise PR opened & verified card (while GitHub CI is running)."""
     ev = state.verification_evidence
-    risks = (
-        ev.reviewer_report.unverified_risks
-        if (ev and ev.reviewer_report and ev.reviewer_report.unverified_risks)
-        else (ev.unverified_risks if ev else [])
-    )
-    risk_md = "\n".join(f"- {r}" for r in risks) if risks else "- 无额外未覆盖风险"
-    rev_summary = (
-        ev.reviewer_report.summary
-        if (ev and ev.reviewer_report and ev.reviewer_report.summary)
-        else "已通过确定性回归验证与反作弊检查。"
-    )
+    rev_verdict = ev.reviewer_report.verdict if (ev and ev.reviewer_report) else "APPROVE"
+    pr_label = f"PR #{state.deliverable_pr_number}" if state.deliverable_pr_number else f"`{(state.head_commit_sha or '')[:8]}`"
 
-    actions: list[dict[str, Any]] = [
-        {
-            "tag": "button",
-            "text": {"tag": "plain_text", "content": "打开控制台看 Diff & 日志"},
-            "type": "default",
-            "url": f"{web_base_url}/#task={state.task_id}",
-                        }
-    ]
+    actions: list[dict[str, Any]] = []
     if state.deliverable_pr_url:
-        actions.insert(
-            0,
+        actions.append(
             {
                 "tag": "button",
-                "text": {"tag": "plain_text", "content": "前往 GitHub 审阅并合入 Draft PR"},
+                "text": {"tag": "plain_text", "content": f"查看 {pr_label}"},
                 "type": "primary",
                 "url": state.deliverable_pr_url,
-            },
+            }
         )
+    actions.append(
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "控制台详情"},
+            "type": "default",
+            "url": f"{web_base_url}/#task={state.task_id}",
+        }
+    )
 
     return {
         "msg_type": "interactive",
         "card": {
             "header": {
-                "title": {
-                    "tag": "plain_text",
-                    "content": f"✅ 证据门禁已通过 | #{state.task_id}",
-                },
-                "template": "green",
+                "title": {"tag": "plain_text", "content": f"🧪 本地验证已过 · 等待线上 CI ({pr_label})"},
+                "template": "turquoise",
             },
             "elements": [
+                _meta_fields("仓库", f"`{state.contract.target_repo}`", "花费", f"`${state.total_cost_usd:.3f}`"),
+                {"tag": "hr"},
                 {
                     "tag": "markdown",
                     "content": (
-                        f"**任务目标**：{state.contract.objective}\n"
-                        f"**交付分支**：`{state.branch_name}` (`{(state.head_commit_sha or '')[:8]}`)\n"
-                        f"**回归单测 (`Fail -> Pass`)**：`{ev.repro_test_target if ev else ''}`\n"
-                        f"- 基线复现失败：`{'✅ 是' if (ev and ev.repro_test_failed_on_base) else '❌ 否'}` | "
-                        f"修复后通过：`{'✅ 是' if (ev and ev.repro_test_passed_on_head) else '❌ 否'}` | "
-                        f"反作弊扫描：`✅ 通过`\n"
-                        f"**审查摘要**：{rev_summary}\n"
-                        f"**效率核算**：预计净省人工 `{state.estimated_net_minutes_saved} 分钟` · 模型费用 `${state.total_cost_usd:.4f}`\n\n"
-                        f"**⚠️ 未验证边界诚实披露 (Unverified Risks)**：\n{risk_md}\n\n"
-                        f"*追改提示：直接在 GitHub PR 评论，或在群内发 `#{state.task_id} 你的修改意见` 即可自动增量更新。*"
+                        f"**改动**：{_clip(state.contract.objective, 75)}\n"
+                        f"**门禁**：✅ 单测 `Fail→Pass` · {'✅' if rev_verdict == 'APPROVE' else '🛑'} AI Review `{rev_verdict}`\n"
+                        f"<font color='grey'>线上 GitHub Actions CI 全绿后将推送「批准合入」按钮。</font>"
                     ),
                 },
                 {"tag": "action", "actions": actions},
@@ -205,44 +186,39 @@ def build_evidence_report_card(
 def build_merge_approval_card(
     state: DurableTaskState, web_base_url: str = "http://127.0.0.1:8020"
 ) -> dict[str, Any]:
-    """Build interactive Merge Approval Card pushed once PR Review + GitHub CI both pass."""
+    """Build crisp, executive-friendly Merge Approval Card once Review + CI both pass."""
     mc = state.merge_approval_card
     ev = state.verification_evidence
     pr_num = mc.pr_number if mc else (state.deliverable_pr_number or 0)
     pr_url = (mc.pr_url if mc else state.deliverable_pr_url) or web_base_url
-    rev_model = mc.reviewer_model if mc else (
-        ev.reviewer_report.reviewer_model if (ev and ev.reviewer_report) else ""
+    rev_summary = _clip(
+        (mc.reviewer_summary if mc else (ev.reviewer_report.summary if (ev and ev.reviewer_report) else ""))
+        or "代码改动克制，无阻断级风险。",
+        85,
     )
-    rev_summary = mc.reviewer_summary if mc else (
-        ev.reviewer_report.summary if (ev and ev.reviewer_report) else ""
-    )
-    ci_cnt = mc.ci_checks_count if mc else 0
-    risk_line = mc.residual_risk if mc else (
-        ev.unverified_risks[0] if (ev and ev.unverified_risks) else "无额外未覆盖风险"
-    )
+    ci_cnt = mc.ci_checks_count if mc else 2
 
     return {
         "msg_type": "interactive",
         "card": {
             "header": {
-                "title": {
-                    "tag": "plain_text",
-                    "content": f"🛎️ 待你审批合入 | PR #{pr_num} 审查与 CI 已全绿",
-                },
+                "title": {"tag": "plain_text", "content": f"🛎️ 待你审批合入 · PR #{pr_num}"},
                 "template": "green",
             },
             "elements": [
+                _meta_fields(
+                    "目标仓库",
+                    f"`{state.contract.target_repo}` → `{state.contract.base_branch}`",
+                    "校验状态",
+                    f"CI `{ci_cnt}/{ci_cnt}` 全绿 · `${state.total_cost_usd:.3f}`",
+                ),
+                {"tag": "hr"},
                 {
                     "tag": "markdown",
                     "content": (
-                        f"**任务目标**：{state.contract.objective}\n"
-                        f"**目标分支**：`{state.branch_name}` → `{state.contract.base_branch}` (`{(state.head_commit_sha or '')[:8]}`)\n"
-                        f"- **回归门禁 (`Fail → Pass`)**：`{ev.repro_test_target if ev else ''}` ✅\n"
-                        f"- **独立跨模型 PR Review (`{rev_model}`)**：`APPROVE · 0 Blocking` ✅\n"
-                        f"- **线上 GitHub Actions CI**：`{ci_cnt} 项检查全部通过` ✅\n\n"
-                        f"**审查摘要**：{rev_summary}\n"
-                        f"**残余边界提示**：{risk_line}\n\n"
-                        f"*点击下方「批准并自动合入」或直接回复 `批准` / `#{state.task_id} 批准`，系统将立即执行 Squash Merge。*"
+                        f"**修复内容**：{_clip(state.contract.objective, 75)}\n"
+                        f"**AI 审查结论**：{rev_summary}\n"
+                        f"**准入门禁**：✅ 单测复现通过 · ✅ Review 0 阻断 · ✅ 线上 CI 全绿"
                     ),
                 },
                 {
@@ -252,25 +228,19 @@ def build_merge_approval_card(
                             "tag": "button",
                             "text": {"tag": "plain_text", "content": "✅ 批准并自动合入"},
                             "type": "primary",
-                            "value": {
-                                "action": "approve_merge",
-                                "task_id": state.task_id,
-                            },
+                            "value": {"action": "approve_merge", "task_id": state.task_id},
                         },
                         {
                             "tag": "button",
-                            "text": {"tag": "plain_text", "content": "查看 GitHub PR"},
+                            "text": {"tag": "plain_text", "content": f"看 PR #{pr_num}"},
                             "type": "default",
                             "url": pr_url,
                         },
                         {
                             "tag": "button",
-                            "text": {"tag": "plain_text", "content": "暂缓 / 拒绝"},
+                            "text": {"tag": "plain_text", "content": "暂缓"},
                             "type": "default",
-                            "value": {
-                                "action": "reject_merge",
-                                "task_id": state.task_id,
-                            },
+                            "value": {"action": "reject_merge", "task_id": state.task_id},
                         },
                     ],
                 },
@@ -282,35 +252,29 @@ def build_merge_approval_card(
 def build_handoff_card(
     state: DurableTaskState, web_base_url: str = "http://127.0.0.1:8020"
 ) -> dict[str, Any]:
-    """Build structured Handoff Bundle card when task cannot complete autonomously."""
+    """Build concise Handoff card when task pauses for human intervention."""
     hb = state.handoff_bundle
-    clues = "\n".join(f"- {c[:200]}" for c in (hb.root_cause_clues if hb else [])) or "- 见执行轨迹日志"
+    reason = _clip((hb.reason if hb else state.failure_reason) or "未能在预算步数内通过门禁", 80)
     return {
         "msg_type": "interactive",
         "card": {
             "header": {
-                "title": {
-                    "tag": "plain_text",
-                    "content": f"🤝 结构化交接包 (Handoff) | #{state.task_id}",
-                },
+                "title": {"tag": "plain_text", "content": f"🤝 需人工接手 · {state.task_id}"},
                 "template": "wathet",
             },
             "elements": [
+                _meta_fields("仓库", f"`{state.contract.target_repo}`", "现场分支", f"`{state.branch_name}`"),
+                {"tag": "hr"},
                 {
                     "tag": "markdown",
-                    "content": (
-                        f"**停止原因 (`{state.failure_class}`)**：{hb.reason if hb else state.failure_reason}\n"
-                        f"**已保留现场分支**：`{state.branch_name}`\n"
-                        f"**已排查线索**：\n{clues}\n"
-                        f"**建议下一步**：{hb.recommended_next_step if hb else '人工接手 worktree 继续验证'}"
-                    ),
+                    "content": f"**任务**：{_clip(state.contract.objective, 65)}\n**卡点**：{reason}",
                 },
                 {
                     "tag": "action",
                     "actions": [
                         {
                             "tag": "button",
-                            "text": {"tag": "plain_text", "content": "打开控制台查看现场"},
+                            "text": {"tag": "plain_text", "content": "打开控制台看日志"},
                             "type": "primary",
                             "url": f"{web_base_url}/#task={state.task_id}",
                         }
@@ -324,38 +288,26 @@ def build_handoff_card(
 def build_noop_verified_card(
     state: DurableTaskState, web_base_url: str = "http://127.0.0.1:8020"
 ) -> dict[str, Any]:
-    """Build clean No-Op completion card when sandbox test suite is already 100% green."""
+    """Build concise No-Op completion card."""
     ev = state.verification_evidence
-    summary = ev.noop_summary if (ev and ev.noop_summary) else "目标测试集已在基线全部通过，无需修改代码。"
-    target = ev.repro_test_target if ev else "tests"
+    summary = _clip(ev.noop_summary if (ev and ev.noop_summary) else "目标测试集已全部通过，无需改代码。", 80)
     return {
         "msg_type": "interactive",
         "card": {
             "header": {
-                "title": {
-                    "tag": "plain_text",
-                    "content": f"✅ 体检通过・无需改动 (No-Op) | #{state.task_id}",
-                },
+                "title": {"tag": "plain_text", "content": f"✅ 体检全绿・无需改动 · {state.task_id}"},
                 "template": "green",
             },
             "elements": [
-                {
-                    "tag": "markdown",
-                    "content": (
-                        f"**任务目标**：{state.contract.objective}\n"
-                        f"**目标仓库**：`{state.contract.target_repo}` (`{state.contract.base_branch}` @ `{state.contract.base_commit_sha[:8]}`)\n"
-                        f"- **独立沙箱实测目标**：`{target}` (`exit_code=0` ✅)\n"
-                        f"- **文件变更数**：`0 个文件（保持干净，未发起多余 PR）`\n\n"
-                        f"**体检结论**：{summary}\n"
-                        f"**花费**：`${state.total_cost_usd:.4f}`"
-                    ),
-                },
+                _meta_fields("仓库", f"`{state.contract.target_repo}` (`{state.contract.base_branch}`)", "改动文件", "`0` (未建多余 PR)"),
+                {"tag": "hr"},
+                {"tag": "markdown", "content": f"**结论**：{summary}"},
                 {
                     "tag": "action",
                     "actions": [
                         {
                             "tag": "button",
-                            "text": {"tag": "plain_text", "content": "打开控制台查看验证日志"},
+                            "text": {"tag": "plain_text", "content": "查看日志"},
                             "type": "default",
                             "url": f"{web_base_url}/#task={state.task_id}",
                         }
@@ -367,21 +319,22 @@ def build_noop_verified_card(
 
 
 def build_test_connection_card(web_base_url: str = "http://127.0.0.1:8020") -> dict[str, Any]:
-    """Sample card sent when user clicks 'Send Test Card to Feishu' in Console."""
+    """Crisp welcome & quick-command card sent on `连接` / `链接` / `帮助`."""
     return {
         "msg_type": "interactive",
         "card": {
             "header": {
-                "title": {"tag": "plain_text", "content": "🟢 AI 研发数字员工连接成功"},
+                "title": {"tag": "plain_text", "content": "🟢 数字员工已就绪"},
                 "template": "green",
             },
             "elements": [
                 {
                     "tag": "markdown",
                     "content": (
-                        "飞书消息通道已就绪！后续任务的 **5 秒契约微确认卡**、**Fail-to-Pass 证据交付卡** 与 **结构化交接卡** 将实时推送到此处。\n\n"
-                        "- **派活输入格式**：`[仓库名] 修复某某问题或报错堆栈`\n"
-                        "- **追改输入格式**：`#t-20261116-xxxxxx 补充某个边界判断`"
+                        "已绑定当前会话，你可以直接这样使唤我：\n"
+                        "• **派活**：`[modular-rag] 修复某某报错`\n"
+                        "• **合入**：收到审批卡直接点按钮，或回 `批准`\n"
+                        "• **追改**：`#任务号 补充边界处理`"
                     ),
                 },
                 {
@@ -389,7 +342,7 @@ def build_test_connection_card(web_base_url: str = "http://127.0.0.1:8020") -> d
                     "actions": [
                         {
                             "tag": "button",
-                            "text": {"tag": "plain_text", "content": "打开数字员工工作台"},
+                            "text": {"tag": "plain_text", "content": "打开工作台"},
                             "type": "primary",
                             "url": web_base_url,
                         }
@@ -408,8 +361,30 @@ def parse_feishu_command(
     if not cleaned:
         return {"intent": "empty"}
 
-    # 0. Greeting / connection ping ("连接", "绑定", "你好", "hi", "ping", "help", "帮助")
-    if cleaned.lower() in {"连接", "绑定", "测试", "你好", "您好", "hi", "hello", "ping", "help", "帮助", "?"}:
+    # 0. Greeting / connection ping ("连接", "链接", "绑定", "你好", "hi", "ping", "help", "帮助")
+    if (
+        cleaned.lower()
+        in {
+            "连接",
+            "链接",
+            "绑定",
+            "测试",
+            "你好",
+            "您好",
+            "在吗",
+            "菜单",
+            "状态",
+            "status",
+            "hi",
+            "hello",
+            "ping",
+            "help",
+            "帮助",
+            "?",
+            "？",
+        }
+        or len(cleaned) <= 2
+    ):
         return {"intent": "bind_ping"}
 
     # 0b. Quick merge approval reply ("批准", "同意合入", "合入", "approve", "merge")

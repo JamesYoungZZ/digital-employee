@@ -8,13 +8,16 @@ const HEADER_GRADIENTS: Record<string, string> = {
   orange: "from-amber-500 to-orange-500",
   blue: "from-blue-600 to-indigo-500",
   wathet: "from-cyan-600 to-sky-500",
+  turquoise: "from-teal-600 to-cyan-500",
 };
 
 function renderFormattedLine(line: string, idx: number) {
+  const cleaned = line.replace(/<font[^>]*>/g, "").replace(/<\/font>/g, "");
+  const isMuted = line.includes("<font color='grey'>");
   // Split bold **...** and inline code `...` cleanly without raw dangerouslySetInnerHTML
-  const tokens = line.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  const tokens = cleaned.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
   return (
-    <div key={idx} className="min-h-[1.25rem]">
+    <div key={idx} className={cn("min-h-[1.25rem]", isMuted && "text-[11.5px] text-zinc-400")}>
       {tokens.map((tok, i) => {
         if (tok.startsWith("**") && tok.endsWith("**")) {
           return (
@@ -68,6 +71,20 @@ export function FeishuCardPreview({ payload }: { payload?: FeishuCardPayload | n
       {/* Card Markdown & Action Elements */}
       <div className="space-y-3 p-4 text-[12.5px] leading-relaxed text-zinc-700 dark:text-zinc-300">
         {(card.elements ?? []).map((el, idx) => {
+          if (el.tag === "hr") {
+            return <hr key={idx} className="border-zinc-100 dark:border-zinc-800" />;
+          }
+          if (el.tag === "div" && el.fields?.length) {
+            return (
+              <div key={idx} className="grid grid-cols-2 gap-3 text-xs">
+                {el.fields.map((f, fIdx) => (
+                  <div key={fIdx} className="space-y-0.5">
+                    {(f.text?.content ?? "").split("\n").map((ln, lIdx) => renderFormattedLine(ln, lIdx))}
+                  </div>
+                ))}
+              </div>
+            );
+          }
           if (el.tag === "markdown" && el.content) {
             return (
               <div key={idx} className="space-y-0.5">

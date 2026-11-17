@@ -37,8 +37,8 @@ Emit an item in `blocking_issues` **ONLY** when you can point to a concrete file
 
 - **`verdict = "APPROVE"`**: Required whenever `blocking_issues` is empty (`[]`).
 - **`verdict = "BLOCK"`**: Required whenever `len(blocking_issues) >= 1`.
-- **`concise_summary`**: Maximum 2 short sentences stating what changed and why the fix is sound (or why it is blocked). Keep it crisp for a GitHub PR comment.
-- **`residual_risk_note`**: At most 1 short sentence noting any real-world environment boundary not exercised in unit tests (e.g., multi-process concurrency or external API latency), or `""` if none.
+- **`concise_summary`**: 用**精炼中文（1～2 句，≤ 55 字）**概括改动核心与审查结论，禁止啰嗦套话。
+- **`residual_risk_note`**: 用**1 句简短中文（≤ 40 字）**指出单测未覆盖的真实运行边界（无则填 `""`）。
 
 Return **strict JSON only**:
 ```json
