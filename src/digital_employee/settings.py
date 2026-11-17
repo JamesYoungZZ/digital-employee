@@ -74,6 +74,14 @@ class Settings(BaseModel):
     feishu_verification_token: str = Field(default="", repr=False)
     feishu_default_chat_id: str = ""
 
+    # Jira Integration (Authoritative Work-Order Source of Truth)
+    jira_base_url: str = ""
+    jira_email: str = ""
+    jira_api_token: str = Field(default="", repr=False)
+    jira_default_project: str = ""
+    jira_poll_jql: str = 'labels = "ai-delegate" AND statusCategory = "To Do"'
+    jira_poller_enabled: bool = True
+
     web_host: str = "127.0.0.1"
     web_port: int = 8020
 
@@ -270,6 +278,16 @@ def load_settings(env_file: Path | None = None) -> Settings:
         feishu_app_secret=get_val("DE_FEISHU_APP_SECRET", ""),
         feishu_verification_token=get_val("DE_FEISHU_VERIFICATION_TOKEN", ""),
         feishu_default_chat_id=get_val("DE_FEISHU_DEFAULT_CHAT_ID", ""),
+        jira_base_url=get_val("DE_JIRA_BASE_URL", ""),
+        jira_email=get_val("DE_JIRA_EMAIL", ""),
+        jira_api_token=get_val("DE_JIRA_API_TOKEN", ""),
+        jira_default_project=get_val("DE_JIRA_DEFAULT_PROJECT", ""),
+        jira_poll_jql=get_val(
+            "DE_JIRA_POLL_JQL",
+            'labels = "ai-delegate" AND statusCategory = "To Do"',
+        ),
+        jira_poller_enabled=get_val("DE_JIRA_POLLER_ENABLED", "true").lower()
+        not in ("0", "false", "no"),
         web_host=get_val("DE_WEB_HOST", "127.0.0.1"),
         web_port=int(get_val("DE_WEB_PORT", "8020")),
     )

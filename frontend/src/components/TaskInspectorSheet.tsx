@@ -11,10 +11,12 @@ import {
   GitPullRequestDraft,
   Loader2,
   MessageSquarePlus,
+  RefreshCw,
   Send,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  TicketCheck,
   X,
   XCircle,
 } from "lucide-react";
@@ -41,10 +43,15 @@ interface Props {
 export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
   const [answers, setAnswers] = React.useState<Record<string, string>>({});
   const [followupText, setFollowupText] = React.useState("");
+  const [ruleTitle, setRuleTitle] = React.useState("");
   const [ruleScope, setRuleScope] = React.useState("");
   const [ruleText, setRuleText] = React.useState("");
   const [showLedgerForm, setShowLedgerForm] = React.useState(false);
   const [busyAction, setBusyAction] = React.useState<string | null>(null);
+  const [jiraProject, setJiraProject] = React.useState("");
+  const [jiraType, setJiraType] = React.useState("Task");
+  const [jiraSummary, setJiraSummary] = React.useState("");
+  const [jiraDesc, setJiraDesc] = React.useState("");
   const liveContainerRef = React.useRef<HTMLDivElement | null>(null);
 
   const taskId = detail?.task.task_id;
@@ -66,6 +73,12 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
       defaults[String(idx)] = d.options?.[0] ?? d.default_assumption;
     });
     setAnswers(defaults);
+    if (detail.task.jira_draft) {
+      setJiraProject(detail.task.jira_draft.project_key || "PROJ");
+      setJiraType(detail.task.jira_draft.issue_type || "Task");
+      setJiraSummary(detail.task.jira_draft.summary || c.objective);
+      setJiraDesc(detail.task.jira_draft.description || c.reproduction_evidence);
+    }
   }, [taskId]);
 
   React.useEffect(() => {
@@ -96,6 +109,48 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
         body: JSON.stringify({ action }),
       });
       toast.success(`已执行操作：${action}`);
+      await onMutated();
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const submitApproveJira = async () => {
+    setBusyAction("approve_jira");
+    try {
+      const updated = await apiFetch<{ jira_issue_key?: string }>(
+        `/api/tasks/${encodeURIComponent(t.task_id)}/approve-jira`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            project_key: jiraProject,
+            issue_type: jiraType,
+            summary: jiraSummary,
+            description: jiraDesc,
+            auto_execute: true,
+          }),
+        }
+      );
+      toast.success(
+        `✅ 已创建真实 Jira 工单 ${updated.jira_issue_key || ""}，后续全程以该 Jira 工单为准！`
+      );
+      await onMutated();
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const syncFromJira = async () => {
+    setBusyAction("sync_jira");
+    try {
+      await apiFetch(`/api/tasks/${encodeURIComponent(t.task_id)}/sync-jira`, {
+        method: "POST",
+      });
+      toast.success(`🔄 已从权威 Jira 工单 ${t.jira_issue_key} 同步最新需求与评论！`);
       await onMutated();
     } catch (err: any) {
       toast.error(err.message);
@@ -149,16 +204,30 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
     if (!ruleText.trim()) return;
     setBusyAction("rule");
     try {
-      const entry = await apiFetch<{ id: string }>(
+      const entry = await apiFetch<{ id: string; health_status?: string }>(
         `/api/tasks/${encodeURIComponent(t.task_id)}/promote-decision`,
         {
           method: "POST",
-          body: JSON.stringify({ scope: ruleScope, rule: ruleText.trim() }),
+          body: JSON.stringify({
+            title: ruleTitle.trim(),
+            scope: ruleScope.trim() || "*",
+            rule: ruleText.trim(),
+          }),
         }
       );
+      setRuleTitle("");
       setRuleText("");
       setShowLedgerForm(false);
-      toast.success(`已沉淀团队规则 ${entry.id} 至 .ai/DECISIONS.yaml`);
+      if (entry.health_status === "INVALID_SCOPE") {
+        toast.warning(
+          `已沉淀规则 ${entry.id}，但作用路径在仓库中未找到，请前往「仓库与治理规则」核对路径`
+        );
+      } else {
+        toast.success(
+          `已将规则 ${entry.id} 沉淀至仓库治理中心（可在「仓库与治理规则」随时编辑或停用）`
+        );
+      }
+      await onMutated();
     } catch (err: any) {
       toast.error(err.message);
     } finally {
@@ -179,6 +248,30 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
               {t.task_id}
             </span>
             <StatusBadge status={t.lifecycle_status} />
+            {t.jira_issue_key && (
+              <div className="inline-flex items-center gap-1">
+                <a
+                  href={t.jira_issue_url || "#"}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 rounded-md bg-indigo-500/15 px-2 py-0.5 font-mono text-[11px] font-semibold text-indigo-700 hover:bg-indigo-500/25 dark:text-indigo-300"
+                >
+                  <TicketCheck className="h-3 w-3" />
+                  {t.jira_issue_key}
+                  {t.jira_status ? ` · ${t.jira_status}` : ""}
+                  <ArrowUpRight className="h-3 w-3" />
+                </a>
+                <button
+                  type="button"
+                  title="从 Jira 拉取最新需求与评论覆盖同步"
+                  disabled={!!busyAction}
+                  onClick={syncFromJira}
+                  className="rounded p-1 text-zinc-500 hover:bg-zinc-100 hover:text-indigo-600 dark:hover:bg-zinc-800 cursor-pointer"
+                >
+                  <RefreshCw className={cn("h-3 w-3", busyAction === "sync_jira" && "animate-spin")} />
+                </button>
+              </div>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -268,6 +361,81 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
 
         {/* Scrollable Body */}
         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+          {/* Interactive Jira Draft Review Banner */}
+          {t.lifecycle_status === "WAITING_JIRA_APPROVAL" && (
+            <div className="rounded-xl border border-amber-500/45 bg-amber-500/8 p-4 space-y-3 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 font-semibold text-amber-800 dark:text-amber-200 text-sm">
+                  <TicketCheck className="h-4 w-4" />
+                  📋 待你审核 Jira 工单草稿（确认后正式建卡，后续都以 Jira 任务为准）
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="emerald"
+                    disabled={!!busyAction}
+                    onClick={submitApproveJira}
+                  >
+                    {busyAction === "approve_jira" ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <TicketCheck className="h-3.5 w-3.5" />
+                    )}
+                    ✅ 批准创建真实 Jira 并开工
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={!!busyAction}
+                    onClick={() => runControl("abandon")}
+                  >
+                    放弃
+                  </Button>
+                </div>
+              </div>
+
+              <div className="grid sm:grid-cols-3 gap-2.5">
+                <div>
+                  <span className="text-[11px] text-zinc-500 block mb-1">Project Key</span>
+                  <input
+                    type="text"
+                    value={jiraProject}
+                    onChange={(e) => setJiraProject(e.target.value.toUpperCase())}
+                    className="h-8 w-full rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-xs uppercase dark:border-zinc-800 dark:bg-zinc-950"
+                  />
+                </div>
+                <div>
+                  <span className="text-[11px] text-zinc-500 block mb-1">Issue Type</span>
+                  <select
+                    value={jiraType}
+                    onChange={(e) => setJiraType(e.target.value)}
+                    className="h-8 w-full rounded-lg border border-zinc-200 bg-white px-2 text-xs dark:border-zinc-800 dark:bg-zinc-950"
+                  >
+                    <option value="Bug">Bug</option>
+                    <option value="Task">Task</option>
+                    <option value="Story">Story</option>
+                  </select>
+                </div>
+                <div className="flex items-end text-[11px] text-zinc-500">
+                  或在飞书卡片点击批准 / 回复 <code>建单</code>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <input
+                  type="text"
+                  value={jiraSummary}
+                  onChange={(e) => setJiraSummary(e.target.value)}
+                  className="h-8 w-full rounded-lg border border-zinc-200 bg-white px-3 text-xs font-medium dark:border-zinc-800 dark:bg-zinc-950"
+                />
+                <textarea
+                  rows={3}
+                  value={jiraDesc}
+                  onChange={(e) => setJiraDesc(e.target.value)}
+                  className="w-full rounded-lg border border-zinc-200 bg-white p-2.5 text-xs dark:border-zinc-800 dark:bg-zinc-950"
+                />
+              </div>
+            </div>
+          )}
+
           {/* Active Running Banner */}
           {t.lifecycle_status === "WAITING_MERGE_APPROVAL" && (
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-3.5 text-xs text-emerald-800 dark:text-emerald-200">
@@ -821,20 +989,27 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
             >
               <input
                 type="text"
+                value={ruleTitle}
+                onChange={(e) => setRuleTitle(e.target.value)}
+                placeholder="规则标题（如：禁止导入 legacy）"
+                className="h-8 w-full sm:w-48 rounded-lg border border-zinc-200 bg-white px-2.5 text-xs dark:border-zinc-800 dark:bg-zinc-950"
+              />
+              <input
+                type="text"
                 value={ruleScope}
                 onChange={(e) => setRuleScope(e.target.value)}
                 placeholder="目录范围 src/..."
-                className="h-8 w-full sm:w-44 rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-950"
+                className="h-8 w-full sm:w-36 rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-950"
               />
               <input
                 type="text"
                 value={ruleText}
                 onChange={(e) => setRuleText(e.target.value)}
-                placeholder="输入需写入 .ai/DECISIONS.yaml 的长期架构/业务约束..."
+                placeholder="输入需长期遵守的工程/业务约束（独立存入治理中心，零侵入业务仓）..."
                 className="h-8 flex-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 text-xs dark:border-zinc-800 dark:bg-zinc-950"
               />
               <Button type="submit" variant="emerald" size="sm" disabled={busyAction === "rule"}>
-                写入决策账本
+                保存至治理中心
               </Button>
             </form>
           )}

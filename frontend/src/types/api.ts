@@ -12,6 +12,11 @@ export interface HealthInfo {
   feishu_webhook_configured: boolean;
   feishu_app_configured: boolean;
   feishu_ws_active: boolean;
+  coding_runtime?: string;
+  jira_configured?: boolean;
+  jira_base_url?: string;
+  jira_default_project?: string;
+  jira_poller_enabled?: boolean;
 }
 
 export interface MetricsInfo {
@@ -27,14 +32,39 @@ export interface MetricsInfo {
   estimated_net_human_minutes_saved: number;
 }
 
+export type PolicyCategory = "SECURITY" | "ARCHITECTURE" | "TESTING" | "BUSINESS" | "GENERAL";
+export type PolicySourceType = "CONSOLE_MANUAL" | "TASK_PROMOTED" | "REPO_SYNC";
+export type PolicyHealthStatus =
+  | "HEALTHY"
+  | "WARN_STALE_REF"
+  | "WARN_NEEDS_REVIEW"
+  | "INVALID_SCOPE";
+
 export interface DecisionPolicy {
   id: string;
+  title: string;
+  category: PolicyCategory;
   scope: string;
   rule: string;
   reason: string;
-  status: string;
+  status: "APPROVED_POLICY" | "PAUSED" | "ONE_OFF_WORKAROUND" | "DEPRECATED" | string;
+  source_type: PolicySourceType | string;
+  source_ref: string;
   owner: string;
   verified_at: string;
+  updated_at?: string;
+  health_status?: PolicyHealthStatus;
+  health_message?: string;
+  matched_files_count?: number | null;
+  stale_references?: string[];
+  effective_for_ai?: boolean;
+}
+
+export interface RepositoryPolicySummary {
+  total: number;
+  active_effective: number;
+  paused: number;
+  unhealthy: number;
 }
 
 export interface RepositoryItem {
@@ -44,7 +74,9 @@ export interface RepositoryItem {
   default_base_branch: string;
   pytest_cmd: string[];
   lint_cmd: string[];
+  policies?: DecisionPolicy[];
   active_policies: DecisionPolicy[];
+  policy_summary?: RepositoryPolicySummary;
 }
 
 export interface UnresolvedDecision {
@@ -54,8 +86,22 @@ export interface UnresolvedDecision {
   impact_scope: string;
 }
 
+export interface JiraTicketDraft {
+  project_key: string;
+  issue_type: string;
+  summary: string;
+  description: string;
+  acceptance_criteria: string[];
+  priority: string;
+  labels: string[];
+  approved_by?: string | null;
+  approved_at?: string | null;
+}
+
 export interface TaskContract {
   contract_version: number;
+  jira_issue_key?: string;
+  jira_issue_url?: string;
   objective: string;
   target_repo: string;
   base_branch: string;
@@ -159,6 +205,10 @@ export interface TaskItem {
   raw_request: string;
   source_channel: string;
   contract: TaskContract;
+  jira_draft?: JiraTicketDraft | null;
+  jira_issue_key?: string;
+  jira_issue_url?: string;
+  jira_status?: string;
   lifecycle_status: string;
   auto_publish_pr: boolean;
   auto_merge?: boolean;
@@ -247,4 +297,34 @@ export interface FeishuIntegrationStatus {
   default_chat_id?: string;
   ws_active: boolean;
   callback_webhook_path: string;
+}
+
+export interface JiraProjectOption {
+  key: string;
+  name: string;
+}
+
+export interface JiraIntegrationStatus {
+  configured: boolean;
+  base_url: string;
+  email: string;
+  api_token_configured: boolean;
+  default_project: string;
+  poll_jql: string;
+  poller_enabled: boolean;
+  webhook_url: string;
+  projects: JiraProjectOption[];
+}
+
+export interface JiraIssuePreview {
+  key: string;
+  url: string;
+  project_key: string;
+  issue_type: string;
+  summary: string;
+  description: string;
+  status: string;
+  priority: string;
+  labels: string[];
+  comments: string[];
 }

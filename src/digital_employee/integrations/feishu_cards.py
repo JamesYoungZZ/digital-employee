@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from digital_employee.integrations.jira_client import extract_jira_issue_key
 from digital_employee.models.state import DurableTaskState
 
 MENTION_TAG_RE = re.compile(r"@_user_\d+\s*")
@@ -30,6 +31,80 @@ def _meta_fields(left_label: str, left_val: str, right_label: str, right_val: st
             {"is_short": True, "text": {"tag": "lark_md", "content": f"**{left_label}**\n{left_val}"}},
             {"is_short": True, "text": {"tag": "lark_md", "content": f"**{right_label}**\n{right_val}"}},
         ],
+    }
+
+
+def _jira_link_md(state: DurableTaskState) -> str:
+    if not state.jira_issue_key:
+        return ""
+    if state.jira_issue_url:
+        return f"[{state.jira_issue_key}]({state.jira_issue_url})"
+    return f"`{state.jira_issue_key}`"
+
+
+def build_jira_approval_card(
+    state: DurableTaskState, web_base_url: str = "http://127.0.0.1:8020"
+) -> dict[str, Any]:
+    """Build interactive Jira Ticket Draft review card (`WAITING_JIRA_APPROVAL`)."""
+    c = state.contract
+    d = state.jira_draft
+    proj = (d.project_key if d else "") or "PROJ"
+    itype = (d.issue_type if d else "") or "Task"
+    prio = (d.priority if d else "") or "Medium"
+    summary = _clip((d.summary if d else c.objective), 90)
+    desc = _clip((d.description if d else c.reproduction_evidence) or c.objective, 120)
+    ac_items = (d.acceptance_criteria if (d and d.acceptance_criteria) else c.acceptance_criteria)[:3]
+    ac_md = "\n".join(f"• {_clip(ac, 72)}" for ac in ac_items) if ac_items else "• 回归单测与门禁通过"
+
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "header": {
+                "title": {"tag": "plain_text", "content": f"📋 待你审核 Jira 工单 · {state.task_id}"},
+                "template": "orange",
+            },
+            "elements": [
+                _meta_fields(
+                    "Jira 项目 / 类型",
+                    f"`{proj}` · `{itype}` (`{prio}`)",
+                    "目标仓库",
+                    f"`{c.target_repo}` (`{c.base_branch}`)",
+                ),
+                {"tag": "hr"},
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"**工单标题**：{summary}\n"
+                        f"**需求说明**：{desc}\n"
+                        f"**验收标准**：\n{ac_md}\n"
+                        f"<font color='grey'>确认后将在 Jira 正式建卡并锁定为唯一权威需求源（也可回复『建单』或进控制台改草稿）。</font>"
+                    ),
+                },
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "✅ 批准创建 Jira 并开工"},
+                            "type": "primary",
+                            "value": {"action": "approve_jira", "task_id": state.task_id},
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "✏️ 控制台修改草稿"},
+                            "type": "default",
+                            "url": f"{web_base_url}/#task={state.task_id}",
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "放弃"},
+                            "type": "default",
+                            "value": {"action": "reject_jira", "task_id": state.task_id},
+                        },
+                    ],
+                },
+            ],
+        },
     }
 
 
@@ -102,11 +177,38 @@ def build_accepted_receipt_card(
 ) -> dict[str, Any]:
     """Build concise task acceptance receipt card."""
     c = state.contract
+    jira_md = _jira_link_md(state)
+    jira_line = f"**权威工单**：{jira_md}（全程以 Jira 任务为准）\n" if jira_md else ""
+    actions: list[dict[str, Any]] = [
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "查看进度"},
+            "type": "default",
+            "url": f"{web_base_url}/#task={state.task_id}",
+        }
+    ]
+    if state.jira_issue_url:
+        actions.insert(
+            0,
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"Jira {state.jira_issue_key}"},
+                "type": "primary",
+                "url": state.jira_issue_url,
+            },
+        )
     return {
         "msg_type": "interactive",
         "card": {
             "header": {
-                "title": {"tag": "plain_text", "content": f"🚀 已接单开工 · {state.task_id}"},
+                "title": {
+                    "tag": "plain_text",
+                    "content": (
+                        f"🚀 已按 Jira {state.jira_issue_key} 接单开工"
+                        if state.jira_issue_key
+                        else f"🚀 已接单开工 · {state.task_id}"
+                    ),
+                },
                 "template": "blue",
             },
             "elements": [
@@ -114,18 +216,11 @@ def build_accepted_receipt_card(
                 {"tag": "hr"},
                 {
                     "tag": "markdown",
-                    "content": f"**任务**：{_clip(c.objective, 75)}\n<font color='grey'>跑通单测、AI 审查与线上 CI 后，将向你推送合入审批卡。</font>",
+                    "content": f"{jira_line}**任务**：{_clip(c.objective, 75)}\n<font color='grey'>跑通单测、AI 审查与线上 CI 后，将向你推送合入审批卡。</font>",
                 },
                 {
                     "tag": "action",
-                    "actions": [
-                        {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": "查看进度"},
-                            "type": "default",
-                            "url": f"{web_base_url}/#task={state.task_id}",
-                        }
-                    ],
+                    "actions": actions,
                 },
             ],
         },
@@ -211,10 +306,16 @@ def build_merge_approval_card(
         75,
     )
     ci_cnt = mc.ci_checks_count if mc else 2
-    review_lines = [
-        f"**交付内容**：{_clip(state.contract.objective, 75)}",
-        f"**Code Review (`{rev_model}` · `{rev_verdict}`)**：{rev_summary}",
-    ]
+    jira_md = _jira_link_md(state)
+    review_lines = []
+    if jira_md:
+        review_lines.append(f"**关联工单**：{jira_md}")
+    review_lines.extend(
+        [
+            f"**交付内容**：{_clip(state.contract.objective, 75)}",
+            f"**Code Review (`{rev_model}` · `{rev_verdict}`)**：{rev_summary}",
+        ]
+    )
     if risk_note:
         review_lines.append(f"**边界提示**：{risk_note}")
 
@@ -450,9 +551,9 @@ def build_test_connection_card(web_base_url: str = "http://127.0.0.1:8020") -> d
                     "tag": "markdown",
                     "content": (
                         "已绑定当前会话，你可以直接这样使唤我：\n"
-                        "• **派活**：`[modular-rag] 修复某某报错`\n"
-                        "• **合入**：收到审批卡直接点按钮，或回 `批准`\n"
-                        "• **追改**：`#任务号 补充边界处理`"
+                        "• **按已有 Jira 派活**：`[modular-rag] KAN-12`（直接按 Jira 开工）\n"
+                        "• **新需求审卡派活**：`[modular-rag] 修复某某报错`（先推 Jira 草稿供你审核建卡）\n"
+                        "• **审批指令**：回 `建单` 建 Jira 开工 · 回 `批准` 合入 PR · 回 `修复` 自动修评论"
                     ),
                 },
                 {
@@ -479,9 +580,36 @@ def parse_feishu_command(
     if not cleaned:
         return {"intent": "empty"}
 
-    # 0. Greeting / connection ping ("连接", "链接", "绑定", "你好", "hi", "ping", "help", "帮助")
+    lowered = cleaned.lower()
+
+    # 0a. Quick Jira ticket creation approval ("建单", "建卡", "确认建单", "批准建单")
+    if lowered in {
+        "建单",
+        "建卡",
+        "确认建单",
+        "确认建卡",
+        "批准建单",
+        "批准建卡",
+        "同意建单",
+        "approve jira",
+    }:
+        return {"intent": "quick_approve_jira"}
+
+    # 0b. Quick merge approval reply ("批准", "同意合入", "合入", "approve", "merge")
+    if lowered in {"批准", "同意合入", "合入", "批准合入", "approve", "merge", "lgtm"}:
+        return {"intent": "quick_approve_merge"}
+
+    # 0c. Quick review auto-fix reply ("修复", "一键修复", "自动修复", "autofix", "fix")
+    if lowered in {"修复", "一键修复", "自动修复", "按意见修复", "autofix", "fix"}:
+        return {"intent": "quick_autofix_review"}
+
+    # 1. Quick clarification reply ("默认", "继续", "1", "2")
+    if lowered in {"默认", "继续", "确认", "default", "ok", "yes", "1", "2"}:
+        return {"intent": "quick_clarify", "choice": cleaned}
+
+    # 1b. Greeting / connection ping ("连接", "链接", "绑定", "你好", "hi", "ping", "help", "帮助")
     if (
-        cleaned.lower()
+        lowered
         in {
             "连接",
             "链接",
@@ -505,24 +633,15 @@ def parse_feishu_command(
     ):
         return {"intent": "bind_ping"}
 
-    # 0b. Quick merge approval reply ("批准", "同意合入", "合入", "approve", "merge")
-    if cleaned.lower() in {"批准", "同意合入", "合入", "批准合入", "approve", "merge", "lgtm"}:
-        return {"intent": "quick_approve_merge"}
-
-    # 0c. Quick review auto-fix reply ("修复", "一键修复", "自动修复", "autofix", "fix")
-    if cleaned.lower() in {"修复", "一键修复", "自动修复", "按意见修复", "autofix", "fix"}:
-        return {"intent": "quick_autofix_review"}
-
-    # 1. Quick clarification reply ("默认", "继续", "1", "2")
-    if cleaned.lower() in {"默认", "继续", "确认", "default", "ok", "yes", "1", "2"}:
-        return {"intent": "quick_clarify", "choice": cleaned}
-
     # 2. Follow-up or targeted approval on specific task ID ("#t-20261116-abcdef 补充单测")
     task_match = TASK_TAG_RE.search(cleaned)
     if task_match:
         tid = task_match.group(1).lower()
         rest = (cleaned[: task_match.start()] + cleaned[task_match.end() :]).strip(" :：,，")
-        if rest.lower() in {"批准", "同意合入", "合入", "批准合入", "approve", "merge", "lgtm"}:
+        rest_low = rest.lower()
+        if rest_low in {"建单", "建卡", "确认建单", "确认建卡", "批准建单", "approve jira"}:
+            return {"intent": "task_approve_jira", "task_id": tid}
+        if rest_low in {"批准", "同意合入", "合入", "批准合入", "approve", "merge", "lgtm"}:
             return {"intent": "task_approve_merge", "task_id": tid}
         if rest in {"默认", "继续", "default"}:
             return {"intent": "task_clarify_default", "task_id": tid}
@@ -538,11 +657,15 @@ def parse_feishu_command(
         req_body = bracket.group(2).strip()
     else:
         for r in registered_repos:
-            if r.lower() in cleaned.lower():
+            if r.lower() in lowered:
                 chosen_repo = r
                 break
 
-    return {"intent": "delegate", "target_repo": chosen_repo, "raw_request": req_body}
+    out = {"intent": "delegate", "target_repo": chosen_repo, "raw_request": req_body}
+    detected_jira = extract_jira_issue_key(req_body)
+    if detected_jira:
+        out["jira_issue_key"] = detected_jira
+    return out
 
 
 class FeishuNotifier:

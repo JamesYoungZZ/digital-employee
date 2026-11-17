@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from digital_employee.models.contract import TaskContract
+from digital_employee.models.contract import JiraTicketDraft, TaskContract
 
 FailureClass = Literal[
     "NONE",
@@ -22,6 +22,7 @@ FailureClass = Literal[
 
 LifecycleStatus = Literal[
     "DRAFTING_CONTRACT",
+    "WAITING_JIRA_APPROVAL",
     "WAITING_CLARIFICATION",
     "QUEUED",
     "RUNNING_IN_SANDBOX",
@@ -170,8 +171,12 @@ class DurableTaskState(BaseModel):
     source_channel: str = "cli"  # cli | web | feishu | feishu_ws
     feishu_chat_id: str = ""
 
-    # 2. Contract & lifecycle
+    # 2. Contract, authoritative Jira ticket & lifecycle
     contract: TaskContract
+    jira_draft: JiraTicketDraft | None = None
+    jira_issue_key: str | None = None
+    jira_issue_url: str | None = None
+    jira_status: str | None = None
     lifecycle_status: LifecycleStatus = "DRAFTING_CONTRACT"
     auto_publish_pr: bool = False
     auto_merge: bool = False

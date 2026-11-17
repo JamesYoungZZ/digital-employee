@@ -8,12 +8,15 @@ import json
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
 from digital_employee.agents.runtime import CodingLoopOutcome
 from digital_employee.context.decision_ledger import DecisionLedger
+
+if TYPE_CHECKING:
+    from digital_employee.storage.durable_store import DurableStore
 from digital_employee.kernel.agent import (
     Agent,
     CompactNotification,
@@ -477,11 +480,13 @@ class NativeKernelRuntime:
         *,
         injected_llm: HarnessLLMClient | None = None,
         mcp_servers: list[MCPServerConfig] | None = None,
+        store: DurableStore | None = None,
     ) -> None:
         import sys
 
         self.settings = settings
         self.injected_llm = injected_llm
+        self.store = store
         if mcp_servers is not None:
             self.mcp_servers = list(mcp_servers)
         elif settings.enable_ops_mcp and injected_llm is None:
@@ -722,8 +727,12 @@ class NativeKernelRuntime:
             )
 
         # 3. Build or Resume Conversation History
-        ledger = DecisionLedger.from_repo(
-            Path(sandbox.profile.local_path), sandbox.profile.decision_ledger_path
+        ledger = (
+            DecisionLedger.for_repository(self.store, sandbox.profile)
+            if self.store is not None
+            else DecisionLedger.from_repo(
+                Path(sandbox.profile.local_path), sandbox.profile.decision_ledger_path
+            )
         )
         test_cmd_display = " ".join(sandbox.profile.test_cmd)
         conv: ConversationManager | None = None

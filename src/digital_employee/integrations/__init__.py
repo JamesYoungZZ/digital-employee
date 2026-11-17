@@ -6,6 +6,7 @@ from digital_employee.integrations.feishu_cards import (
     build_clarification_card,
     build_evidence_report_card,
     build_handoff_card,
+    build_jira_approval_card,
     build_merge_approval_card,
     build_noop_verified_card,
     build_review_fix_card,
@@ -16,18 +17,29 @@ from digital_employee.integrations.github_client import (
     GitHubIntegration,
     render_evidence_pr_body,
 )
+from digital_employee.integrations.jira_client import (
+    JiraIntegration,
+    JiraIssueData,
+    extract_jira_issue_key,
+)
+from digital_employee.integrations.jira_poller import JiraIssuePoller
 
 __all__ = [
     "FeishuNotifier",
     "GitHubIntegration",
+    "JiraIntegration",
+    "JiraIssueData",
+    "JiraIssuePoller",
     "build_accepted_receipt_card",
     "build_clarification_card",
     "build_evidence_report_card",
     "build_handoff_card",
+    "build_jira_approval_card",
     "build_merge_approval_card",
     "build_noop_verified_card",
     "build_review_fix_card",
     "build_test_connection_card",
+    "extract_jira_issue_key",
     "parse_feishu_command",
     "render_evidence_pr_body",
 ]

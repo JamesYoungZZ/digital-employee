@@ -16,14 +16,16 @@ import {
   ShieldCheck,
   Sparkles,
   Terminal,
+  TicketCheck,
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
-import type { MetricsInfo, RepositoryItem, TaskItem } from "../types/api";
+import type { HealthInfo, MetricsInfo, RepositoryItem, TaskItem } from "../types/api";
 import { apiFetch, cn } from "../lib/utils";
 import { Button, StatusBadge, SurfaceCard, Switch } from "../components/ui/primitives";
 
 interface Props {
+  health?: HealthInfo | null;
   metrics: MetricsInfo | null;
   repos: RepositoryItem[];
   tasks: TaskItem[];
@@ -31,10 +33,12 @@ interface Props {
   onSelectTask: (taskId: string) => void;
   onCreatedTask: (taskId: string) => Promise<void>;
   onMutated: () => Promise<void>;
+  onOpenJiraTab?: () => void;
 }
 
 const FILTERS = [
   { id: "ALL", label: "全部任务" },
+  { id: "WAITING_JIRA_APPROVAL", label: "待审建 Jira" },
   { id: "WAITING_MERGE_APPROVAL", label: "待审批合入" },
   { id: "WAITING_CLARIFICATION", label: "待你拍板" },
   { id: "ACTIVE", label: "沙箱运行中" },
@@ -66,7 +70,17 @@ function matchesFilter(t: TaskItem, filter: string): boolean {
   return t.lifecycle_status === filter;
 }
 
+interface EditableJiraDraftState {
+  project_key: string;
+  issue_type: string;
+  priority: string;
+  summary: string;
+  description: string;
+  ac_text: string;
+}
+
 export function WorkbenchView({
+  health,
   metrics,
   repos,
   tasks,
@@ -74,14 +88,86 @@ export function WorkbenchView({
   onSelectTask,
   onCreatedTask,
   onMutated,
+  onOpenJiraTab,
 }: Props) {
   const [targetRepo, setTargetRepo] = React.useState("");
+  const [delegateMode, setDelegateMode] = React.useState<"raw" | "existing_jira">("raw");
   const [prompt, setPrompt] = React.useState("");
+  const [existingJiraKey, setExistingJiraKey] = React.useState("");
+  const [requireJiraApproval, setRequireJiraApproval] = React.useState<boolean>(true);
   const [publishPr, setPublishPr] = React.useState(true);
   const [acceptDefaults, setAcceptDefaults] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
   const [mergingId, setMergingId] = React.useState<string | null>(null);
   const [filter, setFilter] = React.useState<string>("ALL");
+  const [draftEdits, setDraftEdits] = React.useState<Record<string, EditableJiraDraftState>>({});
+
+  React.useEffect(() => {
+    if (health) {
+      setRequireJiraApproval(Boolean(health.jira_configured));
+    }
+  }, [health?.jira_configured]);
+
+  const pendingJiraTasks = React.useMemo(
+    () => tasks.filter((t) => t.lifecycle_status === "WAITING_JIRA_APPROVAL"),
+    [tasks]
+  );
+
+  React.useEffect(() => {
+    setDraftEdits((prev) => {
+      const next = { ...prev };
+      for (const t of pendingJiraTasks) {
+        if (!next[t.task_id]) {
+          const d = t.jira_draft;
+          next[t.task_id] = {
+            project_key: d?.project_key || health?.jira_default_project || "PROJ",
+            issue_type: d?.issue_type || "Task",
+            priority: d?.priority || "Medium",
+            summary: d?.summary || t.contract.objective,
+            description: d?.description || t.contract.reproduction_evidence || t.raw_request,
+            ac_text: (d?.acceptance_criteria || t.contract.acceptance_criteria || []).join("\n"),
+          };
+        }
+      }
+      return next;
+    });
+  }, [pendingJiraTasks, health?.jira_default_project]);
+
+  const handleApproveJiraDraft = async (taskId: string) => {
+    const edit = draftEdits[taskId];
+    setMergingId(taskId);
+    try {
+      const created = await apiFetch<TaskItem>(
+        `/api/tasks/${encodeURIComponent(taskId)}/approve-jira`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            project_key: edit?.project_key || "",
+            issue_type: edit?.issue_type || "Task",
+            priority: edit?.priority || "Medium",
+            summary: edit?.summary || "",
+            description: edit?.description || "",
+            acceptance_criteria: edit
+              ? edit.ac_text
+                  .split("\n")
+                  .map((s) => s.trim())
+                  .filter(Boolean)
+              : undefined,
+            auto_execute: true,
+          }),
+        }
+      );
+      toast.success(
+        `✅ 已创建真实 Jira 工单 ${created.jira_issue_key || ""} 并锁定为唯一权威需求源，沙箱开始执行！`
+      );
+      await onMutated();
+      onSelectTask(taskId);
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setMergingId(null);
+    }
+  };
 
   const pendingApprovalTasks = React.useMemo(
     () => tasks.filter((t) => t.lifecycle_status === "WAITING_MERGE_APPROVAL"),
@@ -158,22 +244,46 @@ export function WorkbenchView({
 
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (!prompt.trim() || !targetRepo) return;
+    if (!targetRepo) return;
+    if (delegateMode === "existing_jira" && !existingJiraKey.trim()) return;
+    if (delegateMode === "raw" && !prompt.trim()) return;
+
     setSubmitting(true);
     try {
+      const body =
+        delegateMode === "existing_jira"
+          ? {
+              target_repo: targetRepo,
+              raw_request: existingJiraKey.trim(),
+              jira_issue_key: existingJiraKey.trim(),
+              publish_pr: publishPr,
+              auto_merge: false,
+              accept_defaults: acceptDefaults,
+              auto_execute: true,
+            }
+          : {
+              target_repo: targetRepo,
+              raw_request: prompt.trim(),
+              require_jira_approval: requireJiraApproval,
+              publish_pr: publishPr,
+              auto_merge: false,
+              accept_defaults: acceptDefaults,
+              auto_execute: true,
+            };
+
       const created = await apiFetch<TaskItem>("/api/tasks", {
         method: "POST",
-        body: JSON.stringify({
-          target_repo: targetRepo,
-          raw_request: prompt.trim(),
-          publish_pr: publishPr,
-          auto_merge: false,
-          accept_defaults: acceptDefaults,
-          auto_execute: true,
-        }),
+        body: JSON.stringify(body),
       });
       setPrompt("");
-      toast.success(`已生成契约 ${created.task_id}`);
+      setExistingJiraKey("");
+      if (created.lifecycle_status === "WAITING_JIRA_APPROVAL") {
+        toast.success(`📋 已起草 Jira 工单草稿 (${created.task_id})，请审核确认后建卡开工！`);
+      } else if (created.jira_issue_key) {
+        toast.success(`🎫 已拉取权威工单 ${created.jira_issue_key}，沙箱直接开工 (${created.task_id})！`);
+      } else {
+        toast.success(`已生成契约 ${created.task_id}`);
+      }
       await onCreatedTask(created.task_id);
     } catch (err: any) {
       toast.error(err.message);
@@ -237,6 +347,167 @@ export function WorkbenchView({
           );
         })}
       </div>
+
+      {/* Interactive Jira Ticket Draft Review Cards (WAITING_JIRA_APPROVAL) */}
+      {pendingJiraTasks.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs font-semibold text-amber-600 dark:text-amber-400">
+              <TicketCheck className="h-4 w-4 animate-pulse" />
+              <span>
+                待你审核 Jira 工单草稿 ({pendingJiraTasks.length} 张 — 审核批准后在真实 Jira 建卡，后续全程以 Jira 任务为准)
+              </span>
+            </div>
+            {!health?.jira_configured && onOpenJiraTab && (
+              <Button variant="outline" size="sm" onClick={onOpenJiraTab}>
+                前往配置 Jira 连接凭证
+              </Button>
+            )}
+          </div>
+
+          <div className="grid gap-3">
+            {pendingJiraTasks.map((t) => {
+              const edit = draftEdits[t.task_id] || {
+                project_key: t.jira_draft?.project_key || "PROJ",
+                issue_type: t.jira_draft?.issue_type || "Task",
+                priority: t.jira_draft?.priority || "Medium",
+                summary: t.jira_draft?.summary || t.contract.objective,
+                description: t.jira_draft?.description || t.raw_request,
+                ac_text: (t.jira_draft?.acceptance_criteria || t.contract.acceptance_criteria).join("\n"),
+              };
+              const busy = mergingId === t.task_id;
+              const updateField = (patch: Partial<EditableJiraDraftState>) =>
+                setDraftEdits((prev) => ({
+                  ...prev,
+                  [t.task_id]: { ...edit, ...patch },
+                }));
+
+              return (
+                <div
+                  key={t.task_id}
+                  className="rounded-xl border border-amber-500/45 bg-gradient-to-r from-amber-500/8 via-white to-white p-5 shadow-md dark:from-amber-500/12 dark:via-zinc-900 dark:to-zinc-900 space-y-3.5"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center gap-1 rounded-md bg-amber-600 px-2 py-0.5 text-[11px] font-semibold text-white">
+                        📋 待审建 Jira 工单
+                      </span>
+                      <span className="font-mono text-xs font-semibold text-zinc-800 dark:text-zinc-200">
+                        {t.task_id}
+                      </span>
+                      <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-600 dark:text-zinc-300">
+                        目标仓库: {t.contract.target_repo} ({t.contract.base_branch})
+                      </code>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        variant="emerald"
+                        size="lg"
+                        disabled={busy}
+                        onClick={() => handleApproveJiraDraft(t.task_id)}
+                      >
+                        {busy ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <TicketCheck className="h-4 w-4" />
+                        )}
+                        ✅ 批准创建真实 Jira 工单并开工
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="default"
+                        disabled={busy}
+                        onClick={() => handleRejectMerge(t.task_id)}
+                      >
+                        放弃（不建卡）
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="grid sm:grid-cols-4 gap-3 text-xs">
+                    <div>
+                      <label className="text-[11px] text-zinc-500 block mb-1">Jira Project Key</label>
+                      <input
+                        type="text"
+                        value={edit.project_key}
+                        onChange={(e) => updateField({ project_key: e.target.value.toUpperCase() })}
+                        className="h-8 w-full rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-xs uppercase dark:border-zinc-800 dark:bg-zinc-950"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] text-zinc-500 block mb-1">工单类型 (Issue Type)</label>
+                      <select
+                        value={edit.issue_type}
+                        onChange={(e) => updateField({ issue_type: e.target.value })}
+                        className="h-8 w-full rounded-lg border border-zinc-200 bg-white px-2 text-xs dark:border-zinc-800 dark:bg-zinc-950"
+                      >
+                        <option value="Bug">Bug (缺陷)</option>
+                        <option value="Task">Task (研发任务)</option>
+                        <option value="Story">Story (需求故事)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-[11px] text-zinc-500 block mb-1">优先级 (Priority)</label>
+                      <select
+                        value={edit.priority}
+                        onChange={(e) => updateField({ priority: e.target.value })}
+                        className="h-8 w-full rounded-lg border border-zinc-200 bg-white px-2 text-xs dark:border-zinc-800 dark:bg-zinc-950"
+                      >
+                        <option value="Highest">Highest</option>
+                        <option value="High">High</option>
+                        <option value="Medium">Medium</option>
+                        <option value="Low">Low</option>
+                      </select>
+                    </div>
+                    <div className="flex items-end">
+                      <span className="text-[11px] text-zinc-500">
+                        提示：飞书也已同步收到此草稿卡片，可直接回复 <code className="font-mono">建单</code>
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2 text-xs">
+                    <div>
+                      <label className="text-[11px] text-zinc-500 block mb-1">Jira 工单标题 (Summary)</label>
+                      <input
+                        type="text"
+                        value={edit.summary}
+                        onChange={(e) => updateField({ summary: e.target.value })}
+                        className="h-8 w-full rounded-lg border border-zinc-200 bg-white px-3 text-xs font-medium dark:border-zinc-800 dark:bg-zinc-950"
+                      />
+                    </div>
+                    <div className="grid sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-[11px] text-zinc-500 block mb-1">
+                          权威需求描述 (Description)
+                        </label>
+                        <textarea
+                          rows={3}
+                          value={edit.description}
+                          onChange={(e) => updateField({ description: e.target.value })}
+                          className="w-full rounded-lg border border-zinc-200 bg-white p-2.5 text-xs dark:border-zinc-800 dark:bg-zinc-950"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[11px] text-zinc-500 block mb-1">
+                          验收标准 (Acceptance Criteria · 每行一条)
+                        </label>
+                        <textarea
+                          rows={3}
+                          value={edit.ac_text}
+                          onChange={(e) => updateField({ ac_text: e.target.value })}
+                          className="w-full rounded-lg border border-zinc-200 bg-white p-2.5 text-xs dark:border-zinc-800 dark:bg-zinc-950"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Interactive Merge Approval Notification Cards (Console + Feishu Sync) */}
       {pendingApprovalTasks.length > 0 && (
@@ -455,49 +726,92 @@ export function WorkbenchView({
       <SurfaceCard className="p-5">
         <form onSubmit={handleSubmit} className="space-y-3.5">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-xs font-semibold text-zinc-800 dark:text-zinc-200">
-              <Sparkles className="h-4 w-4 text-blue-500" />
-              发起新研发委托（契约起草 → 隔离沙箱修复 → Fail-to-Pass 验证）
+            <div className="inline-flex items-center gap-1 rounded-lg bg-zinc-100 p-1 dark:bg-zinc-800/80">
+              <button
+                type="button"
+                onClick={() => setDelegateMode("raw")}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all cursor-pointer",
+                  delegateMode === "raw"
+                    ? "bg-white text-zinc-900 shadow-2xs dark:bg-zinc-950 dark:text-zinc-100"
+                    : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+                )}
+              >
+                <Sparkles className="h-3.5 w-3.5 text-blue-500" />
+                新需求委托（先审 Jira 草稿再建卡）
+              </button>
+              <button
+                type="button"
+                onClick={() => setDelegateMode("existing_jira")}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all cursor-pointer",
+                  delegateMode === "existing_jira"
+                    ? "bg-white text-zinc-900 shadow-2xs dark:bg-zinc-950 dark:text-zinc-100"
+                    : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+                )}
+              >
+                <TicketCheck className="h-3.5 w-3.5 text-emerald-500" />
+                已有 Jira 工单（直接按 Jira 开工）
+              </button>
             </div>
+
             <div className="flex items-center gap-1.5 text-[11px] text-zinc-400">
               <Command className="h-3 w-3" />
               <span>快捷键 ⌘ + Enter 直接派发</span>
             </div>
           </div>
 
-          <textarea
-            rows={3}
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            onKeyDown={(e) => {
-              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-                e.preventDefault();
-                handleSubmit();
-              }
-            }}
-            placeholder="输入一句自然语言需求、单测失败路径或粘贴异常堆栈..."
-            className="w-full resize-none rounded-xl border border-zinc-200 bg-zinc-50/50 p-3.5 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-blue-500 focus:bg-white focus:outline-none focus:ring-3 focus:ring-blue-500/12 dark:border-zinc-800 dark:bg-zinc-950/70 dark:text-zinc-100 dark:focus:bg-zinc-950"
-            required
-          />
-
-          {/* Quick-fill Chips */}
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[11px] text-zinc-400 mr-1">真实业务需求 / 线上隐患示例：</span>
-            {SAMPLE_PROMPTS.map((sp) => (
-              <button
-                key={sp}
-                type="button"
-                onClick={() => {
-                  setPrompt(sp);
-                  if (sp.includes("livestream-copilot")) setTargetRepo("livestream-copilot");
-                  else if (sp.includes("modular-rag")) setTargetRepo("modular-rag");
+          {delegateMode === "existing_jira" ? (
+            <div className="space-y-2">
+              <input
+                type="text"
+                value={existingJiraKey}
+                onChange={(e) => setExistingJiraKey(e.target.value)}
+                placeholder="输入已有 Jira 工单号（如 KAN-12 / RAG-42）或粘贴完整链接 https://.../browse/KAN-12"
+                className="h-11 w-full rounded-xl border border-emerald-500/40 bg-emerald-500/5 px-4 font-mono text-sm text-zinc-900 placeholder:font-sans placeholder:text-zinc-400 focus:border-emerald-500 focus:bg-white focus:outline-none dark:bg-zinc-950 dark:text-zinc-100"
+                required
+              />
+              <p className="text-[11.5px] text-zinc-500">
+                已有真实 Jira 工单时将<strong>跳过建卡审核</strong>，直接拉取 Jira 标题、正文与最新评论作为唯一权威需求源进沙箱编码。
+              </p>
+            </div>
+          ) : (
+            <>
+              <textarea
+                rows={3}
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                onKeyDown={(e) => {
+                  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                    e.preventDefault();
+                    handleSubmit();
+                  }
                 }}
-                className="rounded-md border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11.5px] text-zinc-600 hover:border-zinc-300 hover:text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:border-zinc-700 dark:hover:text-zinc-200 cursor-pointer transition-colors"
-              >
-                {sp.slice(0, 44)}…
-              </button>
-            ))}
-          </div>
+                placeholder="输入自然语言需求、单测失败路径或直接包含已有 Jira 号（如 KAN-12）..."
+                className="w-full resize-none rounded-xl border border-zinc-200 bg-zinc-50/50 p-3.5 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-blue-500 focus:bg-white focus:outline-none focus:ring-3 focus:ring-blue-500/12 dark:border-zinc-800 dark:bg-zinc-950/70 dark:text-zinc-100 dark:focus:bg-zinc-950"
+                required
+              />
+
+              {/* Quick-fill Chips */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] text-zinc-400 mr-1">真实业务需求 / 线上隐患示例：</span>
+                {SAMPLE_PROMPTS.map((sp) => (
+                  <button
+                    key={sp}
+                    type="button"
+                    onClick={() => {
+                      setPrompt(sp);
+                      if (sp.includes("livestream-copilot")) setTargetRepo("livestream-copilot");
+                      else if (sp.includes("modular-rag")) setTargetRepo("modular-rag");
+                    }}
+                    className="rounded-md border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11.5px] text-zinc-600 hover:border-zinc-300 hover:text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:border-zinc-700 dark:hover:text-zinc-200 cursor-pointer transition-colors"
+                  >
+                    {sp.slice(0, 44)}…
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
 
           {/* Bottom Controls Bar */}
           <div className="flex flex-wrap items-center justify-between gap-4 pt-2 border-t border-zinc-100 dark:border-zinc-800/80">
@@ -517,6 +831,16 @@ export function WorkbenchView({
                 </select>
               </div>
 
+              {delegateMode === "raw" && (
+                <label className="flex items-center gap-2 text-xs text-amber-700 dark:text-amber-300 font-medium cursor-pointer select-none">
+                  <Switch
+                    checked={requireJiraApproval}
+                    onCheckedChange={setRequireJiraApproval}
+                  />
+                  <span>先生成 Jira 工单草稿供我审核建卡（建卡后以 Jira 为准）</span>
+                </label>
+              )}
+
               <label className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
                 <Switch checked={publishPr} onCheckedChange={setPublishPr} />
                 <span>自动创建正式 PR（过审+CI全绿后推合入审批卡）</span>
@@ -532,7 +856,19 @@ export function WorkbenchView({
               {submitting ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  正在探测仓库起草契约...
+                  {delegateMode === "existing_jira"
+                    ? "正在拉取权威 Jira 工单并启动沙箱..."
+                    : "正在探测仓库起草工单与契约..."}
+                </>
+              ) : delegateMode === "existing_jira" ? (
+                <>
+                  <TicketCheck className="h-4 w-4" />
+                  拉取 Jira 工单并直接开工
+                </>
+              ) : requireJiraApproval ? (
+                <>
+                  <TicketCheck className="h-4 w-4" />
+                  起草 Jira 工单供我审核
                 </>
               ) : (
                 <>
@@ -647,7 +983,21 @@ export function WorkbenchView({
                         </code>
                       </td>
                       <td className="px-3 py-3.5 max-w-md text-zinc-800 dark:text-zinc-200 font-medium">
-                        <div className="truncate">{t.contract.objective}</div>
+                        <div className="flex items-center gap-1.5 truncate">
+                          {t.jira_issue_key && (
+                            <a
+                              href={t.jira_issue_url || "#"}
+                              target="_blank"
+                              rel="noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="inline-flex shrink-0 items-center gap-0.5 rounded bg-indigo-500/12 px-1.5 py-0.5 font-mono text-[10.5px] font-semibold text-indigo-600 hover:bg-indigo-500/20 dark:text-indigo-300"
+                            >
+                              {t.jira_issue_key}
+                              <ArrowUpRight className="h-2.5 w-2.5" />
+                            </a>
+                          )}
+                          <span className="truncate">{t.contract.objective}</span>
+                        </div>
                         {["QUEUED", "RUNNING_IN_SANDBOX", "VERIFYING_EVIDENCE"].includes(
                           t.lifecycle_status
                         ) && (

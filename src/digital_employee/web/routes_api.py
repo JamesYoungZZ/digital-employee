@@ -7,13 +7,18 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
-from digital_employee.context.decision_ledger import DecisionLedger
+from digital_employee.context.decision_ledger import (
+    DecisionEntry,
+    DecisionLedger,
+    audit_policy_health,
+)
 from digital_employee.integrations.feishu_cards import (
     FeishuNotifier,
     build_accepted_receipt_card,
     build_clarification_card,
     build_evidence_report_card,
     build_handoff_card,
+    build_jira_approval_card,
     build_merge_approval_card,
     build_noop_verified_card,
     build_review_fix_card,
@@ -21,19 +26,25 @@ from digital_employee.integrations.feishu_cards import (
     parse_feishu_command,
 )
 from digital_employee.integrations.feishu_ws import start_feishu_long_connection_if_configured
+from digital_employee.integrations.jira_client import JiraIntegration
+from digital_employee.integrations.jira_poller import JiraIssuePoller
 from digital_employee.onboarding import onboard_repository
 from digital_employee.orchestrator import DelegationOrchestrator
 from digital_employee.settings import PROJECT_ROOT, Settings
 from digital_employee.web.schemas import (
+    ApproveJiraPayload,
     ClarifyPayload,
     ControlPayload,
     CreateTaskPayload,
     FeishuConfigPayload,
     FeishuSimulatePayload,
     FollowupPayload,
+    JiraConfigPayload,
     OnboardRepoPayload,
     PromoteDecisionPayload,
     ReviewerConfigPayload,
+    UpsertPolicyPayload,
+    VerifyPolicyPayload,
 )
 
 
@@ -75,6 +86,7 @@ def build_api_router(
     *,
     poller_enabled_fn,
     feishu_ws_fn,
+    jira_poller: JiraIssuePoller | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api")
 
@@ -96,21 +108,128 @@ def build_api_router(
             "feishu_webhook_configured": bool(orch.feishu.webhook_url),
             "feishu_app_configured": bool(orch.feishu.app_id and orch.feishu.app_secret),
             "feishu_ws_active": bool(feishu_ws_fn()),
+            "jira_configured": orch.jira.is_configured,
+            "jira_base_url": orch.jira.base_url,
+            "jira_default_project": orch.jira.default_project,
+            "jira_poller_enabled": bool(orch.jira.is_configured and cfg.jira_poller_enabled),
         }
 
     @router.get("/metrics")
     def api_metrics() -> dict[str, Any]:
         return orch.store.compute_funnel_metrics()
 
+    def _serialize_entry_for_repo(repo_id: str, entry: DecisionEntry) -> dict[str, Any]:
+        profile = cfg.resolve_repository(repo_id)
+        health = audit_policy_health(Path(profile.local_path), entry)
+        data = entry.normalized().model_dump()
+        data["health_status"] = health.health_status
+        data["health_message"] = health.health_message
+        data["matched_files_count"] = health.matched_files_count
+        data["stale_references"] = health.stale_references
+        data["effective_for_ai"] = (
+            entry.status == "APPROVED_POLICY" and health.health_status != "INVALID_SCOPE"
+        )
+        return data
+
     @router.get("/repositories")
     def api_list_repositories() -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for p in cfg.load_repositories().values():
-            ledger = DecisionLedger.from_repo(Path(p.local_path), p.decision_ledger_path)
+            ledger = DecisionLedger.for_repository(orch.store, p)
+            policies = ledger.serialize_with_health()
+            active = [pol for pol in policies if pol["effective_for_ai"]]
             item = p.model_dump()
-            item["active_policies"] = [e.model_dump() for e in ledger.active_policies()]
+            item["policies"] = policies
+            item["active_policies"] = active
+            item["policy_summary"] = {
+                "total": len(policies),
+                "active_effective": len(active),
+                "paused": sum(1 for pol in policies if pol["status"] != "APPROVED_POLICY"),
+                "unhealthy": sum(1 for pol in policies if pol["health_status"] != "HEALTHY"),
+            }
             result.append(item)
         return result
+
+    @router.post("/repositories/{repo_id}/policies")
+    def api_create_repository_policy(
+        repo_id: str, payload: UpsertPolicyPayload
+    ) -> dict[str, Any]:
+        if not payload.rule.strip():
+            raise HTTPException(status_code=400, detail="规则内容不能为空")
+        try:
+            entry = orch.create_repository_policy(
+                repo_id,
+                title=payload.title,
+                category=payload.category,
+                scope=payload.scope,
+                rule=payload.rule,
+                reason=payload.reason,
+                owner=payload.owner,
+                status=payload.status,
+            )
+            return _serialize_entry_for_repo(repo_id, entry)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.put("/repositories/{repo_id}/policies/{policy_id}")
+    def api_update_repository_policy(
+        repo_id: str, policy_id: str, payload: UpsertPolicyPayload
+    ) -> dict[str, Any]:
+        if not payload.rule.strip():
+            raise HTTPException(status_code=400, detail="规则内容不能为空")
+        try:
+            entry = orch.update_repository_policy(
+                repo_id,
+                policy_id,
+                title=payload.title,
+                category=payload.category,
+                scope=payload.scope,
+                rule=payload.rule,
+                reason=payload.reason,
+                owner=payload.owner,
+                status=payload.status,
+            )
+            return _serialize_entry_for_repo(repo_id, entry)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.post("/repositories/{repo_id}/policies/{policy_id}/toggle")
+    def api_toggle_repository_policy(repo_id: str, policy_id: str) -> dict[str, Any]:
+        try:
+            entry = orch.toggle_repository_policy(repo_id, policy_id)
+            return _serialize_entry_for_repo(repo_id, entry)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.post("/repositories/{repo_id}/policies/{policy_id}/verify")
+    def api_verify_repository_policy(
+        repo_id: str, policy_id: str, payload: VerifyPolicyPayload | None = None
+    ) -> dict[str, Any]:
+        try:
+            entry = orch.verify_repository_policy(
+                repo_id, policy_id, owner=payload.owner if payload else ""
+            )
+            return _serialize_entry_for_repo(repo_id, entry)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.delete("/repositories/{repo_id}/policies/{policy_id}")
+    def api_delete_repository_policy(repo_id: str, policy_id: str) -> dict[str, Any]:
+        try:
+            deleted = orch.delete_repository_policy(repo_id, policy_id)
+            if not deleted:
+                raise HTTPException(status_code=404, detail=f"规则 {policy_id} 不存在")
+            return {"deleted": True, "policy_id": policy_id}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.post("/repositories/{repo_id}/policies/sync-repo")
+    def api_sync_repository_policies(repo_id: str) -> dict[str, Any]:
+        try:
+            added = orch.sync_repository_policies(repo_id)
+            return {"added": added, "repo_id": repo_id}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @router.post("/repositories/onboard")
     def api_onboard_repository(payload: OnboardRepoPayload) -> dict[str, Any]:
@@ -166,7 +285,9 @@ def build_api_router(
             and state.verification_evidence.reviewer_report
             and state.verification_evidence.reviewer_report.verdict == "BLOCK"
         )
-        if state.lifecycle_status == "WAITING_CLARIFICATION":
+        if state.lifecycle_status == "WAITING_JIRA_APPROVAL":
+            active_card = build_jira_approval_card(state, orch.web_base_url)
+        elif state.lifecycle_status == "WAITING_CLARIFICATION":
             active_card = build_clarification_card(state, orch.web_base_url)
         elif state.lifecycle_status == "WAITING_MERGE_APPROVAL":
             active_card = build_merge_approval_card(state, orch.web_base_url)
@@ -208,6 +329,8 @@ def build_api_router(
                 publish_pr=payload.publish_pr,
                 auto_merge=payload.auto_merge,
                 source_channel="web",
+                jira_issue_key=payload.jira_issue_key,
+                require_jira_approval=payload.require_jira_approval,
             )
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -217,6 +340,47 @@ def build_api_router(
                 orch.execute_task, state.task_id, publish_pr=payload.publish_pr
             )
         return state.model_dump()
+
+    @router.post("/tasks/{task_id}/approve-jira")
+    def api_approve_jira_task(
+        task_id: str,
+        payload: ApproveJiraPayload,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        overrides: dict[str, Any] = {
+            "project_key": payload.project_key,
+            "issue_type": payload.issue_type,
+            "summary": payload.summary,
+            "description": payload.description,
+            "acceptance_criteria": payload.acceptance_criteria,
+            "priority": payload.priority,
+            "labels": payload.labels,
+        }
+        try:
+            state = orch.approve_and_create_jira_ticket(
+                task_id,
+                draft_overrides=overrides,
+                approved_by="console_user",
+                auto_execute=False,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if payload.auto_execute and state.lifecycle_status == "QUEUED":
+            background_tasks.add_task(
+                orch.execute_task,
+                state.task_id,
+                publish_pr=state.auto_publish_pr or orch.github.is_configured,
+            )
+        return state.model_dump()
+
+    @router.post("/tasks/{task_id}/sync-jira")
+    def api_sync_jira_task(task_id: str) -> dict[str, Any]:
+        try:
+            state = orch.sync_contract_from_jira(task_id)
+            return state.model_dump()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/tasks/{task_id}/clarify")
     def api_clarify_task(
@@ -333,10 +497,15 @@ def build_api_router(
     ) -> dict[str, Any]:
         entry = orch.promote_decision_rule(
             task_id,
+            title=payload.title,
+            category=payload.category,
             scope=payload.scope,
             rule=payload.rule,
             reason=payload.reason,
         )
+        state = orch.store.get_task(task_id)
+        if state is not None:
+            return _serialize_entry_for_repo(state.contract.target_repo, entry)
         return entry.model_dump()
 
     # =========================================================================
@@ -454,6 +623,8 @@ def build_api_router(
                 publish_pr=orch.github.is_configured,
             )
             card = build_accepted_receipt_card(state, orch.web_base_url)
+        elif state.lifecycle_status == "WAITING_JIRA_APPROVAL":
+            card = build_jira_approval_card(state, orch.web_base_url)
         elif state.lifecycle_status == "WAITING_CLARIFICATION":
             card = build_clarification_card(state, orch.web_base_url)
         else:
@@ -525,5 +696,108 @@ def build_api_router(
             "provider": cfg.reviewer_provider,
             "model": cfg.reviewer_model,
         }
+
+    # =========================================================================
+    # Jira Work-Order Integration Configuration, Project Discovery & Preview
+    # =========================================================================
+
+    @router.get("/integrations/jira")
+    def api_get_jira_config() -> dict[str, Any]:
+        projects: list[dict[str, str]] = []
+        if orch.jira.is_configured:
+            try:
+                projects = orch.jira.list_projects()
+            except Exception:
+                projects = []
+        return {
+            "configured": orch.jira.is_configured,
+            "base_url": orch.jira.base_url,
+            "email": orch.jira.email,
+            "api_token_configured": bool(orch.jira.api_token),
+            "default_project": orch.jira.default_project,
+            "poll_jql": cfg.jira_poll_jql,
+            "poller_enabled": cfg.jira_poller_enabled,
+            "webhook_url": f"{orch.web_base_url}/webhooks/jira",
+            "projects": projects,
+        }
+
+    @router.post("/integrations/jira/config")
+    def api_save_jira_config(payload: JiraConfigPayload) -> dict[str, Any]:
+        base_url = payload.base_url.strip().rstrip("/")
+        email = payload.email.strip()
+        api_token = payload.api_token.strip() or cfg.jira_api_token
+        default_proj = payload.default_project.strip().upper()
+        poll_jql = payload.poll_jql.strip()
+
+        candidate = JiraIntegration(
+            base_url=base_url,
+            email=email,
+            api_token=api_token,
+            default_project=default_proj,
+        )
+        verified_info: dict[str, Any] = {}
+        if candidate.is_configured:
+            try:
+                verified_info = candidate.verify_connection()
+                if not default_proj and verified_info.get("projects"):
+                    default_proj = str(verified_info["projects"][0].get("key") or "")
+                    candidate.default_project = default_proj
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Jira 连接校验失败，请检查 Base URL / Email / API Token: {exc}",
+                ) from exc
+
+        updates: dict[str, str] = {
+            "DE_JIRA_BASE_URL": base_url,
+            "DE_JIRA_EMAIL": email,
+            "DE_JIRA_DEFAULT_PROJECT": default_proj,
+            "DE_JIRA_POLL_JQL": poll_jql,
+            "DE_JIRA_POLLER_ENABLED": "true" if payload.poller_enabled else "false",
+        }
+        if payload.api_token.strip():
+            updates["DE_JIRA_API_TOKEN"] = payload.api_token.strip()
+            cfg.jira_api_token = payload.api_token.strip()
+
+        cfg.jira_base_url = base_url
+        cfg.jira_email = email
+        cfg.jira_default_project = default_proj
+        cfg.jira_poll_jql = poll_jql
+        cfg.jira_poller_enabled = payload.poller_enabled
+        _upsert_dotenv_keys(PROJECT_ROOT / ".env", updates)
+
+        orch.jira = candidate
+        if jira_poller is not None:
+            if candidate.is_configured and payload.poller_enabled:
+                jira_poller.start()
+            else:
+                jira_poller.stop()
+
+        return {
+            "ok": True,
+            "configured": orch.jira.is_configured,
+            "default_project": orch.jira.default_project,
+            "display_name": verified_info.get("display_name", ""),
+            "projects": verified_info.get("projects", []),
+        }
+
+    @router.get("/integrations/jira/issue/{issue_key}")
+    def api_preview_jira_issue(issue_key: str) -> dict[str, Any]:
+        try:
+            issue = orch.jira.get_issue(issue_key)
+            return {
+                "key": issue.key,
+                "url": issue.url,
+                "project_key": issue.project_key,
+                "issue_type": issue.issue_type,
+                "summary": issue.summary,
+                "description": issue.description,
+                "status": issue.status,
+                "priority": issue.priority,
+                "labels": issue.labels,
+                "comments": issue.comments,
+            }
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return router

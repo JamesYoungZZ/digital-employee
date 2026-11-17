@@ -16,14 +16,23 @@ def render_evidence_pr_body(state: DurableTaskState) -> str:
     """Format a concise, evidence-first GitHub Pull Request description."""
     c = state.contract
     ev = state.verification_evidence
+    jira_key = state.jira_issue_key or c.jira_issue_key
+    jira_url = state.jira_issue_url or c.jira_issue_url
     lines = [
         f"## 🎯 Task Contract (`{state.task_id}`)",
-        f"- **Objective**: {c.objective}",
-        f"- **Base / Head**: `{c.base_branch}` (`{c.base_commit_sha[:8]}`) → `{state.branch_name}` (`{(state.head_commit_sha or '')[:8]}`)",
-        f"- **Permitted Scopes**: `{', '.join(c.permitted_scopes)}`",
-        "",
-        "## 🧪 Deterministic Sandbox Gate",
     ]
+    if jira_key:
+        jira_md = f"[{jira_key}]({jira_url})" if jira_url else f"`{jira_key}`"
+        lines.append(f"- **Authoritative Jira Ticket**: {jira_md}")
+    lines.extend(
+        [
+            f"- **Objective**: {c.objective}",
+            f"- **Base / Head**: `{c.base_branch}` (`{c.base_commit_sha[:8]}`) → `{state.branch_name}` (`{(state.head_commit_sha or '')[:8]}`)",
+            f"- **Permitted Scopes**: `{', '.join(c.permitted_scopes)}`",
+            "",
+            "## 🧪 Deterministic Sandbox Gate",
+        ]
+    )
     if ev:
         lines.extend(
             [
@@ -137,8 +146,9 @@ class GitHubIntegration:
                     "reconciled": True,
                 }
 
+            jira_prefix = f"[{state.jira_issue_key}] " if state.jira_issue_key else "[AI-Agent] "
             payload = {
-                "title": f"[AI-Agent] {state.contract.objective[:100]}",
+                "title": f"{jira_prefix}{state.contract.objective[:100]}",
                 "head": state.branch_name,
                 "base": state.contract.base_branch,
                 "body": render_evidence_pr_body(state),

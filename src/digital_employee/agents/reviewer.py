@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import html
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from digital_employee.context.decision_ledger import DecisionLedger
+
+if TYPE_CHECKING:
+    from digital_employee.storage.durable_store import DurableStore
 from digital_employee.llm.client import LLMClient
 from digital_employee.models.contract import TaskContract
 from digital_employee.models.state import (
@@ -230,9 +234,16 @@ def render_full_review_report_html(state: DurableTaskState, diff_text: str) -> s
 class FocusedReviewer:
     """Separate AI Code Review Agent (cross-model capable, skill-driven, structured full report)."""
 
-    def __init__(self, reviewer_llm: LLMClient, *, skill_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        reviewer_llm: LLMClient,
+        *,
+        skill_path: Path | None = None,
+        store: DurableStore | None = None,
+    ) -> None:
         self.llm = reviewer_llm
         self.skill_prompt = load_pr_review_skill(skill_path)
+        self.store = store
 
     def review(
         self,
@@ -244,8 +255,12 @@ class FocusedReviewer:
     ) -> tuple[ReviewerReport, float]:
         changed = sandbox.modified_files(contract.base_commit_sha)
         diff_text = sandbox.git_diff(contract.base_commit_sha)
-        ledger = DecisionLedger.from_repo(
-            Path(sandbox.profile.local_path), sandbox.profile.decision_ledger_path
+        ledger = (
+            DecisionLedger.for_repository(self.store, sandbox.profile)
+            if self.store is not None
+            else DecisionLedger.from_repo(
+                Path(sandbox.profile.local_path), sandbox.profile.decision_ledger_path
+            )
         )
 
         prompt = "\n\n".join(

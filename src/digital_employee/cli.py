@@ -16,6 +16,7 @@ from digital_employee.models.state import DurableTaskState
 from digital_employee.onboarding import onboard_repository
 from digital_employee.orchestrator import DelegationOrchestrator
 from digital_employee.settings import load_settings
+from digital_employee.storage.durable_store import DurableStore
 
 app = typer.Typer(
     name="de",
@@ -36,6 +37,16 @@ def _print_task_summary(state: DurableTaskState, *, show_diff: bool = False) -> 
         f"[bold]Out of Scope[/bold]: {', '.join(c.out_of_scope)}",
         f"[bold]Cost / Elapsed[/bold]: ${state.total_cost_usd:.4f} / {state.agent_elapsed_seconds:.1f}s (Est. Net Saved: {state.estimated_net_minutes_saved} min)",
     ]
+    if state.jira_issue_key:
+        lines.insert(
+            1,
+            f"[bold]Authoritative Jira[/bold]: [magenta]{state.jira_issue_key}[/magenta] ({state.jira_issue_url})",
+        )
+    elif state.jira_draft and state.lifecycle_status == "WAITING_JIRA_APPROVAL":
+        lines.insert(
+            1,
+            f"[bold yellow]📋 Pending Jira Draft Approval[/bold yellow]: [{state.jira_draft.project_key} · {state.jira_draft.issue_type}] {state.jira_draft.summary}",
+        )
     if state.deliverable_pr_url:
         lines.append(f"[bold]Draft PR[/bold]: {state.deliverable_pr_url}")
 
@@ -79,6 +90,7 @@ def _print_task_summary(state: DurableTaskState, *, show_diff: bool = False) -> 
 def cmd_repos() -> None:
     """List registered target repositories and active DecisionLedger policies."""
     settings = load_settings()
+    store = DurableStore(settings.db_path, settings.artifacts_dir)
     profiles = settings.load_repositories()
     table = Table(title="Registered Target Repositories")
     table.add_column("Repo ID", style="cyan", no_wrap=True)
@@ -88,7 +100,7 @@ def cmd_repos() -> None:
     table.add_column("Local Path")
 
     for p in profiles.values():
-        ledger = DecisionLedger.from_repo(Path(p.local_path), p.decision_ledger_path)
+        ledger = DecisionLedger.for_repository(store, p)
         table.add_row(
             p.repo_id,
             p.github_repo,
@@ -134,8 +146,9 @@ def cmd_onboard(
 
 @app.command("delegate")
 def cmd_delegate(
-    request: str = typer.Argument(..., help="Natural language bug fix or engineering delegation request."),
+    request: str = typer.Argument(..., help="Natural language bug fix or existing Jira key (`PROJ-123`)."),
     repo: str = typer.Option("modular-rag", "--repo", "-r", help="Target repository ID."),
+    jira: str = typer.Option("", "--jira", "-j", help="Existing authoritative Jira ticket key (e.g. `KAN-12`)."),
     base_branch: str | None = typer.Option(None, "--base", "-b", help="Override base branch."),
     accept_defaults: bool = typer.Option(
         False, "--accept-defaults", help="Auto-confirm any minor unresolved decisions using default assumptions."
@@ -144,15 +157,16 @@ def cmd_delegate(
         False, "--draft-only", help="Draft the TaskContract and stop before sandbox coding."
     ),
     publish_pr: bool = typer.Option(
-        False, "--publish-pr", help="Push `ai-agent/*` branch and open GitHub Draft PR if DE_GITHUB_TOKEN is set."
+        False, "--publish-pr", help="Push `ai-agent/*` branch and open GitHub PR if DE_GITHUB_TOKEN is set."
     ),
     show_diff: bool = typer.Option(True, "--diff/--no-diff", help="Display resulting patch diff."),
 ) -> None:
-    """Draft a TaskContract, execute sandbox repair + Fail-to-Pass verification, and deliver evidence."""
+    """Draft a TaskContract (or pull existing Jira), execute sandbox repair + Fail-to-Pass verification, and deliver."""
     orch = DelegationOrchestrator()
     state = orch.submit_task(
         raw_request=request,
         target_repo=repo,
+        jira_issue_key=jira,
         base_branch=base_branch,
         accept_defaults=accept_defaults,
         auto_execute=not draft_only,
@@ -160,6 +174,23 @@ def cmd_delegate(
         source_channel="cli",
     )
     _print_task_summary(state, show_diff=show_diff)
+
+
+@app.command("approve-jira")
+def cmd_approve_jira(
+    task_id: str = typer.Argument(..., help="Task ID in WAITING_JIRA_APPROVAL."),
+    project_key: str = typer.Option("", "--project", "-p", help="Override Jira Project Key."),
+    summary: str = typer.Option("", "--summary", help="Override Jira Summary."),
+) -> None:
+    """Approve a pending Jira ticket draft, create the real Jira issue, and start execution."""
+    orch = DelegationOrchestrator()
+    state = orch.approve_and_create_jira_ticket(
+        task_id,
+        draft_overrides={"project_key": project_key, "summary": summary},
+        approved_by="cli_user",
+        auto_execute=True,
+    )
+    _print_task_summary(state, show_diff=True)
 
 
 @app.command("list")

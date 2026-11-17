@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from digital_employee.context.decision_ledger import DecisionLedger
+
+if TYPE_CHECKING:
+    from digital_employee.storage.durable_store import DurableStore
+from digital_employee.integrations.jira_client import JiraIssueData
 from digital_employee.llm.client import LLMClient
 from digital_employee.models.contract import (
+    JiraTicketDraft,
     RepositoryProfile,
     TaskContract,
     UnresolvedDecision,
@@ -28,9 +34,15 @@ CRITICAL RULES:
    - Write ALL human-facing fields (`objective`, `reproduction_evidence`, `acceptance_criteria`, `out_of_scope`, `unresolved_decisions[].question`, `options`, `default_assumption`, `impact_scope`) in **简洁直白的中文**! NEVER output long academic English paragraphs!
    - `objective`: **严格一句话中文标题（≤ 45 字）**，例如 `"修复 sparse_encoder 连字符与数字分词错误"`。
    - `unresolved_decisions[].question`: **≤ 35 字直白中文提问**；每个 `option` **≤ 18 字中文短语**；`impact_scope` **≤ 12 字**。
-7. Output valid JSON with exact keys:
+7. **JIRA WORK-ORDER RULE**:
+   - If an `<authoritative_jira_ticket>` is provided, that Jira ticket is the **APPROVED AUTHORITATIVE SPECIFICATION**! Derive `objective` and `acceptance_criteria` faithfully from the Jira ticket (do NOT invent conflicting requirements).
+   - Also output `"jira_issue_type"` (`"Bug"` | `"Task"` | `"Story"`), `"jira_priority"` (`"High"` | `"Medium"` | `"Low"`), and `"jira_description"` (2–4 concise Chinese sentences summarizing background, root cause/scope, and expected outcome for a formal Jira issue card when creating a new Jira ticket).
+8. Output valid JSON with exact keys:
 {
   "objective": "string",
+  "jira_issue_type": "Task",
+  "jira_priority": "Medium",
+  "jira_description": "string",
   "reproduction_evidence": "string",
   "target_repro_test": "pytest file or node id if identifiable, else empty string",
   "acceptance_criteria": ["criterion 1", "criterion 2"],
@@ -113,8 +125,9 @@ def _extract_hint_snippets(sandbox: WorktreeSandbox, raw_request: str) -> str:
 class ContractDrafter:
     """Drafts a structured `TaskContract` before execution starts."""
 
-    def __init__(self, llm: LLMClient) -> None:
+    def __init__(self, llm: LLMClient, *, store: DurableStore | None = None) -> None:
         self.llm = llm
+        self.store = store
 
     def draft(
         self,
@@ -125,23 +138,41 @@ class ContractDrafter:
         owner_id: str,
         max_budget_usd: float,
         base_branch: str | None = None,
-    ) -> tuple[TaskContract, float]:
+        authoritative_jira: JiraIssueData | None = None,
+        default_jira_project: str = "",
+    ) -> tuple[TaskContract, JiraTicketDraft, float]:
         chosen_branch = base_branch or profile.default_base_branch
         base_sha = sandbox.resolve_commit(chosen_branch)
-        ledger = DecisionLedger.from_repo(
-            Path(profile.local_path), profile.decision_ledger_path
+        ledger = (
+            DecisionLedger.for_repository(self.store, profile)
+            if self.store is not None
+            else DecisionLedger.from_repo(Path(profile.local_path), profile.decision_ledger_path)
         )
-        repo_context = _extract_hint_snippets(sandbox, raw_request)
+        hint_source = (
+            f"{authoritative_jira.summary}\n{authoritative_jira.description}"
+            if authoritative_jira is not None
+            else raw_request
+        )
+        repo_context = _extract_hint_snippets(sandbox, hint_source)
 
-        user_prompt = "\n\n".join(
-            [
-                f"Target Repository: `{profile.repo_id}` ({profile.github_repo})",
-                f"Base Branch: `{chosen_branch}` @ `{base_sha}`",
-                ledger.render_truth_hierarchy_block(),
-                "## Repository Structure & Relevant Code Snippets\n" + repo_context,
-                "## Delegated Request\n" + wrap_untrusted_input("delegator_request", raw_request),
-            ]
+        prompt_blocks = [
+            f"Target Repository: `{profile.repo_id}` ({profile.github_repo})",
+            f"Base Branch: `{chosen_branch}` @ `{base_sha}`",
+            ledger.render_truth_hierarchy_block(),
+            "## Repository Structure & Relevant Code Snippets\n" + repo_context,
+        ]
+        if authoritative_jira is not None:
+            prompt_blocks.append(
+                "## Authoritative Approved Jira Ticket (Follow Strictly)\n"
+                + wrap_untrusted_input(
+                    "authoritative_jira_ticket",
+                    authoritative_jira.render_authoritative_spec(),
+                )
+            )
+        prompt_blocks.append(
+            "## Delegated Request\n" + wrap_untrusted_input("delegator_request", raw_request)
         )
+        user_prompt = "\n\n".join(prompt_blocks)
 
         data, metrics = self.llm.complete_json(
             [
@@ -175,19 +206,36 @@ class ContractDrafter:
         if not scopes:
             scopes = ["src", "app", "tests"]
 
+        ac_list = [
+            str(x)
+            for x in (
+                data.get("acceptance_criteria")
+                or ["需求已实现并通过确定性 Fail-to-Pass 验证。"]
+            )
+        ]
+        obj_text = (
+            authoritative_jira.summary.strip()[:200]
+            if authoritative_jira is not None and authoritative_jira.summary.strip()
+            else str(data.get("objective") or raw_request.strip()[:200])
+        )
+
+        repro_ev = (
+            authoritative_jira.render_authoritative_spec()
+            if authoritative_jira is not None
+            else str(data.get("reproduction_evidence") or "Reproduce via failing unit test.")
+        )
+
         contract = TaskContract(
             contract_version=1,
-            objective=str(data.get("objective") or raw_request.strip()[:200]),
+            jira_issue_key=authoritative_jira.key if authoritative_jira else "",
+            jira_issue_url=authoritative_jira.url if authoritative_jira else "",
+            objective=obj_text,
             target_repo=profile.repo_id,
             base_branch=chosen_branch,
             base_commit_sha=base_sha,
-            reproduction_evidence=str(
-                data.get("reproduction_evidence") or "Reproduce via failing unit test."
-            ),
+            reproduction_evidence=repro_ev,
             target_repro_test=str(data.get("target_repro_test") or ""),
-            acceptance_criteria=[
-                str(x) for x in (data.get("acceptance_criteria") or ["Bug is fixed and verified by Fail-to-Pass test."])
-            ],
+            acceptance_criteria=ac_list,
             permitted_scopes=scopes,
             out_of_scope=[
                 str(x)
@@ -200,4 +248,29 @@ class ContractDrafter:
             max_budget_usd=max_budget_usd,
             owner_id=owner_id,
         )
-        return contract, metrics.estimated_cost_usd
+
+        proj_key = (
+            (authoritative_jira.project_key if authoritative_jira else "")
+            or profile.default_jira_project
+            or default_jira_project
+            or "DE"
+        ).upper()
+        itype_raw = str(data.get("jira_issue_type") or "Task")
+        itype = itype_raw if itype_raw in ("Bug", "Task", "Story") else "Task"
+        prio_raw = str(data.get("jira_priority") or "Medium")
+        prio = prio_raw if prio_raw in ("Highest", "High", "Medium", "Low") else "Medium"
+        jira_desc = str(
+            data.get("jira_description")
+            or f"目标仓库：`{profile.repo_id}` (`{chosen_branch}`)\n涉及范围：`{', '.join(scopes)}`\n原始诉求：{raw_request.strip()}"
+        )
+
+        jira_draft = JiraTicketDraft(
+            project_key=proj_key,
+            issue_type=itype,
+            summary=obj_text,
+            description=jira_desc,
+            acceptance_criteria=ac_list,
+            priority=prio,
+            labels=["ai-delegated", profile.repo_id],
+        )
+        return contract, jira_draft, metrics.estimated_cost_usd

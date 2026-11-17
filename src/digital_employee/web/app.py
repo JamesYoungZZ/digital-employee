@@ -15,6 +15,7 @@ from digital_employee.integrations.feishu_ws import (
     start_feishu_long_connection_if_configured,
 )
 from digital_employee.integrations.github_poller import GitHubFollowThroughPoller
+from digital_employee.integrations.jira_poller import JiraIssuePoller
 from digital_employee.orchestrator import DelegationOrchestrator
 from digital_employee.settings import Settings, load_settings
 from digital_employee.web.routes_api import build_api_router
@@ -32,6 +33,7 @@ def create_app(
     cfg = settings or load_settings()
     orch = orchestrator or DelegationOrchestrator(cfg)
     poller = GitHubFollowThroughPoller(orch, interval_seconds=15.0)
+    jira_poller = JiraIssuePoller(orch, interval_seconds=30.0)
     feishu_ws_active = False
 
     @asynccontextmanager
@@ -39,16 +41,18 @@ def create_app(
         nonlocal feishu_ws_active
         if enable_background_daemons:
             poller.start()
+            jira_poller.start()
             feishu_ws_active = start_feishu_long_connection_if_configured(orch)
             orch.recover_orphaned_tasks()
         try:
             yield
         finally:
             poller.stop()
+            jira_poller.stop()
 
     app = FastAPI(
-        title="AI Digital Employee v2.0 Control Plane",
-        version="2.0.0a1",
+        title="AI Digital Employee v3.0 Control Plane",
+        version="3.0.0",
         lifespan=lifespan,
     )
 
@@ -59,6 +63,7 @@ def create_app(
             orch,
             poller_enabled_fn=lambda: enable_background_daemons and orch.github.is_configured,
             feishu_ws_fn=is_feishu_ws_running,
+            jira_poller=jira_poller,
         )
     )
     app.include_router(build_webhook_router(orch))

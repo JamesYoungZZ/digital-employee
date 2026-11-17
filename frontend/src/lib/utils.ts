@@ -25,6 +25,7 @@ export const STATUS_META: Record<
   { label: string; tone: "amber" | "blue" | "purple" | "emerald" | "red" | "zinc"; pulse?: boolean }
 > = {
   DRAFTING_CONTRACT: { label: "起草契约中", tone: "blue", pulse: true },
+  WAITING_JIRA_APPROVAL: { label: "待审建 Jira 卡", tone: "amber", pulse: true },
   WAITING_CLARIFICATION: { label: "待你拍板", tone: "amber", pulse: true },
   QUEUED: { label: "排队启动", tone: "blue", pulse: true },
   RUNNING_IN_SANDBOX: { label: "沙箱执行中", tone: "blue", pulse: true },

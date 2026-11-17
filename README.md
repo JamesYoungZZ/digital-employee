@@ -17,7 +17,8 @@
 | **3. 多语言证据门禁 & `No-Op` 防偷懒校验** | 自动创建脱离主干基线快照执行 Python / Node / Go **`Fail-to-Pass`** 验证，静态拦截删 `assert` / 加 `@skip` 作弊；若基线已满足条件则经独立复测后干净走 `No-Op` 结单。 |
 | **4. 跨模型独立 Code Review & 全量报告** | 支持异构模型互审（如 DeepSeek 编码 + Gemini 3.8 Flash / Claude 审查），遵循 `skills/pr-code-review/SKILL.md` 仅报 `P0`/`P1` 阻断缺陷，自动生成人话概览、GitHub 行级评论与 `/reports/{id}/review` 独立五维全量报告页。 |
 | **5. 飞书免公网双长连接受控闭环** | 无需云服务器与内网穿透，基于 `lark-oapi` 独立事件循环同时承载**收发消息**与**卡片按钮回调**：`BLOCK` 或有新 PR 评论时推《🔧 一键自动修复卡》，Review 与线上 CI 全绿后推《✅ 批准合入卡》（带 SHA 防篡改锁 Squash Merge）。 |
-| **6. 7×24 运维告警诊断 (`Ops MCP`)** | 内置 `/webhooks/alert` 告警接入、`ops-incident-triage` 技能与 `ops-diagnostics` 只读诊断 MCP 服务（近期变更排查、DLP 脱敏日志检索、HTTP 探活）。 |
+| **6. Jira 权威工单双路径闭环 (`Jira v3/v2`)** | **已有 Jira 工单**（单号 `PROJ-123` / 链接 / `ai-delegate` 标签轮询）跳过建卡审核，直接拉取 Jira 作为唯一权威需求源开工；**口头新需求建卡场景**先起草 `JiraTicketDraft` 停在 `WAITING_JIRA_APPROVAL` 推飞书/控制台供你审核，批准建卡后锁定**后续编码、Review、PR（`[PROJ-123]`）与合入结单全程以 Jira 为准**。 |
+| **7. 7×24 运维告警诊断 (`Ops MCP`)** | 内置 `/webhooks/alert` 告警接入、`ops-incident-triage` 技能与 `ops-diagnostics` 只读诊断 MCP 服务（近期变更排查、DLP 脱敏日志检索、HTTP 探活）。 |
 
 ---
 
@@ -74,6 +75,8 @@ curl http://127.0.0.1:8020/api/health
 | `GET /api/health` | 运行内核模式（`kernel`）、主模型/审查模型、飞书长连接与仓库状态 |
 | `GET /api/tasks` & `POST /api/tasks` | 查询队列（含实时 `worker_alive` 与 `current_activity`）/ 创建委托任务 |
 | `GET /api/tasks/{id}` | 任务契约、实时内核事件流（`live_events`）、证据门禁与飞书卡片预览 |
+| `POST /api/tasks/{id}/approve-jira` & `/sync-jira` | 审核修改草稿后正式创建真实 Jira 工单并开工 / 从 Jira 同步最新需求与评论 |
+| `GET & POST /api/integrations/jira` | 配置校验 Jira Cloud (v3 ADF) / Data Center (v2) 凭证与 30s 自动接单 JQL |
 | `POST /api/tasks/{id}/control` | 受控动作：`approve_merge` / `autofix_review` / `retry` / `cancel` / `abandon` |
 | `GET /reports/{id}/review` | 独立可分享的全量五维 Code Review 审查报告与逐行 Diff 页面 |
 | `POST /webhooks/alert` | 7×24 生产告警自动排障与热修复委托入口 |

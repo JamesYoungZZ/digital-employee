@@ -47,10 +47,13 @@ flowchart TB
 
 ## 2. 四大核心子系统技术规范
 
-### 2.1 契约先行与事实优先级 (`TaskContract` & `DecisionLedger`)
+### 2.1 契约先行与 Jira 权威工单双路径 (`JiraTicketDraft` & `TaskContract`)
 1. **事实权威层级（Truth Hierarchy）**：
-   `目标仓主干代码与测试 (100%) > .ai/DECISIONS.yaml 生效团队策略 (95%) > 委托请求 (80%)`。
-2. **原子化切片与简洁中文契约**：
+   `目标仓主干代码与测试 (100%) > 已审批绑定的真实 Jira 工单 (98%) > .ai/DECISIONS.yaml 生效团队策略 (95%) > 原始口头委托 (80%)`。
+2. **双路径 Jira 强治理闭环**：
+   - **已有 Jira 直接开工**：传入 `PROJ-123` / `browse/PROJ-123` 或命中 `JiraIssuePoller`（`labels = "ai-delegate"`）时，跳过建卡审批，实时拉取 Jira 标题、正文（ADF/Markdown）与评论构建契约，流转工单至 `In Progress` 并直接进沙箱执行。
+   - **新需求建卡先审后做**：无现成工单时先进入 `WAITING_JIRA_APPROVAL`，向飞书与控制台推送《📋 待你审核 Jira 工单》交互卡；经人工审核（可在线改标题/描述/验收标准或飞书回 `建单`）在真实 Jira 建卡后，将 `TaskContract` 锁定对齐至该工单（支持 `sync_contract_from_jira` 动态同步更新、PR 标题自动带 `[PROJ-123]`、提 PR 流转 `In Review`、合入流转 `Done`）。
+3. **原子化切片与简洁中文契约**：
    开工前先探测目标仓目录结构与真实测试健康度，自动生成单模块 `TaskContract`；当目标条件在基线已 100% 满足时支持防偷懒双重校验的 **`No-Op` 正常结单**。
 
 ### 2.2 自研白盒编码内核 (`NativeKernelRuntime` / `mewcode`)

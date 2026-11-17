@@ -6,20 +6,28 @@ import json
 import threading
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 from digital_employee.agents.contract_drafter import ContractDrafter
 from digital_employee.agents.reviewer import FocusedReviewer, render_pr_review_agent_comment
 from digital_employee.agents.runtime import CodingRuntime, create_coding_runtime
-from digital_employee.context.decision_ledger import DecisionEntry, DecisionLedger
+from digital_employee.context.decision_ledger import (
+    DecisionEntry,
+    DecisionLedger,
+    PolicyCategory,
+    PolicyStatus,
+    build_fallback_title,
+    infer_policy_category,
+)
 from digital_employee.integrations.feishu_cards import (
     FeishuNotifier,
     build_accepted_receipt_card,
     build_clarification_card,
     build_evidence_report_card,
     build_handoff_card,
+    build_jira_approval_card,
     build_merge_approval_card,
     build_noop_verified_card,
     build_review_fix_card,
@@ -29,7 +37,13 @@ from digital_employee.integrations.github_client import (
     GitHubIntegration,
     render_evidence_pr_body,
 )
+from digital_employee.integrations.jira_client import (
+    JiraIntegration,
+    JiraIssueData,
+    extract_jira_issue_key,
+)
 from digital_employee.llm.client import LLMClient, TransientLLMError
+from digital_employee.models.contract import JiraTicketDraft
 from digital_employee.models.state import (
     DurableTaskState,
     FailureClass,
@@ -75,10 +89,14 @@ class DelegationOrchestrator:
                 default_model=self.settings.reviewer_model,
             )
         )
-        self.drafter = ContractDrafter(self.llm)
-        self.coder: CodingRuntime = create_coding_runtime(self.settings, llm=llm)
+        self.drafter = ContractDrafter(self.llm, store=self.store)
+        self.coder: CodingRuntime = create_coding_runtime(
+            self.settings, llm=llm, store=self.store
+        )
         self.reviewer = FocusedReviewer(
-            self.reviewer_llm, skill_path=self.settings.pr_review_skill_path
+            self.reviewer_llm,
+            skill_path=self.settings.pr_review_skill_path,
+            store=self.store,
         )
         self.github = GitHubIntegration(
             token=self.settings.github_token,
@@ -89,6 +107,12 @@ class DelegationOrchestrator:
             app_id=self.settings.feishu_app_id,
             app_secret=self.settings.feishu_app_secret,
             default_chat_id=self.settings.feishu_default_chat_id,
+        )
+        self.jira = JiraIntegration(
+            base_url=self.settings.jira_base_url,
+            email=self.settings.jira_email,
+            api_token=self.settings.jira_api_token,
+            default_project=self.settings.jira_default_project,
         )
         self._active_lock = threading.Lock()
         self._active_tasks: set[str] = set()
@@ -211,11 +235,27 @@ class DelegationOrchestrator:
     def web_base_url(self) -> str:
         return f"http://{self.settings.web_host}:{self.settings.web_port}"
 
+    def _resolve_target_repo_with_jira(
+        self, target_repo: str, authoritative_jira: JiraIssueData | None
+    ) -> str:
+        if target_repo.strip():
+            return target_repo.strip()
+        repos = self.settings.load_repositories()
+        if not repos:
+            raise ValueError("No target repositories configured.")
+        if authoritative_jira is not None:
+            lowered_labels = {lbl.lower() for lbl in authoritative_jira.labels}
+            haystack = f"{authoritative_jira.summary} {authoritative_jira.description}".lower()
+            for r_id in repos:
+                if r_id.lower() in lowered_labels or r_id.lower() in haystack:
+                    return r_id
+        return next(iter(repos.keys()))
+
     def submit_task(
         self,
         *,
         raw_request: str,
-        target_repo: str,
+        target_repo: str = "",
         base_branch: str | None = None,
         owner_id: str | None = None,
         max_budget_usd: float | None = None,
@@ -225,20 +265,41 @@ class DelegationOrchestrator:
         auto_merge: bool = False,
         source_channel: str = "cli",
         feishu_chat_id: str = "",
+        jira_issue_key: str = "",
+        require_jira_approval: bool | None = None,
     ) -> DurableTaskState:
-        profile = self.settings.resolve_repository(target_repo)
+        explicit_jira = jira_issue_key.strip().upper()
+        detected_jira = extract_jira_issue_key(raw_request)
+        effective_jira_key = ""
+        if explicit_jira:
+            effective_jira_key = explicit_jira
+        elif detected_jira and (
+            self.jira.is_configured
+            or raw_request.strip().upper() == detected_jira
+            or "/browse/" in raw_request.lower()
+        ):
+            effective_jira_key = detected_jira
+
+        authoritative_jira: JiraIssueData | None = None
+        if effective_jira_key:
+            authoritative_jira = self.jira.get_issue(effective_jira_key)
+
+        resolved_repo = self._resolve_target_repo_with_jira(target_repo, authoritative_jira)
+        profile = self.settings.resolve_repository(resolved_repo)
         task_id = generate_task_id()
         trace_id = uuid.uuid4().hex
         sandbox = WorktreeSandbox(profile, self.settings.worktrees_dir, task_id)
 
         t0 = time.monotonic()
-        contract, draft_cost = self.drafter.draft(
+        contract, jira_draft, draft_cost = self.drafter.draft(
             raw_request=raw_request,
             profile=profile,
             sandbox=sandbox,
             owner_id=owner_id or self.settings.default_owner_id,
             max_budget_usd=max_budget_usd or self.settings.default_max_budget_usd,
             base_branch=base_branch,
+            authoritative_jira=authoritative_jira,
+            default_jira_project=self.settings.jira_default_project,
         )
         elapsed = round(time.monotonic() - t0, 2)
 
@@ -251,6 +312,10 @@ class DelegationOrchestrator:
             source_channel=source_channel,
             feishu_chat_id=feishu_chat_id,
             contract=contract,
+            jira_draft=jira_draft,
+            jira_issue_key=authoritative_jira.key if authoritative_jira else "",
+            jira_issue_url=authoritative_jira.url if authoritative_jira else "",
+            jira_status=authoritative_jira.status if authoritative_jira else "",
             lifecycle_status="DRAFTING_CONTRACT",
             auto_publish_pr=publish_pr,
             auto_merge=auto_merge,
@@ -261,6 +326,71 @@ class DelegationOrchestrator:
             baseline_human_minutes=profile.baseline_human_minutes,
         )
         self.store.save_task(state, step_name="contract_drafted", note=contract.objective)
+
+        # Path 2: Existing Jira ticket -> immediately transition Jira to In Progress & run per Jira!
+        if authoritative_jira is not None:
+            try:
+                new_st = self.jira.transition_issue_by_keywords(
+                    authoritative_jira.key,
+                    {"in progress", "indeterminate", "进行中", "处理中", "开发中"},
+                )
+                if new_st:
+                    state.jira_status = new_st
+                self.jira.add_comment(
+                    authoritative_jira.key,
+                    (
+                        f"🤖 AI 数字员工已接单开工 (Task `{task_id}`)\n"
+                        f"- 目标仓库: `{profile.repo_id}` (`{contract.base_branch}`)\n"
+                        f"- 沙箱分支: `{sandbox.branch_name}`"
+                    ),
+                )
+            except Exception:
+                pass
+            self.append_live_event(
+                state,
+                attempt=0,
+                step=0,
+                max_steps=self.settings.max_coding_steps,
+                kind="jira_bound",
+                icon="🎫",
+                title=f"已拉取已有权威工单 `{authoritative_jira.key}`，无需建卡审核，直接按 Jira 执行！",
+                detail=authoritative_jira.summary,
+            )
+        else:
+            # Path 1: No existing Jira ticket -> Gate on human review before creating Jira ticket!
+            should_gate_jira = (
+                require_jira_approval
+                if require_jira_approval is not None
+                else self.jira.is_configured
+            )
+            if should_gate_jira:
+                state.lifecycle_status = "WAITING_JIRA_APPROVAL"
+                jira_card = build_jira_approval_card(state, self.web_base_url)
+                self.store.write_artifact(task_id, "feishu_jira_approval_card.json", jira_card)
+                try:
+                    self.store.run_idempotent(
+                        state,
+                        "notify_jira_approval",
+                        lambda: self.feishu.send_card(jira_card, chat_id=state.feishu_chat_id),
+                    )
+                except Exception:
+                    pass
+                self.append_live_event(
+                    state,
+                    attempt=0,
+                    step=0,
+                    max_steps=self.settings.max_coding_steps,
+                    kind="jira_review",
+                    icon="📋",
+                    title=f"已起草 Jira 工单草稿 (`{jira_draft.project_key}` · {jira_draft.issue_type})，等待人工审核确认建卡…",
+                    detail=jira_draft.summary,
+                )
+                self.store.save_task(
+                    state,
+                    step_name="waiting_jira_approval",
+                    note=f"Waiting human review to create Jira ticket: {jira_draft.summary[:120]}",
+                )
+                return state
 
         if contract.unresolved_decisions:
             if accept_defaults:
@@ -293,12 +423,15 @@ class DelegationOrchestrator:
             state.lifecycle_status = "QUEUED"
             receipt_card = build_accepted_receipt_card(state, self.web_base_url)
             self.store.write_artifact(task_id, "feishu_receipt_card.json", receipt_card)
-            if source_channel.startswith("feishu"):
-                self.store.run_idempotent(
-                    state,
-                    "notify_receipt",
-                    lambda: self.feishu.send_card(receipt_card, chat_id=state.feishu_chat_id),
-                )
+            if source_channel.startswith("feishu") or authoritative_jira is not None:
+                try:
+                    self.store.run_idempotent(
+                        state,
+                        "notify_receipt",
+                        lambda: self.feishu.send_card(receipt_card, chat_id=state.feishu_chat_id),
+                    )
+                except Exception:
+                    pass
             self.store.save_task(state, step_name="queued", note="Contract unambiguous; queued.")
 
         if auto_execute:
@@ -306,6 +439,165 @@ class DelegationOrchestrator:
                 task_id, publish_pr=publish_pr or state.auto_publish_pr
             )
         return state
+
+    def approve_and_create_jira_ticket(
+        self,
+        task_id: str,
+        *,
+        draft_overrides: dict[str, Any] | None = None,
+        approved_by: str = "human",
+        auto_execute: bool = True,
+    ) -> DurableTaskState:
+        """Create a real Jira ticket after human review & lock TaskContract to the Jira issue."""
+        state = self._require_task(task_id)
+        if state.jira_issue_key:
+            # Idempotency: Jira ticket already created
+            if state.lifecycle_status == "WAITING_JIRA_APPROVAL":
+                state.lifecycle_status = "QUEUED"
+                self.store.save_task(state, step_name="jira_already_bound")
+            if auto_execute and state.lifecycle_status == "QUEUED":
+                return self.execute_task(
+                    task_id, publish_pr=state.auto_publish_pr or self.github.is_configured
+                )
+            return state
+
+        draft = state.jira_draft or JiraTicketDraft(
+            project_key=self.settings.jira_default_project or "PROJ",
+            issue_type="Task",
+            summary=state.contract.objective,
+            description=state.contract.reproduction_evidence or state.raw_request,
+            acceptance_criteria=list(state.contract.acceptance_criteria),
+        )
+        overrides = draft_overrides or {}
+        if overrides.get("project_key"):
+            draft.project_key = str(overrides["project_key"]).strip().upper()
+        if overrides.get("issue_type"):
+            draft.issue_type = str(overrides["issue_type"]).strip()
+        if overrides.get("summary"):
+            draft.summary = str(overrides["summary"]).strip()
+        if overrides.get("description") is not None and str(overrides["description"]).strip():
+            draft.description = str(overrides["description"]).strip()
+        if isinstance(overrides.get("acceptance_criteria"), list):
+            cleaned_ac = [str(x).strip() for x in overrides["acceptance_criteria"] if str(x).strip()]
+            if cleaned_ac:
+                draft.acceptance_criteria = cleaned_ac
+        if overrides.get("priority"):
+            draft.priority = str(overrides["priority"]).strip()
+        if isinstance(overrides.get("labels"), list):
+            draft.labels = [str(x).strip() for x in overrides["labels"] if str(x).strip()]
+
+        created = self.jira.create_issue(draft)
+        draft.project_key = created.project_key
+        draft.approved_by = approved_by
+        draft.approved_at = utc_now_iso()
+        state.jira_draft = draft
+        state.jira_issue_key = created.key
+        state.jira_issue_url = created.url
+        state.jira_status = created.status
+
+        # Lock TaskContract strictly to the approved & created Jira ticket ("后续都以 Jira 任务为准")
+        state.contract.jira_issue_key = created.key
+        state.contract.jira_issue_url = created.url
+        state.contract.objective = created.summary
+        if draft.acceptance_criteria:
+            state.contract.acceptance_criteria = list(draft.acceptance_criteria)
+        state.contract.reproduction_evidence = created.render_authoritative_spec()
+        state.contract.contract_version += 1
+        state.human_interaction_seconds += 8
+
+        try:
+            new_st = self.jira.transition_issue_by_keywords(
+                created.key,
+                {"in progress", "indeterminate", "进行中", "处理中", "开发中"},
+            )
+            if new_st:
+                state.jira_status = new_st
+            self.jira.add_comment(
+                created.key,
+                (
+                    f"🤖 已由 `{approved_by}` 审核确认建卡，AI 数字员工开始按本单执行 (Task `{task_id}`)\n"
+                    f"- 目标仓库: `{state.contract.target_repo}` (`{state.contract.base_branch}`)\n"
+                    f"- 沙箱分支: `{state.branch_name}`"
+                ),
+            )
+        except Exception:
+            pass
+
+        self.append_live_event(
+            state,
+            attempt=0,
+            step=0,
+            max_steps=self.settings.max_coding_steps,
+            kind="jira_created",
+            icon="✅",
+            title=f"已审核创建真实 Jira 工单 `{created.key}`，后续全程以该 Jira 任务为准！",
+            detail=created.url,
+        )
+
+        if state.contract.unresolved_decisions:
+            state.lifecycle_status = "WAITING_CLARIFICATION"
+            card = build_clarification_card(state, self.web_base_url)
+            self.store.write_artifact(task_id, "feishu_clarification_card.json", card)
+            try:
+                self.feishu.send_card(card, chat_id=state.feishu_chat_id)
+            except Exception:
+                pass
+            return self.store.save_task(
+                state,
+                step_name="jira_created_waiting_clarification",
+                note=f"Created Jira {created.key}; waiting clarification.",
+            )
+
+        state.lifecycle_status = "QUEUED"
+        receipt_card = build_accepted_receipt_card(state, self.web_base_url)
+        self.store.write_artifact(task_id, "feishu_receipt_card.json", receipt_card)
+        try:
+            self.store.run_idempotent(
+                state,
+                "notify_receipt",
+                lambda: self.feishu.send_card(receipt_card, chat_id=state.feishu_chat_id),
+            )
+        except Exception:
+            pass
+        self.store.save_task(
+            state,
+            step_name="jira_approved_and_created",
+            note=f"Approved by {approved_by}; bound to Jira {created.key} ({created.url})",
+        )
+        if auto_execute:
+            return self.execute_task(
+                task_id, publish_pr=state.auto_publish_pr or self.github.is_configured
+            )
+        return state
+
+    def sync_contract_from_jira(self, task_id: str) -> DurableTaskState:
+        """Re-fetch authoritative Jira ticket so edits/comments on Jira supersede local state."""
+        state = self._require_task(task_id)
+        if not state.jira_issue_key:
+            raise ValueError(f"Task '{task_id}' has no bound Jira issue key.")
+        issue = self.jira.get_issue(state.jira_issue_key)
+        state.jira_status = issue.status
+        state.jira_issue_url = issue.url
+        state.contract.jira_issue_key = issue.key
+        state.contract.jira_issue_url = issue.url
+        state.contract.objective = issue.summary
+        state.contract.reproduction_evidence = issue.render_authoritative_spec()
+        state.contract.contract_version += 1
+        self.append_live_event(
+            state,
+            attempt=state.sandbox_attempt_count,
+            step=0,
+            max_steps=self.settings.max_coding_steps,
+            kind="jira_synced",
+            icon="🔄",
+            title=f"已从权威工单 `{issue.key}` 同步最新需求与评论 (Contract v{state.contract.contract_version})",
+            detail=issue.summary,
+        )
+        return self.store.save_task(
+            state,
+            step_name="synced_from_jira",
+            note=f"Synced latest Jira {issue.key} (status={issue.status})",
+        )
 
     def resolve_clarification(
         self,
@@ -582,6 +874,21 @@ class DelegationOrchestrator:
                 except Exception:
                     pass
 
+                if state.jira_issue_key and self.jira.is_configured:
+                    try:
+                        self.jira.add_comment(
+                            state.jira_issue_key,
+                            f"✅ 经沙箱独立单测验证 (`{', '.join(noop_targets)}`) 全部通过，无需改动代码：{outcome.summary}",
+                        )
+                        done_st = self.jira.transition_issue_by_keywords(
+                            state.jira_issue_key,
+                            {"done", "完成", "已完成", "已解决", "closed"},
+                        )
+                        if done_st:
+                            state.jira_status = done_st
+                    except Exception:
+                        pass
+
                 return self.store.save_task(
                     state,
                     step_name="noop_verified_and_closed",
@@ -738,6 +1045,11 @@ class DelegationOrchestrator:
     ) -> DurableTaskState:
         """Post-PR Follow-Through Loop: wake up task worktree to address human review comment."""
         state = self._require_task(task_id)
+        if state.jira_issue_key and self.jira.is_configured:
+            try:
+                state = self.sync_contract_from_jira(task_id)
+            except Exception:
+                pass
         state.contract.contract_version += 1
         self.store.save_task(
             state,
@@ -763,6 +1075,10 @@ class DelegationOrchestrator:
         profile = self.settings.resolve_repository(state.contract.target_repo)
         sandbox = WorktreeSandbox(profile, self.settings.worktrees_dir, state.task_id)
 
+        if action == "approve_jira":
+            return self.approve_and_create_jira_ticket(
+                task_id, approved_by=note or "console_user", auto_execute=True
+            )
         if action == "cancel":
             return self._transition_to_handoff(
                 state,
@@ -808,24 +1124,161 @@ class DelegationOrchestrator:
         scope: str,
         rule: str,
         reason: str = "",
+        title: str = "",
+        category: PolicyCategory | None = None,
     ) -> DecisionEntry:
-        """Persist a human-confirmed team rule into target repo `.ai/DECISIONS.yaml`."""
+        """Persist a human-confirmed team rule into the managed DecisionLedger store (zero repo intrusion)."""
         state = self._require_task(task_id)
         profile = self.settings.resolve_repository(state.contract.target_repo)
-        entry = DecisionLedger.append_policy(
-            Path(profile.local_path),
-            scope=scope,
-            rule=rule,
-            reason=reason or f"Promoted from task {task_id}",
-            owner=state.contract.owner_id,
-            ledger_rel_path=profile.decision_ledger_path,
-        )
+        # Ensure initial seed has run before allocating next ID
+        DecisionLedger.for_repository(self.store, profile)
+        policy_id = self.store.next_policy_id(profile.repo_id)
+        resolved_cat = category or infer_policy_category(scope, rule)
+        entry = DecisionEntry(
+            id=policy_id,
+            title=title.strip() or build_fallback_title(rule, scope),
+            category=resolved_cat,
+            scope=scope.strip() or "*",
+            rule=rule.strip(),
+            reason=reason.strip() or f"由委托任务 {task_id} 复盘沉淀",
+            status="APPROVED_POLICY",
+            source_type="TASK_PROMOTED",
+            source_ref=task_id,
+            owner=state.contract.owner_id or self.settings.default_owner_id,
+            verified_at=date.today().isoformat(),
+            updated_at=date.today().isoformat(),
+        ).normalized()
+        saved = self.store.upsert_repository_policy(profile.repo_id, entry)
         self.store.save_task(
             state,
             step_name="decision_promoted",
-            note=f"Added {entry.id}: {entry.rule[:120]}",
+            note=f"Added {saved.id}: {saved.title} — {saved.rule[:100]}",
         )
-        return entry
+        return saved
+
+    def create_repository_policy(
+        self,
+        repo_id: str,
+        *,
+        title: str = "",
+        category: PolicyCategory | None = None,
+        scope: str = "*",
+        rule: str,
+        reason: str = "",
+        owner: str = "",
+        status: PolicyStatus = "APPROVED_POLICY",
+    ) -> DecisionEntry:
+        """Create a new repository governance rule directly in the managed store."""
+        profile = self.settings.resolve_repository(repo_id)
+        DecisionLedger.for_repository(self.store, profile)
+        policy_id = self.store.next_policy_id(profile.repo_id)
+        today = date.today().isoformat()
+        entry = DecisionEntry(
+            id=policy_id,
+            title=title.strip() or build_fallback_title(rule, scope),
+            category=category or infer_policy_category(scope, rule),
+            scope=scope.strip() or "*",
+            rule=rule.strip(),
+            reason=reason.strip(),
+            status=status,
+            source_type="CONSOLE_MANUAL",
+            source_ref="Web 控制台人工创建",
+            owner=owner.strip() or self.settings.default_owner_id,
+            verified_at=today,
+            updated_at=today,
+        ).normalized()
+        return self.store.upsert_repository_policy(profile.repo_id, entry)
+
+    def update_repository_policy(
+        self,
+        repo_id: str,
+        policy_id: str,
+        *,
+        title: str | None = None,
+        category: PolicyCategory | None = None,
+        scope: str | None = None,
+        rule: str | None = None,
+        reason: str | None = None,
+        owner: str | None = None,
+        status: PolicyStatus | None = None,
+    ) -> DecisionEntry:
+        """Update an existing repository governance rule and refresh its verification date."""
+        profile = self.settings.resolve_repository(repo_id)
+        DecisionLedger.for_repository(self.store, profile)
+        existing = self.store.get_repository_policy(profile.repo_id, policy_id)
+        if existing is None:
+            raise KeyError(f"Policy {policy_id} not found in repository {profile.repo_id}")
+        today = date.today().isoformat()
+        new_rule = rule.strip() if rule is not None else existing.rule
+        new_scope = (scope.strip() or "*") if scope is not None else existing.scope
+        new_title = (
+            title.strip()
+            if title is not None and title.strip()
+            else (existing.title if title is None else build_fallback_title(new_rule, new_scope))
+        )
+        updated = existing.model_copy(
+            update={
+                "title": new_title,
+                "category": category if category is not None else existing.category,
+                "scope": new_scope,
+                "rule": new_rule,
+                "reason": reason.strip() if reason is not None else existing.reason,
+                "owner": (owner.strip() or existing.owner) if owner is not None else existing.owner,
+                "status": status if status is not None else existing.status,
+                "verified_at": today,
+                "updated_at": today,
+            }
+        ).normalized()
+        return self.store.upsert_repository_policy(profile.repo_id, updated)
+
+    def toggle_repository_policy(self, repo_id: str, policy_id: str) -> DecisionEntry:
+        """Toggle a repository rule between `APPROVED_POLICY` (active) and `PAUSED`."""
+        profile = self.settings.resolve_repository(repo_id)
+        DecisionLedger.for_repository(self.store, profile)
+        existing = self.store.get_repository_policy(profile.repo_id, policy_id)
+        if existing is None:
+            raise KeyError(f"Policy {policy_id} not found in repository {profile.repo_id}")
+        next_status: PolicyStatus = (
+            "PAUSED" if existing.status == "APPROVED_POLICY" else "APPROVED_POLICY"
+        )
+        updated = existing.model_copy(
+            update={
+                "status": next_status,
+                "updated_at": date.today().isoformat(),
+            }
+        ).normalized()
+        return self.store.upsert_repository_policy(profile.repo_id, updated)
+
+    def verify_repository_policy(
+        self, repo_id: str, policy_id: str, *, owner: str = ""
+    ) -> DecisionEntry:
+        """Mark a rule as freshly human-verified today."""
+        profile = self.settings.resolve_repository(repo_id)
+        DecisionLedger.for_repository(self.store, profile)
+        existing = self.store.get_repository_policy(profile.repo_id, policy_id)
+        if existing is None:
+            raise KeyError(f"Policy {policy_id} not found in repository {profile.repo_id}")
+        today = date.today().isoformat()
+        updated = existing.model_copy(
+            update={
+                "verified_at": today,
+                "updated_at": today,
+                "owner": owner.strip() or existing.owner or self.settings.default_owner_id,
+            }
+        ).normalized()
+        return self.store.upsert_repository_policy(profile.repo_id, updated)
+
+    def delete_repository_policy(self, repo_id: str, policy_id: str) -> bool:
+        """Delete a rule from the managed repository DecisionLedger."""
+        profile = self.settings.resolve_repository(repo_id)
+        DecisionLedger.for_repository(self.store, profile)
+        return self.store.delete_repository_policy(profile.repo_id, policy_id)
+
+    def sync_repository_policies(self, repo_id: str) -> int:
+        """Import any newly added IDs from `<repo>/.ai/DECISIONS.yaml` without overwriting console rules."""
+        profile = self.settings.resolve_repository(repo_id)
+        DecisionLedger.for_repository(self.store, profile)
+        return DecisionLedger.sync_incremental_from_repo(self.store, profile)
 
     # =========================================================================
     # Internal Delivery & Handoff Helpers
@@ -967,6 +1420,33 @@ class DelegationOrchestrator:
                             body=reply,
                         )
 
+                    # Sync PR URL + Review Report back onto authoritative Jira ticket
+                    if state.jira_issue_key and self.jira.is_configured:
+                        try:
+                            report_link = f"{self.web_base_url}/reports/{state.task_id}/review"
+                            self.store.run_idempotent(
+                                state,
+                                f"jira_pr_opened_{(state.head_commit_sha or '')[:8]}",
+                                lambda: str(
+                                    self.jira.add_comment(
+                                        state.jira_issue_key,
+                                        (
+                                            f"🔎 GitHub PR #{state.deliverable_pr_number} 已提审并通过本地门禁与 AI Code Review\n"
+                                            f"- Pull Request: {state.deliverable_pr_url}\n"
+                                            f"- 全量审查报告: {report_link}"
+                                        ),
+                                    )
+                                ),
+                            )
+                            rev_st = self.jira.transition_issue_by_keywords(
+                                state.jira_issue_key,
+                                {"in review", "review", "code review", "待审核", "审核中"},
+                            )
+                            if rev_st:
+                                state.jira_status = rev_st
+                        except Exception:
+                            pass
+
                     # Save before evaluating pre-merge readiness gates
                     self.store.save_task(
                         state,
@@ -1101,6 +1581,11 @@ class DelegationOrchestrator:
     ) -> DurableTaskState:
         """1-Click Auto-Fix: wake up sandbox Coding Agent to resolve blocking AI/human Review comments."""
         state = self._require_task(task_id)
+        if state.jira_issue_key and self.jira.is_configured:
+            try:
+                state = self.sync_contract_from_jira(task_id)
+            except Exception:
+                pass
         parts: list[str] = []
         ev = state.verification_evidence
         if ev and ev.reviewer_report and ev.reviewer_report.blocking_issues:
@@ -1164,6 +1649,23 @@ class DelegationOrchestrator:
             except Exception:
                 pass
             return None
+
+        if intent == "quick_approve_jira":
+            waiting_jira = self.store.list_tasks(status="WAITING_JIRA_APPROVAL", limit=10)
+            target_j = next(
+                (t for t in waiting_jira if not chat_id or t.feishu_chat_id == chat_id),
+                waiting_jira[0] if waiting_jira else None,
+            )
+            if target_j is None:
+                return None
+            return self.approve_and_create_jira_ticket(
+                target_j.task_id, approved_by="feishu_reply", auto_execute=auto_execute
+            )
+
+        if intent == "task_approve_jira":
+            return self.approve_and_create_jira_ticket(
+                parsed["task_id"], approved_by="feishu_reply", auto_execute=auto_execute
+            )
 
         if intent == "quick_approve_merge":
             waiting_merge = self.store.list_tasks(status="WAITING_MERGE_APPROVAL", limit=10)
@@ -1245,6 +1747,7 @@ class DelegationOrchestrator:
         return self.submit_task(
             raw_request=parsed["raw_request"],
             target_repo=parsed["target_repo"],
+            jira_issue_key=parsed.get("jira_issue_key", ""),
             auto_execute=auto_execute,
             publish_pr=self.github.is_configured,
             source_channel=source_channel,
@@ -1427,6 +1930,23 @@ class DelegationOrchestrator:
                 f"- GitHub Actions CI (`{ci_info['total']}` green) ✅"
             ),
         )
+        if state.jira_issue_key and self.jira.is_configured:
+            try:
+                self.jira.add_comment(
+                    state.jira_issue_key,
+                    (
+                        f"✅ GitHub PR #{pr_num} 已由 `{approved_by}` 批准 Squash 合入 (`{merge_sha[:8]}`)\n"
+                        f"- PR 链接: {state.deliverable_pr_url}"
+                    ),
+                )
+                done_st = self.jira.transition_issue_by_keywords(
+                    state.jira_issue_key,
+                    {"done", "完成", "已完成", "已解决", "closed"},
+                )
+                if done_st:
+                    state.jira_status = done_st
+            except Exception:
+                pass
         self.store.save_task(
             state,
             step_name="approved_and_merged_pr",

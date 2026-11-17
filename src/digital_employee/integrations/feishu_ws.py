@@ -119,6 +119,30 @@ def start_feishu_long_connection_if_configured(orchestrator: DelegationOrchestra
             act = str(val.get("action") or "")
             tid = str(val.get("task_id") or "")
 
+            if tid and act == "approve_jira":
+                threading.Thread(
+                    target=orchestrator.approve_and_create_jira_ticket,
+                    args=(tid,),
+                    kwargs={"approved_by": "feishu_ws_card", "auto_execute": True},
+                    daemon=True,
+                ).start()
+                toast.type = "success"
+                toast.content = f"✅ 已批准！正在创建真实 Jira 工单并按 Jira 启动 {tid} 沙箱执行…"
+                resp.toast = toast
+                return resp
+
+            if tid and act == "reject_jira":
+                threading.Thread(
+                    target=orchestrator.update_scope_or_cancel,
+                    args=(tid,),
+                    kwargs={"action": "abandon", "note": "Jira ticket draft rejected via Feishu WS card"},
+                    daemon=True,
+                ).start()
+                toast.type = "info"
+                toast.content = f"已放弃任务 {tid}（未在 Jira 建卡）。"
+                resp.toast = toast
+                return resp
+
             if tid and act == "approve_merge":
                 threading.Thread(
                     target=orchestrator.approve_and_merge,

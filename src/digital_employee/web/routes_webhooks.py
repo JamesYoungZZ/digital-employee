@@ -32,6 +32,32 @@ def build_webhook_router(orch: DelegationOrchestrator) -> APIRouter:
             val = action_obj["value"]
             act = val.get("action")
             tid = str(val.get("task_id") or "")
+            if tid and act == "approve_jira":
+                background_tasks.add_task(
+                    orch.approve_and_create_jira_ticket,
+                    tid,
+                    approved_by="feishu_card",
+                    auto_execute=True,
+                )
+                return {
+                    "toast": {
+                        "type": "success",
+                        "content": f"✅ 已批准！正在创建真实 Jira 工单并启动任务 {tid}…",
+                    }
+                }
+            if tid and act == "reject_jira":
+                background_tasks.add_task(
+                    orch.update_scope_or_cancel,
+                    tid,
+                    action="abandon",
+                    note="Rejected Jira draft via Feishu card",
+                )
+                return {
+                    "toast": {
+                        "type": "info",
+                        "content": f"已放弃建卡任务 {tid}。",
+                    }
+                }
             if tid and act == "clarify_default":
                 background_tasks.add_task(
                     orch.resolve_clarification,
@@ -193,11 +219,12 @@ def build_webhook_router(orch: DelegationOrchestrator) -> APIRouter:
                 publish_pr=publish_pr,
                 source_channel="alert_webhook",
             )
-            background_tasks.add_task(
-                orch.execute_task,
-                state.task_id,
-                publish_pr=publish_pr,
-            )
+            if state.lifecycle_status == "QUEUED":
+                background_tasks.add_task(
+                    orch.execute_task,
+                    state.task_id,
+                    publish_pr=publish_pr,
+                )
         else:
             state = orch.submit_task(
                 raw_request=raw_request,
@@ -213,5 +240,55 @@ def build_webhook_router(orch: DelegationOrchestrator) -> APIRouter:
             "lifecycle_status": state.lifecycle_status,
             "target_repo": state.contract.target_repo,
         }
+
+    @router.post("/jira")
+    async def jira_webhook(
+        request: Request, background_tasks: BackgroundTasks
+    ) -> dict[str, Any]:
+        """Jira Webhook receiver: sync updates onto bound tasks or auto-dispatch `ai-delegate` tickets."""
+        body = await request.json()
+        issue = body.get("issue") or {}
+        issue_key = str(issue.get("key") or body.get("issue_key") or "").strip().upper()
+        if not issue_key:
+            return {"ok": True, "ignored": "no_issue_key"}
+
+        fields = issue.get("fields") or {}
+        labels = [str(x).lower() for x in (fields.get("labels") or [])]
+
+        # 1. If a task is already bound to this Jira issue, sync authoritative Jira spec
+        for existing in orch.store.list_tasks(limit=200):
+            if (existing.jira_issue_key or "").upper() == issue_key:
+                if orch.jira.is_configured:
+                    background_tasks.add_task(orch.sync_contract_from_jira, existing.task_id)
+                return {"ok": True, "synced_task_id": existing.task_id, "jira_issue_key": issue_key}
+
+        # 2. If labeled `ai-delegate`, dispatch directly from authoritative Jira issue
+        if "ai-delegate" in labels or bool(body.get("auto_dispatch", False)):
+            repos = orch.settings.load_repositories()
+            if not repos:
+                return {"ok": False, "error": "no_repositories_registered"}
+            chosen_repo = next(iter(repos.keys()))
+            for r_id in repos:
+                if r_id.lower() in labels:
+                    chosen_repo = r_id
+                    break
+            state = orch.submit_task(
+                raw_request=issue_key,
+                target_repo=chosen_repo,
+                jira_issue_key=issue_key,
+                accept_defaults=True,
+                auto_execute=False,
+                publish_pr=orch.github.is_configured,
+                source_channel="jira_webhook",
+            )
+            if state.lifecycle_status == "QUEUED":
+                background_tasks.add_task(
+                    orch.execute_task,
+                    state.task_id,
+                    publish_pr=orch.github.is_configured,
+                )
+            return {"ok": True, "dispatched_task_id": state.task_id, "jira_issue_key": issue_key}
+
+        return {"ok": True, "ignored": "not_bound_and_not_labeled_ai_delegate"}
 
     return router

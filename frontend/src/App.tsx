@@ -8,6 +8,7 @@ import {
   Moon,
   RefreshCw,
   Sun,
+  TicketCheck,
 } from "lucide-react";
 import { Toaster, toast } from "sonner";
 import type {
@@ -22,9 +23,10 @@ import { Button } from "./components/ui/primitives";
 import { WorkbenchView } from "./views/WorkbenchView";
 import { RepositoriesView } from "./views/RepositoriesView";
 import { FeishuIntegrationView } from "./views/FeishuIntegrationView";
+import { JiraIntegrationView } from "./views/JiraIntegrationView";
 import { TaskInspectorSheet } from "./components/TaskInspectorSheet";
 
-type ActiveTab = "workbench" | "repos" | "feishu";
+type ActiveTab = "workbench" | "jira" | "repos" | "feishu";
 
 export function App() {
   const [tab, setTab] = React.useState<ActiveTab>("workbench");
@@ -138,15 +140,42 @@ export function App() {
           </div>
           <div>
             <div className="text-sm font-semibold tracking-tight">AI 研发数字员工</div>
-            <div className="text-[11px] text-zinc-400">Delegation Console v2.0</div>
+            <div className="text-[11px] text-zinc-400">Console v3.0 · mewcode</div>
           </div>
         </div>
 
         <nav className="mt-5 space-y-1 flex-1">
           {[
-            { id: "workbench" as const, label: "任务委托工作台", icon: LayoutDashboard, badge: tasks.filter((x) => x.lifecycle_status === "WAITING_MERGE_APPROVAL").length },
-            { id: "repos" as const, label: "仓库与决策账本", icon: FolderGit2, badge: 0 },
-            { id: "feishu" as const, label: "飞书交互与通道", icon: MessageSquareShare, badge: 0 },
+            {
+              id: "workbench" as const,
+              label: "任务委托工作台",
+              icon: LayoutDashboard,
+              badge: tasks.filter((x) =>
+                ["WAITING_MERGE_APPROVAL", "WAITING_JIRA_APPROVAL"].includes(x.lifecycle_status)
+              ).length,
+              badgeTone: "emerald" as const,
+            },
+            {
+              id: "jira" as const,
+              label: "Jira 工单中枢",
+              icon: TicketCheck,
+              badge: tasks.filter((x) => x.lifecycle_status === "WAITING_JIRA_APPROVAL").length,
+              badgeTone: "amber" as const,
+            },
+            {
+              id: "repos" as const,
+              label: "仓库与治理规则",
+              icon: FolderGit2,
+              badge: repos.reduce((acc, r) => acc + (r.policy_summary?.unhealthy ?? 0), 0),
+              badgeTone: "amber" as const,
+            },
+            {
+              id: "feishu" as const,
+              label: "飞书交互与通道",
+              icon: MessageSquareShare,
+              badge: 0,
+              badgeTone: "emerald" as const,
+            },
           ].map((item) => {
             const Icon = item.icon;
             const active = tab === item.id;
@@ -167,7 +196,12 @@ export function App() {
                   <span>{item.label}</span>
                 </span>
                 {item.badge > 0 && (
-                  <span className="rounded-full bg-emerald-500 px-1.5 py-0.2 text-[10.5px] font-semibold text-white tabular-nums">
+                  <span
+                    className={cn(
+                      "rounded-full px-1.5 py-0.2 text-[10.5px] font-semibold text-white tabular-nums",
+                      item.badgeTone === "amber" ? "bg-amber-500" : "bg-emerald-500"
+                    )}
+                  >
                     {item.badge}
                   </span>
                 )}
@@ -204,6 +238,19 @@ export function App() {
                 )}
               >
                 {health?.github_poller_enabled ? "15s 巡检合入" : "未开启"}
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span>Jira 权威工单</span>
+              <span
+                className={cn(
+                  "font-medium",
+                  health?.jira_configured ? "text-emerald-500" : "text-amber-500"
+                )}
+              >
+                {health?.jira_configured
+                  ? `已接 ${health.jira_default_project || "Jira"}`
+                  : "待配置"}
               </span>
             </div>
             <div className="flex items-center justify-between">
@@ -248,6 +295,7 @@ export function App() {
         <main className="flex-1 p-7 max-w-[1440px] w-full mx-auto">
           {tab === "workbench" && (
             <WorkbenchView
+              health={health}
               metrics={metrics}
               repos={repos}
               tasks={tasks}
@@ -258,6 +306,19 @@ export function App() {
                 setSelectedTaskId(tid);
               }}
               onMutated={syncAll}
+              onOpenJiraTab={() => setTab("jira")}
+            />
+          )}
+
+          {tab === "jira" && (
+            <JiraIntegrationView
+              repos={repos}
+              onDispatchedTask={async (tid) => {
+                await syncAll();
+                setTab("workbench");
+                setSelectedTaskId(tid);
+              }}
+              onConfigSaved={syncAll}
             />
           )}
 

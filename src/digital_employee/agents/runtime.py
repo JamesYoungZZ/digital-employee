@@ -8,13 +8,16 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from digital_employee.llm.client import LLMClient
 from digital_employee.models.contract import TaskContract, UnresolvedDecision
 from digital_employee.sandbox.worktree_runner import WorktreeSandbox, build_sandbox_env
 from digital_employee.security.dlp import redact_sensitive_text, wrap_untrusted_input
 from digital_employee.settings import Settings
+
+if TYPE_CHECKING:
+    from digital_employee.storage.durable_store import DurableStore
 
 
 @dataclass
@@ -155,6 +158,7 @@ def create_coding_runtime(
     settings: Settings,
     *,
     llm: LLMClient | None = None,
+    store: DurableStore | None = None,
 ) -> CodingRuntime:
     """Instantiate the configured sandbox coding runtime (`kernel` | `external_cli`)."""
     mode = getattr(settings, "coding_runtime", "kernel")
@@ -164,4 +168,4 @@ def create_coding_runtime(
 
     from digital_employee.agents.kernel_runtime import NativeKernelRuntime
 
-    return NativeKernelRuntime(settings=settings, injected_llm=llm)
+    return NativeKernelRuntime(settings=settings, injected_llm=llm, store=store)

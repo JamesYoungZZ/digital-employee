@@ -16,10 +16,26 @@ class UnresolvedDecision(BaseModel):
     impact_scope: str = Field(..., description="Module or behavior affected by this decision.")
 
 
+class JiraTicketDraft(BaseModel):
+    """Structured Jira issue draft requiring human review & approval before creation."""
+
+    project_key: str = "DE"
+    issue_type: str = "Task"  # Bug | Task | Story
+    summary: str
+    description: str
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    priority: str = "Medium"  # Highest | High | Medium | Low
+    labels: list[str] = Field(default_factory=list)
+    approved_by: str | None = None
+    approved_at: str | None = None
+
+
 class TaskContract(BaseModel):
-    """First-class accountable delegation contract drafted before any code modification."""
+    """First-class accountable delegation contract anchored to an authoritative Jira ticket."""
 
     contract_version: int = 1
+    jira_issue_key: str = ""
+    jira_issue_url: str = ""
     objective: str
     target_repo: str
     base_branch: str
@@ -54,6 +70,7 @@ class RepositoryProfile(BaseModel):
     github_repo: str
     local_path: str
     default_base_branch: str = "main"
+    default_jira_project: str = ""
     python_bin: str = "python3"
     pytest_cmd: list[str] = Field(default_factory=lambda: ["pytest"])
     test_runner_cmd: list[str] = Field(default_factory=list)

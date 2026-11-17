@@ -126,3 +126,135 @@ def test_auto_onboard_local_git_repository(tmp_path: Path) -> None:
     # Verify dynamic persistence and lookup
     resolved = cfg.resolve_repository("order-service")
     assert resolved.github_repo == "acme/order-service"
+
+
+def test_managed_policy_closed_loop_and_health_circuit_breaker(tmp_path: Path) -> None:
+    import subprocess
+
+    from fastapi.testclient import TestClient
+
+    from digital_employee.context.decision_ledger import DecisionEntry, audit_policy_health
+    from digital_employee.onboarding import onboard_repository
+    from digital_employee.orchestrator import DelegationOrchestrator
+    from digital_employee.settings import Settings
+    from digital_employee.web.app import create_app
+
+    sample_repo = tmp_path / "billing-service"
+    (sample_repo / "src" / "billing").mkdir(parents=True)
+    (sample_repo / "src" / "billing" / "charge.py").write_text("def charge(): pass\n", encoding="utf-8")
+    (sample_repo / "scripts").mkdir()
+    (sample_repo / "scripts" / "sync_schema.py").write_text("print('ok')\n", encoding="utf-8")
+    (sample_repo / "pyproject.toml").write_text("[project]\nname='billing-service'\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-b", "main"], cwd=str(sample_repo), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:acme/billing-service.git"],
+        cwd=str(sample_repo),
+        check=True,
+        capture_output=True,
+    )
+
+    cfg = Settings(
+        data_dir=tmp_path / "de-data",
+        repo_registry_path=tmp_path / "empty.yaml",
+        jira_poller_enabled=False,
+    )
+    profile = onboard_repository(cfg, str(sample_repo))
+    orch = DelegationOrchestrator(cfg)
+
+    # 1. Create a valid policy via orchestrator -> stored in SQLite, zero repo intrusion
+    p1 = orch.create_repository_policy(
+        profile.repo_id,
+        title="扣款幂等键强制要求",
+        category="SECURITY",
+        scope="src/billing/*",
+        rule="修改 src/billing/charge.py 后须运行 scripts/sync_schema.py 校验幂等字段；防止 collection/path 注入。",
+        reason="防止重复扣款与路径注入",
+        owner="alice",
+    )
+    assert not (sample_repo / ".ai" / "DECISIONS.yaml").exists()
+    h1 = audit_policy_health(sample_repo, p1)
+    assert h1.health_status == "HEALTHY"
+
+    # 2. Create a policy pointing to a deleted/nonexistent scope -> auto circuit-broken!
+    p_broken = orch.create_repository_policy(
+        profile.repo_id,
+        title="已废弃目录规则",
+        category="ARCHITECTURE",
+        scope="src/deleted_module/*",
+        rule="禁止直接调用旧模块",
+        owner="bob",
+    )
+    h_broken = audit_policy_health(sample_repo, p_broken)
+    assert h_broken.health_status == "INVALID_SCOPE"
+
+    ledger = DecisionLedger.for_repository(orch.store, profile)
+    active_ids = [e.id for e in ledger.active_policies()]
+    assert p1.id in active_ids
+    assert p_broken.id not in active_ids  # Circuit breaker stops broken rule from misleading AI
+
+    # 3. Referenced script deleted -> WARN_STALE_REF
+    (sample_repo / "scripts" / "sync_schema.py").unlink()
+    h1_after_del = audit_policy_health(sample_repo, p1)
+    assert h1_after_del.health_status == "WARN_STALE_REF"
+    assert "scripts/sync_schema.py" in h1_after_del.stale_references
+
+    # 4. Stale verification date (>90 days) -> WARN_NEEDS_REVIEW, cleared by verify endpoint
+    stale_entry = DecisionEntry(
+        id="BILLING-DEC-099",
+        title="旧核验规则",
+        scope="*",
+        rule="全局日志禁止打印卡号",
+        verified_at="2020-01-01",
+    )
+    assert audit_policy_health(sample_repo, stale_entry).health_status == "WARN_NEEDS_REVIEW"
+
+    # 5. Full REST CRUD loop via Web API
+    app = create_app(cfg, orch, enable_background_daemons=False)
+    client = TestClient(app)
+
+    repos_resp = client.get("/api/repositories")
+    assert repos_resp.status_code == 200
+    repo_json = next(r for r in repos_resp.json() if r["repo_id"] == profile.repo_id)
+    assert repo_json["policy_summary"]["total"] == 2
+    assert repo_json["policy_summary"]["active_effective"] == 1
+    assert repo_json["policy_summary"]["unhealthy"] == 2  # 1 INVALID_SCOPE + 1 WARN_STALE_REF
+
+    # Fix broken scope via PUT -> becomes HEALTHY & effective_for_ai!
+    upd_resp = client.put(
+        f"/api/repositories/{profile.repo_id}/policies/{p_broken.id}",
+        json={
+            "title": "修正后的账单目录规范",
+            "category": "ARCHITECTURE",
+            "scope": "src/billing/charge.py",
+            "rule": "账单扣款必须记录审计流水",
+            "reason": "合规审计要求",
+            "owner": "charlie",
+            "status": "APPROVED_POLICY",
+        },
+    )
+    assert upd_resp.status_code == 200
+    assert upd_resp.json()["health_status"] == "HEALTHY"
+    assert upd_resp.json()["effective_for_ai"] is True
+
+    # Toggle pause/resume
+    tog_resp = client.post(
+        f"/api/repositories/{profile.repo_id}/policies/{p_broken.id}/toggle"
+    )
+    assert tog_resp.status_code == 200
+    assert tog_resp.json()["status"] == "PAUSED"
+    assert tog_resp.json()["effective_for_ai"] is False
+
+    # Verify freshness
+    ver_resp = client.post(
+        f"/api/repositories/{profile.repo_id}/policies/{p_broken.id}/verify",
+        json={"owner": "dave"},
+    )
+    assert ver_resp.status_code == 200
+    assert ver_resp.json()["owner"] == "dave"
+
+    # Delete rule
+    del_resp = client.delete(
+        f"/api/repositories/{profile.repo_id}/policies/{p_broken.id}"
+    )
+    assert del_resp.status_code == 200
+    assert del_resp.json()["deleted"] is True

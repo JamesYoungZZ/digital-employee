@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from digital_employee.context.decision_ledger import DecisionEntry
 from digital_employee.models.state import DurableTaskState, utc_now_iso
 from digital_employee.security.dlp import redact_sensitive_text
 
@@ -70,8 +72,25 @@ class DurableStore:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS repository_policies (
+                    repo_id TEXT NOT NULL,
+                    policy_id TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    policy_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (repo_id, policy_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS repository_policy_sync (
+                    repo_id TEXT PRIMARY KEY,
+                    initialized_at TEXT NOT NULL,
+                    source_note TEXT NOT NULL DEFAULT ''
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(lifecycle_status);
                 CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON checkpoints(task_id);
+                CREATE INDEX IF NOT EXISTS idx_repo_policies_repo ON repository_policies(repo_id, sort_order);
                 """
             )
 
@@ -263,3 +282,122 @@ class DurableStore:
             "total_cost_usd": total_cost,
             "estimated_net_human_minutes_saved": round(net_minutes_saved, 2),
         }
+
+    # =========================================================================
+    # Repository Governance Policies (Zero-Intrusion Managed Decision Ledger)
+    # =========================================================================
+
+    def has_initialized_policies(self, repo_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM repository_policy_sync WHERE repo_id = ?",
+                (repo_id,),
+            ).fetchone()
+        return row is not None
+
+    def mark_policies_initialized(self, repo_id: str, source_note: str = "") -> None:
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO repository_policy_sync (repo_id, initialized_at, source_note)
+                VALUES (?, ?, ?)
+                ON CONFLICT(repo_id) DO UPDATE SET
+                    initialized_at = excluded.initialized_at,
+                    source_note = excluded.source_note
+                """,
+                (repo_id, now, source_note[:500]),
+            )
+
+    def list_repository_policies(self, repo_id: str) -> list[DecisionEntry]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT policy_json
+                FROM repository_policies
+                WHERE repo_id = ?
+                ORDER BY sort_order ASC, created_at ASC, policy_id ASC
+                """,
+                (repo_id,),
+            ).fetchall()
+        return [DecisionEntry.model_validate_json(r["policy_json"]).normalized() for r in rows]
+
+    def get_repository_policy(self, repo_id: str, policy_id: str) -> DecisionEntry | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT policy_json
+                FROM repository_policies
+                WHERE repo_id = ? AND policy_id = ?
+                """,
+                (repo_id, policy_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return DecisionEntry.model_validate_json(row["policy_json"]).normalized()
+
+    def upsert_repository_policy(
+        self,
+        repo_id: str,
+        entry: DecisionEntry,
+        *,
+        sort_order: int | None = None,
+    ) -> DecisionEntry:
+        norm_entry = entry.normalized()
+        now = utc_now_iso()
+        serialized = norm_entry.model_dump_json()
+        with self._connect() as conn:
+            if sort_order is None:
+                existing = conn.execute(
+                    "SELECT sort_order FROM repository_policies WHERE repo_id = ? AND policy_id = ?",
+                    (repo_id, norm_entry.id),
+                ).fetchone()
+                if existing is not None:
+                    resolved_order = int(existing["sort_order"])
+                else:
+                    max_row = conn.execute(
+                        "SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM repository_policies WHERE repo_id = ?",
+                        (repo_id,),
+                    ).fetchone()
+                    resolved_order = int(max_row["next_order"]) if max_row else 0
+            else:
+                resolved_order = sort_order
+
+            conn.execute(
+                """
+                INSERT INTO repository_policies (
+                    repo_id, policy_id, sort_order, policy_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(repo_id, policy_id) DO UPDATE SET
+                    sort_order = excluded.sort_order,
+                    policy_json = excluded.policy_json,
+                    updated_at = excluded.updated_at
+                """,
+                (repo_id, norm_entry.id, resolved_order, serialized, now, now),
+            )
+        return norm_entry
+
+    def delete_repository_policy(self, repo_id: str, policy_id: str) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM repository_policies WHERE repo_id = ? AND policy_id = ?",
+                (repo_id, policy_id),
+            )
+        return cur.rowcount > 0
+
+    def next_policy_id(self, repo_id: str) -> str:
+        existing = self.list_repository_policies(repo_id)
+        prefix = ""
+        max_num = 0
+        for item in existing:
+            m = re.match(r"^([A-Z0-9]+-DEC)-(\d+)$", item.id.upper())
+            if m:
+                if not prefix:
+                    prefix = m.group(1)
+                max_num = max(max_num, int(m.group(2)))
+        if not prefix:
+            clean_token = re.sub(r"[^A-Z0-9]", "", repo_id.split("-")[-1].upper())
+            if len(clean_token) < 3:
+                clean_token = re.sub(r"[^A-Z0-9]", "", repo_id.upper())[:8] or "REPO"
+            prefix = f"{clean_token[:8]}-DEC"
+        return f"{prefix}-{max_num + 1:03d}"
