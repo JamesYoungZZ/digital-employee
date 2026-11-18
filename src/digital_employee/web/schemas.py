@@ -11,6 +11,7 @@ class CreateTaskPayload(BaseModel):
     raw_request: str
     target_repo: str = "modular-rag"
     base_branch: str | None = None
+    max_budget_usd: float | None = None
     accept_defaults: bool = False
     auto_execute: bool = True
     publish_pr: bool = True
@@ -76,6 +77,32 @@ class OnboardRepoPayload(BaseModel):
     repo_id: str | None = None
     base_branch: str | None = None
     bootstrap_venv: bool = False
+
+
+class UpdateRepoPayload(BaseModel):
+    default_base_branch: str | None = None
+    pytest_cmd: list[str] | None = None
+    lint_cmd: list[str] | None = None
+    default_jira_project: str | None = None
+
+
+class CoreEngineConfigPayload(BaseModel):
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    reasoning_model: str = ""
+    fast_model: str = ""
+    github_token: str = ""
+    default_max_budget_usd: float | None = None
+    enable_ops_mcp: bool | None = None
+
+
+class OpsAlertSimulatePayload(BaseModel):
+    target_repo: str = ""
+    alert_name: str = "HighMemoryOrErrorSpike"
+    severity: str = "critical"
+    error_message: str = "Unhandled KeyError in request handler"
+    stack_trace: str = ""
+    auto_execute: bool = False
 
 
 class FeishuConfigPayload(BaseModel):

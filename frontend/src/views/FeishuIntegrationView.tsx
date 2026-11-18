@@ -1,11 +1,8 @@
 import React from "react";
 import {
-  ArrowRight,
-  CheckCircle2,
+  ChevronDown,
   Copy,
-  Cpu,
   ExternalLink,
-  MessageSquareCode,
   Play,
   Send,
   Webhook,
@@ -42,10 +39,6 @@ export function FeishuIntegrationView({ onTaskDispatched }: Props) {
   const [webhookUrl, setWebhookUrl] = React.useState("");
   const [appId, setAppId] = React.useState("");
   const [appSecret, setAppSecret] = React.useState("");
-  const [revProvider, setRevProvider] = React.useState("gemini_cli");
-  const [revModel, setRevModel] = React.useState("gemini-3.8-flash");
-  const [revApiKey, setRevApiKey] = React.useState("");
-  const [revCurrent, setRevCurrent] = React.useState<{ provider: string; model: string } | null>(null);
   const [simInput, setSimInput] = React.useState(
     "@_user_1 [modular-rag] 修复 list_collections 中 include_stats 未透传的问题"
   );
@@ -53,15 +46,9 @@ export function FeishuIntegrationView({ onTaskDispatched }: Props) {
   const [previewCard, setPreviewCard] = React.useState<FeishuCardPayload | null>(null);
 
   const loadConfig = React.useCallback(async () => {
-    const [res, rev] = await Promise.all([
-      apiFetch<FeishuIntegrationStatus>("/api/integrations/feishu"),
-      apiFetch<{ provider: string; model: string }>("/api/integrations/reviewer"),
-    ]);
+    const res = await apiFetch<FeishuIntegrationStatus>("/api/integrations/feishu");
     setStatus(res);
     setAppId(res.app_id || "");
-    setRevCurrent(rev);
-    setRevProvider(rev.provider);
-    setRevModel(rev.model);
   }, []);
 
   React.useEffect(() => {
@@ -83,6 +70,7 @@ export function FeishuIntegrationView({ onTaskDispatched }: Props) {
       setAppSecret("");
       toast.success("飞书连接配置已保存并实时生效");
       await loadConfig();
+      await onTaskDispatched();
     } catch (err: any) {
       toast.error(err.message);
     }
@@ -121,7 +109,7 @@ export function FeishuIntegrationView({ onTaskDispatched }: Props) {
       setParsedIntent(res.parsed_intent);
       setPreviewCard(res.feishu_reply_card ?? res.sample_test_card ?? null);
       if (res.dispatched && res.task) {
-        toast.success(`已模拟飞书派活创建任务 ${res.task.task_id}`);
+        toast.success(`已通过模拟消息创建任务 ${res.task.task_id}`);
         await onTaskDispatched();
       }
     } catch (err: any) {
@@ -130,84 +118,38 @@ export function FeishuIntegrationView({ onTaskDispatched }: Props) {
   };
 
   return (
-    <div className="space-y-6">
-      {/* Input -> Engine -> Output Architecture Blueprint */}
-      <div className="grid lg:grid-cols-3 gap-4">
-        <SurfaceCard className="p-5 space-y-2.5">
-          <div className="flex items-center justify-between">
-            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600 dark:text-blue-400">
-              <MessageSquareCode className="h-4 w-4" />
-              1. 系统的输入 (System Inputs)
-            </span>
-            <ArrowRight className="h-4 w-4 text-zinc-300 hidden lg:block" />
+    <div className="space-y-4">
+      <SurfaceCard className="p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 dark:border-zinc-800 pb-3">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+              <Webhook className="h-4 w-4 text-blue-500" />
+              飞书免公网双向通道配置
+            </div>
+            <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+              支持单向群机器人 Webhook 推送，或通过飞书自建应用 WebSocket 长连接实现免公网收发消息与卡片按钮审批。
+            </p>
           </div>
-          <ul className="space-y-2 text-xs text-zinc-600 dark:text-zinc-300 leading-relaxed">
-            <li>
-              <b className="text-zinc-900 dark:text-zinc-100">派发新委托</b>：飞书群{" "}
-              <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5">
-                @数字员工 [仓库名] 报错或需求
-              </code>
-            </li>
-            <li>
-              <b className="text-zinc-900 dark:text-zinc-100">5 秒微确认</b>：直接点飞书卡片选项按钮，或群内回{" "}
-              <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5">默认</code> /{" "}
-              <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5">1</code>
-            </li>
-            <li>
-              <b className="text-zinc-900 dark:text-zinc-100">下半场追改</b>：在 GitHub PR 下直接留评论，或飞书发{" "}
-              <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5">#task_id 修改意见</code>
-            </li>
-          </ul>
-        </SurfaceCard>
+          <span className="text-xs font-medium">
+            {status?.ws_active ? (
+              <span className="text-emerald-600 dark:text-emerald-400">
+                🟢 长连接在线
+              </span>
+            ) : status?.webhook_configured ? (
+              <span className="text-emerald-600 dark:text-emerald-400">
+                🟢 Webhook 已配置
+              </span>
+            ) : (
+              <span className="text-zinc-400">⚪ 未配置</span>
+            )}
+          </span>
+        </div>
 
-        <SurfaceCard className="p-5 space-y-2.5">
-          <div className="flex items-center justify-between">
-            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-purple-600 dark:text-purple-400">
-              <Cpu className="h-4 w-4" />
-              2. 受控沙箱与确定性门禁
-            </span>
-            <ArrowRight className="h-4 w-4 text-zinc-300 hidden lg:block" />
-          </div>
-          <ul className="space-y-1.5 text-xs text-zinc-600 dark:text-zinc-300 leading-relaxed">
-            <li>• 读取目标仓代码与 <code className="font-mono">.ai/DECISIONS.yaml</code> 自动单模块切片</li>
-            <li>• 独立 <code className="font-mono">ai-agent/*</code> Worktree，剥离密钥环境变量</li>
-            <li>• 基线跑单测确认 <b>FAIL</b> → 修复后跑单测确认 <b>PASS</b></li>
-            <li>• 静态拦截删 <code className="font-mono">assert</code> / 加 <code className="font-mono">@skip</code> 作弊行为</li>
-          </ul>
-        </SurfaceCard>
-
-        <SurfaceCard className="p-5 space-y-2.5">
-          <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
-            <CheckCircle2 className="h-4 w-4" />
-            3. 给用户的交付输出 (Outputs)
-          </div>
-          <ul className="space-y-2 text-xs text-zinc-600 dark:text-zinc-300 leading-relaxed">
-            <li>
-              <b className="text-zinc-900 dark:text-zinc-100">线上 GitHub Draft PR</b>：带线上真实 CI 绿灯，物理禁止自动合入主干
-            </li>
-            <li>
-              <b className="text-zinc-900 dark:text-zinc-100">飞书证据报告卡</b>：展示回归结果、费用与{" "}
-              <b>未验证风险盲区 (Unverified Risks)</b>
-            </li>
-            <li>
-              <b className="text-zinc-900 dark:text-zinc-100">兜底 Handoff 包</b>：超步数或缺环境依赖时保留分支现场结构化交接
-            </li>
-          </ul>
-        </SurfaceCard>
-      </div>
-
-      {/* Config + Live Simulator */}
-      <div className="grid lg:grid-cols-2 gap-5">
-        <SurfaceCard className="p-5 space-y-4">
-          <div className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-            <Webhook className="h-4 w-4 text-blue-500" />
-            飞书免公网通道配置
-          </div>
-
-          <form onSubmit={handleSave} className="space-y-3.5 text-xs">
+        <form onSubmit={handleSave} className="space-y-4 text-xs">
+          <div className="grid md:grid-cols-2 gap-4">
             <div>
               <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
-                方案 A（30 秒即用）：飞书群「自定义机器人」Webhook URL
+                方案 A（仅推送通知）：飞书群「自定义机器人」Webhook URL
               </label>
               <input
                 type="text"
@@ -224,7 +166,7 @@ export function FeishuIntegrationView({ onTaskDispatched }: Props) {
 
             <div>
               <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
-                方案 B（手机双向对话）：飞书自建应用 App ID & Secret（配合 lark-oapi 长连接）
+                方案 B（双向对话 + 卡片按钮审批）：自建应用 App ID & Secret
               </label>
               <div className="grid grid-cols-2 gap-2.5">
                 <input
@@ -238,98 +180,93 @@ export function FeishuIntegrationView({ onTaskDispatched }: Props) {
                   type="password"
                   value={appSecret}
                   onChange={(e) => setAppSecret(e.target.value)}
-                  placeholder={status?.app_secret_configured ? "已配置 Secret" : "App Secret"}
+                  placeholder={status?.app_secret_configured ? "已保存 Secret（留空不变）" : "App Secret"}
                   className="h-9 rounded-lg border border-zinc-200 bg-white px-3 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-950"
                 />
               </div>
             </div>
+          </div>
 
-            <div className="rounded-lg bg-zinc-50 dark:bg-zinc-950 p-3 space-y-1 text-[11.5px] text-zinc-600 dark:text-zinc-400">
-              <div>
-                长连接状态：{" "}
-                <b className={status?.ws_active ? "text-emerald-600 dark:text-emerald-400" : ""}>
-                  {status?.ws_active ? "🟢 WebSocket 已在线（收消息 + 点卡片按钮均免公网）" : "⚪ 待填入 App ID & Secret"}
-                </b>
-              </div>
-              <div>
-                群 Webhook：<b>{status?.webhook_configured ? "已连通" : "可选（未配也可走应用直推）"}</b>
-                {" · "}默认推送会话：
-                <b>{status?.default_chat_id ? `已绑定 (${status.default_chat_id.slice(0, 12)}…)` : "给机器人发句「连接」自动绑定"}</b>
-              </div>
+          <div className="rounded-lg bg-zinc-50 dark:bg-zinc-950 px-3.5 py-2.5 text-[11.5px] text-zinc-600 dark:text-zinc-400 flex flex-wrap items-center justify-between gap-2">
+            <div>
+              默认推送会话：
+              <b className="ml-1 text-zinc-800 dark:text-zinc-200">
+                {status?.default_chat_id
+                  ? `已绑定 (${status.default_chat_id.slice(0, 14)}…)`
+                  : "配置应用后在飞书给机器人发一句「连接」即可自动绑定"}
+              </b>
             </div>
+            <button
+              type="button"
+              onClick={() => {
+                navigator.clipboard.writeText(FEISHU_PERMISSIONS_JSON);
+                toast.success("已复制飞书权限批量导入 JSON");
+              }}
+              className="inline-flex items-center gap-1 text-blue-600 hover:underline dark:text-blue-400 cursor-pointer"
+            >
+              <Copy className="h-3 w-3" /> 复制飞书应用所需权限 JSON
+            </button>
+          </div>
 
-            <div className="rounded-xl border border-blue-500/25 bg-blue-500/5 p-3.5 space-y-2 text-[11.5px] text-zinc-700 dark:text-zinc-300 leading-relaxed">
-              <div className="flex items-center justify-between font-semibold text-blue-700 dark:text-blue-300">
-                <span>⚡ 3 分钟零公网接入飞书自建机器人指南</span>
+          <details className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50/40 dark:bg-zinc-900/40 px-3.5 py-2.5 text-[11.5px] text-zinc-600 dark:text-zinc-400">
+            <summary className="cursor-pointer font-medium text-zinc-700 dark:text-zinc-300 flex items-center justify-between select-none">
+              <span>查看 3 步飞书自建应用接入说明</span>
+              <ChevronDown className="h-3.5 w-3.5 text-zinc-400" />
+            </summary>
+            <ol className="list-decimal pl-4 space-y-1.5 mt-2.5 leading-relaxed">
+              <li>
+                前往{" "}
                 <a
                   href="https://open.feishu.cn/app"
                   target="_blank"
                   rel="noreferrer"
-                  className="inline-flex items-center gap-1 underline hover:opacity-80"
+                  className="text-blue-600 underline dark:text-blue-400 inline-flex items-center gap-0.5"
                 >
-                  打开飞书开放平台 <ExternalLink className="h-3 w-3" />
-                </a>
-              </div>
-              <ol className="list-decimal pl-4 space-y-1">
-                <li>
-                  创建<b>企业自建应用</b> → 左侧「添加应用能力」开启<b>机器人</b> → 在「凭证与基础信息」复制 <code>App ID</code> 和 <code>App Secret</code> 先填到上方保存（<b>先让本地长连接跑起来</b>，飞书后台下一步才能校验通过！）。
-                </li>
-                <li>
-                  左侧「权限管理」→ 点<b>批量导入/导出权限</b>，粘贴下方权限 JSON 并申请开通：
-                  <button
-                    type="button"
-                    onClick={() => {
-                      navigator.clipboard.writeText(FEISHU_PERMISSIONS_JSON);
-                      toast.success("已复制飞书权限 JSON，直接去「批量导入权限」粘贴即可！");
-                    }}
-                    className="ml-2 inline-flex items-center gap-1 rounded bg-blue-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-blue-500 cursor-pointer"
-                  >
-                    <Copy className="h-2.5 w-2.5" /> 一键复制权限 JSON
-                  </button>
-                </li>
-                <li>
-                  左侧「事件与回调」→ <b>事件配置</b>选<b>「使用长连接接收事件」</b>添加 <code>im.message.receive_v1</code>（接收消息）；<b>回调配置</b>同样选<b>「使用长连接接收回调」</b>添加 <code>card.action.trigger</code>（卡片交互）→ 点顶部「创建版本并发布」。
-                </li>
-                <li>
-                  打开手机/电脑飞书搜到该机器人，发一句 <code>连接</code>，即可自动绑定会话并收到绿色欢迎卡！
-                </li>
-              </ol>
-            </div>
+                  飞书开放平台 <ExternalLink className="h-2.5 w-2.5" />
+                </a>{" "}
+                创建企业自建应用 → 开启<b>机器人</b>能力 → 将 <code>App ID</code> 与 <code>App Secret</code> 填入上方保存。
+              </li>
+              <li>
+                在飞书后台「权限管理 → 批量导入权限」粘贴上方复制的权限 JSON；在「事件与回调」将<b>事件配置</b>（添加 <code>im.message.receive_v1</code>）与<b>回调配置</b>（添加 <code>card.action.trigger</code>）均设为<b>使用长连接</b>，发布版本。
+              </li>
+              <li>
+                打开飞书向该机器人发送 <code>连接</code> 即可绑定默认会话；群聊派活格式为 <code>@机器人 [仓库ID] 需求描述</code>。
+              </li>
+            </ol>
+          </details>
 
-            <div className="flex flex-wrap gap-2 pt-1">
-              <Button type="submit" variant="primary">
-                保存配置并热生效
-              </Button>
-              <Button type="button" variant="emerald" onClick={handleTestPush}>
-                <Send className="h-3.5 w-3.5" />
-                发送测试卡片到飞书
-              </Button>
-            </div>
-          </form>
-        </SurfaceCard>
-
-        <SurfaceCard className="p-5 space-y-4">
-          <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-            飞书消息路由与卡片仿真沙盒
+          <div className="flex flex-wrap gap-2 pt-1">
+            <Button type="submit" variant="primary">
+              保存飞书配置
+            </Button>
+            <Button type="button" variant="outline" onClick={handleTestPush}>
+              <Send className="h-3.5 w-3.5" />
+              发送测试卡片到飞书
+            </Button>
           </div>
-          <p className="text-xs text-zinc-500">
-            输入任意飞书群聊指令（派新活 / 回 <code className="font-mono">默认</code> / 发 <code className="font-mono">#task_id</code> 追改），实时查看意图解析与回推卡片效果：
-          </p>
+        </form>
+      </SurfaceCard>
 
-          <input
-            type="text"
-            value={simInput}
-            onChange={(e) => setSimInput(e.target.value)}
-            className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-3 text-xs dark:border-zinc-800 dark:bg-zinc-950"
-          />
-
+      {/* Collapsible Developer Simulator */}
+      <details className="group rounded-xl border border-zinc-200/80 bg-white dark:border-zinc-800/80 dark:bg-zinc-900/60 p-4">
+        <summary className="cursor-pointer text-xs font-semibold text-zinc-700 dark:text-zinc-300 flex items-center justify-between select-none">
+          <span>开发者调试工具：飞书指令路由与卡片渲染仿真</span>
+          <ChevronDown className="h-4 w-4 text-zinc-400 transition-transform group-open:rotate-180" />
+        </summary>
+        <div className="mt-4 space-y-3 text-xs">
           <div className="flex flex-wrap gap-2">
+            <input
+              type="text"
+              value={simInput}
+              onChange={(e) => setSimInput(e.target.value)}
+              className="h-9 flex-1 min-w-[260px] rounded-lg border border-zinc-200 bg-white px-3 text-xs dark:border-zinc-800 dark:bg-zinc-950"
+            />
             <Button type="button" variant="outline" onClick={() => runSimulation(false)}>
-              仅测试意图路由解析
+              解析意图 JSON
             </Button>
             <Button type="button" variant="primary" onClick={() => runSimulation(true)}>
               <Play className="h-3.5 w-3.5" />
-              模拟真实飞书派活并生成回执卡
+              模拟真实飞书派单
             </Button>
           </div>
 
@@ -340,97 +277,8 @@ export function FeishuIntegrationView({ onTaskDispatched }: Props) {
           )}
 
           {previewCard && <FeishuCardPreview payload={previewCard} />}
-        </SurfaceCard>
-      </div>
-
-      {/* Cross-Model Independent Reviewer Engine (Gemini 3.8 Flash) */}
-      <SurfaceCard className="p-5 space-y-3.5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-            <Cpu className="h-4 w-4 text-purple-500" />
-            跨厂商独立 Code Review 引擎（当前生效：
-            <code className="rounded bg-purple-500/10 px-2 py-0.5 font-mono text-xs text-purple-600 dark:text-purple-300">
-              {revCurrent ? `${revCurrent.provider} · ${revCurrent.model}` : "加载中..."}
-            </code>
-            ）
-          </div>
         </div>
-
-        <div className="grid md:grid-cols-4 gap-3 text-xs items-end">
-          <div>
-            <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
-              Review 通道
-            </label>
-            <select
-              value={revProvider}
-              onChange={(e) => {
-                const p = e.target.value;
-                setRevProvider(p);
-                if (p === "gemini_cli" || p === "gemini") setRevModel("gemini-3.8-flash");
-                else if (p === "anthropic") setRevModel("claude-sonnet-4-20250514");
-                else setRevModel("deepseek-flash");
-              }}
-              className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-950"
-            >
-              <option value="gemini_cli">Antigravity CLI (agy · Gemini Ultra 免Key)</option>
-              <option value="gemini">Gemini API Key (AI Studio)</option>
-              <option value="anthropic">Anthropic Claude API</option>
-              <option value="openai_compatible">OpenAI / DeepSeek 兼容</option>
-            </select>
-          </div>
-
-          <div>
-            <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
-              Review 模型 ID
-            </label>
-            <input
-              type="text"
-              value={revModel}
-              onChange={(e) => setRevModel(e.target.value)}
-              placeholder="gemini-3.8-flash"
-              className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-3 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-950"
-            />
-          </div>
-
-          <div>
-            <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
-              API Key（选 Gemini Ultra CLI 时留空）
-            </label>
-            <input
-              type="password"
-              value={revApiKey}
-              onChange={(e) => setRevApiKey(e.target.value)}
-              placeholder={revProvider === "gemini_cli" ? "走本机 gemini OAuth 额度" : "AIza... / sk-..."}
-              disabled={revProvider === "gemini_cli"}
-              className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-3 font-mono text-xs disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950"
-            />
-          </div>
-
-          <Button
-            type="button"
-            variant="primary"
-            onClick={async () => {
-              try {
-                await apiFetch("/api/integrations/reviewer/config", {
-                  method: "POST",
-                  body: JSON.stringify({
-                    provider: revProvider,
-                    model: revModel,
-                    api_key: revApiKey,
-                  }),
-                });
-                setRevApiKey("");
-                toast.success(`已切换独立 Code Review 引擎为 ${revProvider} · ${revModel}`);
-                await loadConfig();
-              } catch (err: any) {
-                toast.error(err.message);
-              }
-            }}
-          >
-            切换为 {revModel || "gemini-3.8-flash"}
-          </Button>
-        </div>
-      </SurfaceCard>
+      </details>
     </div>
   );
 }

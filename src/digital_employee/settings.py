@@ -113,10 +113,13 @@ class Settings(BaseModel):
 
     def load_repositories(self) -> dict[str, RepositoryProfile]:
         profiles: dict[str, RepositoryProfile] = {}
+        removed: set[str] = set()
         for reg_path in (self.repo_registry_path, self.runtime_repo_registry_path):
             if not reg_path.is_file():
                 continue
             raw = yaml.safe_load(reg_path.read_text(encoding="utf-8")) or {}
+            if isinstance(raw, dict) and isinstance(raw.get("removed_repositories"), list):
+                removed.update(str(r) for r in raw["removed_repositories"])
             repos_raw = raw.get("repositories", {}) if isinstance(raw, dict) else {}
             for key, cfg in repos_raw.items():
                 if not isinstance(cfg, dict):
@@ -125,6 +128,8 @@ class Settings(BaseModel):
                 payload.setdefault("repo_id", key)
                 profile = RepositoryProfile.model_validate(payload)
                 profiles[profile.repo_id] = profile
+        for rem_id in removed:
+            profiles.pop(rem_id, None)
         return profiles
 
     def save_repository(self, profile: RepositoryProfile) -> Path:
@@ -132,17 +137,84 @@ class Settings(BaseModel):
         self.ensure_dirs()
         target = self.runtime_repo_registry_path
         existing: dict[str, dict[str, object]] = {}
+        removed: list[str] = []
         if target.is_file():
             raw = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
-            if isinstance(raw, dict) and isinstance(raw.get("repositories"), dict):
-                existing = dict(raw["repositories"])
+            if isinstance(raw, dict):
+                if isinstance(raw.get("repositories"), dict):
+                    existing = dict(raw["repositories"])
+                if isinstance(raw.get("removed_repositories"), list):
+                    removed = [
+                        str(r) for r in raw["removed_repositories"] if str(r) != profile.repo_id
+                    ]
         existing[profile.repo_id] = profile.model_dump()
+        out_doc: dict[str, object] = {"repositories": existing}
+        if removed:
+            out_doc["removed_repositories"] = removed
         target.write_text(
             "# Managed Target Repositories (Auto-Onboarded by Digital Employee)\n"
-            + yaml.safe_dump({"repositories": existing}, allow_unicode=True, sort_keys=False),
+            + yaml.safe_dump(out_doc, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
         return target
+
+    def update_repository(
+        self,
+        repo_id: str,
+        *,
+        default_base_branch: str | None = None,
+        pytest_cmd: list[str] | None = None,
+        lint_cmd: list[str] | None = None,
+        default_jira_project: str | None = None,
+    ) -> RepositoryProfile:
+        """Update editable configuration fields of a registered repository."""
+        current = self.resolve_repository(repo_id)
+        updates: dict[str, object] = {}
+        if default_base_branch is not None and default_base_branch.strip():
+            updates["default_base_branch"] = default_base_branch.strip()
+        if pytest_cmd is not None:
+            cleaned_test = [tok.strip() for tok in pytest_cmd if tok.strip()]
+            if cleaned_test:
+                updates["pytest_cmd"] = cleaned_test
+        if lint_cmd is not None:
+            updates["lint_cmd"] = [tok.strip() for tok in lint_cmd if tok.strip()]
+        if default_jira_project is not None:
+            updates["default_jira_project"] = default_jira_project.strip().upper()
+        updated = current.model_copy(update=updates)
+        self.save_repository(updated)
+        return updated
+
+    def delete_repository(self, repo_id: str) -> bool:
+        """Unbind/remove a registered repository from the control plane."""
+        profiles = self.load_repositories()
+        if repo_id not in profiles:
+            return False
+        self.ensure_dirs()
+        target = self.runtime_repo_registry_path
+        existing: dict[str, dict[str, object]] = {}
+        removed: set[str] = set()
+        if target.is_file():
+            raw = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+            if isinstance(raw, dict):
+                if isinstance(raw.get("repositories"), dict):
+                    existing = dict(raw["repositories"])
+                if isinstance(raw.get("removed_repositories"), list):
+                    removed.update(str(r) for r in raw["removed_repositories"])
+        existing.pop(repo_id, None)
+        removed.add(repo_id)
+        target.write_text(
+            "# Managed Target Repositories (Auto-Onboarded by Digital Employee)\n"
+            + yaml.safe_dump(
+                {
+                    "repositories": existing,
+                    "removed_repositories": sorted(removed),
+                },
+                allow_unicode=True,
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        return True
 
     def resolve_repository(self, target: str) -> RepositoryProfile:
         profiles = self.load_repositories()

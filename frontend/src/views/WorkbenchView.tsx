@@ -1,26 +1,37 @@
 import React from "react";
 import {
+  AlertCircle,
   ArrowUpRight,
+  BellElectric,
   BellRing,
   CheckCircle2,
-  Clock,
   Coins,
   Command,
   FileDiff,
+  FolderGit2,
+  GitBranch,
   GitMerge,
-  GitPullRequestDraft,
-  Layers,
+  GitPullRequest,
   Loader2,
   MessageSquare,
   Monitor,
+  Search,
   ShieldCheck,
   Sparkles,
   Terminal,
   TicketCheck,
+  Trash2,
   XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
-import type { HealthInfo, MetricsInfo, RepositoryItem, TaskItem } from "../types/api";
+import type {
+  HealthInfo,
+  JiraIssuePreview,
+  MetricsInfo,
+  RepositoryItem,
+  TaskItem,
+} from "../types/api";
+import type { SettingsSubTab } from "./SettingsCenterView";
 import { apiFetch, cn } from "../lib/utils";
 import { Button, StatusBadge, SurfaceCard, Switch } from "../components/ui/primitives";
 
@@ -33,40 +44,41 @@ interface Props {
   onSelectTask: (taskId: string) => void;
   onCreatedTask: (taskId: string) => Promise<void>;
   onMutated: () => Promise<void>;
-  onOpenJiraTab?: () => void;
+  onOpenSettings?: (subTab?: SettingsSubTab) => void;
+  onOpenRepos?: () => void;
 }
 
 const FILTERS = [
-  { id: "ALL", label: "全部任务" },
-  { id: "WAITING_JIRA_APPROVAL", label: "待审建 Jira" },
-  { id: "WAITING_MERGE_APPROVAL", label: "待审批合入" },
-  { id: "WAITING_CLARIFICATION", label: "待你拍板" },
-  { id: "ACTIVE", label: "沙箱运行中" },
-  { id: "READY", label: "等待 CI 中" },
-  { id: "ACCEPTED_AND_CLOSED", label: "已合入闭环" },
-  { id: "HANDED_OFF_INCOMPLETE", label: "已交接现场" },
+  { id: "ALL", label: "全部" },
+  { id: "WAITING_MERGE_APPROVAL", label: "待合入" },
+  { id: "WAITING_JIRA_APPROVAL", label: "待建 Jira" },
+  { id: "WAITING_CLARIFICATION", label: "待确认" },
+  { id: "ACTIVE", label: "运行中" },
+  { id: "READY", label: "等待 CI" },
+  { id: "ACCEPTED_AND_CLOSED", label: "已完成" },
+  { id: "HANDED_OFF_INCOMPLETE", label: "已交接" },
 ] as const;
 
 const SAMPLE_PROMPTS = [
   {
     repo: "livestream-copilot",
-    text: "直播间常有观众在公屏诱导私加微信/VX/WhatsApp或套话让助播承诺『给您免单/已补发』，极易触发平台违规处罚，需拦截此类回复并引导走官方客服",
-  },
-  {
-    repo: "livestream-copilot",
-    text: "大促连续开播数小时、公屏弹幕持续高频涌入时，助播服务内存随开播时长不断上涨存在卡顿崩溃风险，需控制历史弹幕保留范围保障长稳运行",
+    text: "直播间观众在公屏诱导私加微信或套话让助播承诺免单时，需拦截此类回复并引导联系官方客服",
   },
   {
     repo: "modular-rag",
-    text: "导购客服检索商品知识库时经常把不同品类的尺码/售后规则混在一起，希望支持按商品类目筛选检索结果提升回答准确度",
-  },
-  {
-    repo: "modular-rag",
-    text: "买家搜索带连字符的户外商品科技词（如 Gore-Tex、 Dri-FIT）时经常搜不到明明在售的商品，请排查修复漏召回问题",
+    text: "搜索带连字符的商品科技词（如 Gore-Tex、Dri-FIT）时漏召回在售商品，请排查分词检索逻辑并补齐单测",
   },
 ];
 
-function matchesFilter(t: TaskItem, filter: string): boolean {
+function normalizeJiraKeyInput(raw: string): string {
+  const txt = raw.trim();
+  const urlMatch = txt.match(/\/browse\/([A-Za-z][A-Za-z0-9_]{1,9}-\d+)\b/);
+  if (urlMatch) return urlMatch[1].toUpperCase();
+  const keyMatch = txt.match(/\b([A-Za-z][A-Za-z0-9_]{1,9}-\d+)\b/);
+  return keyMatch ? keyMatch[1].toUpperCase() : txt.toUpperCase();
+}
+
+function matchesStatusFilter(t: TaskItem, filter: string): boolean {
   if (filter === "ALL") return true;
   if (filter === "ACTIVE") {
     return [
@@ -100,25 +112,79 @@ export function WorkbenchView({
   onSelectTask,
   onCreatedTask,
   onMutated,
-  onOpenJiraTab,
+  onOpenSettings,
+  onOpenRepos,
 }: Props) {
+  // Composer state
   const [targetRepo, setTargetRepo] = React.useState("");
+  const [baseBranch, setBaseBranch] = React.useState("");
+  const [repoBranches, setRepoBranches] = React.useState<string[]>([]);
+  const [maxBudget, setMaxBudget] = React.useState<string>("1.5");
   const [delegateMode, setDelegateMode] = React.useState<"raw" | "existing_jira">("raw");
   const [prompt, setPrompt] = React.useState("");
   const [existingJiraKey, setExistingJiraKey] = React.useState("");
-  const [requireJiraApproval, setRequireJiraApproval] = React.useState<boolean>(true);
+  const [jiraPreview, setJiraPreview] = React.useState<JiraIssuePreview | null>(null);
+  const [loadingJiraPreview, setLoadingJiraPreview] = React.useState(false);
+
+  const [requireJiraApproval, setRequireJiraApproval] = React.useState<boolean>(() => {
+    return localStorage.getItem("de_require_jira_draft") === "true";
+  });
   const [publishPr, setPublishPr] = React.useState(true);
   const [acceptDefaults, setAcceptDefaults] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
+
+  // Queue filter, search & pagination state
+  const [statusFilter, setStatusFilter] = React.useState<string>("ALL");
+  const [repoFilter, setRepoFilter] = React.useState<string>("ALL");
+  const [channelFilter, setChannelFilter] = React.useState<string>("ALL");
+  const [searchQuery, setSearchQuery] = React.useState<string>("");
+  const [visibleCount, setVisibleCount] = React.useState<number>(25);
+
+  // Action busy state
   const [mergingId, setMergingId] = React.useState<string | null>(null);
-  const [filter, setFilter] = React.useState<string>("ALL");
+  const [deletingId, setDeletingId] = React.useState<string | null>(null);
   const [draftEdits, setDraftEdits] = React.useState<Record<string, EditableJiraDraftState>>({});
 
   React.useEffect(() => {
-    if (health) {
-      setRequireJiraApproval(Boolean(health.jira_configured));
+    if (health?.default_max_budget_usd) {
+      setMaxBudget(String(health.default_max_budget_usd));
     }
-  }, [health?.jira_configured]);
+  }, [health?.default_max_budget_usd]);
+
+  React.useEffect(() => {
+    if (!targetRepo && repos.length > 0) {
+      setTargetRepo(repos[0].repo_id);
+    } else if (targetRepo && repos.length > 0 && !repos.some((r) => r.repo_id === targetRepo)) {
+      setTargetRepo(repos[0].repo_id);
+    }
+  }, [repos, targetRepo]);
+
+  // Load branches whenever targetRepo changes
+  React.useEffect(() => {
+    if (!targetRepo) {
+      setRepoBranches([]);
+      setBaseBranch("");
+      return;
+    }
+    const repoObj = repos.find((r) => r.repo_id === targetRepo);
+    if (repoObj) {
+      setBaseBranch(repoObj.default_base_branch);
+      setRepoBranches([repoObj.default_base_branch]);
+    }
+    let cancelled = false;
+    apiFetch<{ default_base_branch: string; branches: string[] }>(
+      `/api/repositories/${encodeURIComponent(targetRepo)}/branches`
+    )
+      .then((res) => {
+        if (cancelled) return;
+        setRepoBranches(res.branches.length ? res.branches : [res.default_base_branch]);
+        setBaseBranch(res.default_base_branch);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [targetRepo, repos]);
 
   const pendingJiraTasks = React.useMemo(
     () => tasks.filter((t) => t.lifecycle_status === "WAITING_JIRA_APPROVAL"),
@@ -145,6 +211,100 @@ export function WorkbenchView({
     });
   }, [pendingJiraTasks, health?.jira_default_project]);
 
+  const pendingApprovalTasks = React.useMemo(
+    () => tasks.filter((t) => t.lifecycle_status === "WAITING_MERGE_APPROVAL"),
+    [tasks]
+  );
+
+  const pendingReviewFixTasks = React.useMemo(
+    () =>
+      tasks.filter(
+        (t) =>
+          !t.worker_alive &&
+          !["ACCEPTED_AND_CLOSED", "ABANDONED_OR_REVERTED", "WAITING_MERGE_APPROVAL"].includes(
+            t.lifecycle_status
+          ) &&
+          t.verification_evidence?.reviewer_report?.verdict === "BLOCK"
+      ),
+    [tasks]
+  );
+
+  const handlePreviewJira = async () => {
+    const key = normalizeJiraKeyInput(existingJiraKey);
+    if (!key) return;
+    setLoadingJiraPreview(true);
+    try {
+      const p = await apiFetch<JiraIssuePreview>(
+        `/api/integrations/jira/issue/${encodeURIComponent(key)}`
+      );
+      setJiraPreview(p);
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setLoadingJiraPreview(false);
+    }
+  };
+
+  const handleSubmit = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (!targetRepo) return;
+    if (delegateMode === "existing_jira" && !existingJiraKey.trim()) return;
+    if (delegateMode === "raw" && !prompt.trim()) return;
+
+    setSubmitting(true);
+    try {
+      const parsedBudget = parseFloat(maxBudget);
+      const budgetVal = Number.isFinite(parsedBudget) && parsedBudget > 0 ? parsedBudget : undefined;
+      const normalizedKey =
+        delegateMode === "existing_jira" ? normalizeJiraKeyInput(existingJiraKey) : "";
+
+      const body =
+        delegateMode === "existing_jira"
+          ? {
+              target_repo: targetRepo,
+              base_branch: baseBranch || null,
+              max_budget_usd: budgetVal,
+              raw_request: normalizedKey,
+              jira_issue_key: normalizedKey,
+              publish_pr: publishPr,
+              auto_merge: false,
+              accept_defaults: acceptDefaults,
+              auto_execute: true,
+            }
+          : {
+              target_repo: targetRepo,
+              base_branch: baseBranch || null,
+              max_budget_usd: budgetVal,
+              raw_request: prompt.trim(),
+              require_jira_approval: requireJiraApproval,
+              publish_pr: publishPr,
+              auto_merge: false,
+              accept_defaults: acceptDefaults,
+              auto_execute: true,
+            };
+
+      const created = await apiFetch<TaskItem>("/api/tasks", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      setPrompt("");
+      setExistingJiraKey("");
+      setJiraPreview(null);
+      if (created.lifecycle_status === "WAITING_JIRA_APPROVAL") {
+        toast.success(`已起草 Jira 工单草稿 (${created.task_id})，请在下方审核确认后建卡开工`);
+      } else if (created.jira_issue_key) {
+        toast.success(`已拉取工单 ${created.jira_issue_key}，沙箱开始执行 (${created.task_id})`);
+      } else {
+        toast.success(`已生成任务契约 ${created.task_id}`);
+      }
+      await onCreatedTask(created.task_id);
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const handleApproveJiraDraft = async (taskId: string) => {
     const edit = draftEdits[taskId];
     setMergingId(taskId);
@@ -170,7 +330,7 @@ export function WorkbenchView({
         }
       );
       toast.success(
-        `✅ 已创建真实 Jira 工单 ${created.jira_issue_key || ""} 并锁定为唯一权威需求源，沙箱开始执行！`
+        `已创建 Jira 工单 ${created.jira_issue_key || ""} 并启动沙箱执行`
       );
       await onMutated();
       onSelectTask(taskId);
@@ -181,19 +341,22 @@ export function WorkbenchView({
     }
   };
 
-  const pendingApprovalTasks = React.useMemo(
-    () => tasks.filter((t) => t.lifecycle_status === "WAITING_MERGE_APPROVAL"),
-    [tasks]
-  );
-
-  const handleApproveMerge = async (taskId: string) => {
-    setMergingId(taskId);
+  const handleApproveMerge = async (t: TaskItem) => {
+    const prLabel = t.deliverable_pr_number ? `PR #${t.deliverable_pr_number}` : t.branch_name;
+    if (
+      !window.confirm(
+        `确认批准并将 ${prLabel} 自动 Squash Merge 合入 ${t.contract.target_repo} (${t.contract.base_branch}) 主干吗？`
+      )
+    ) {
+      return;
+    }
+    setMergingId(t.task_id);
     try {
-      await apiFetch(`/api/tasks/${encodeURIComponent(taskId)}/control`, {
+      await apiFetch(`/api/tasks/${encodeURIComponent(t.task_id)}/control`, {
         method: "POST",
         body: JSON.stringify({ action: "approve_merge", note: "console_approval_card" }),
       });
-      toast.success("已批准！系统已在 GitHub 自动完成 Squash Merge 合入");
+      toast.success("已批准并在 GitHub 完成 Squash Merge 合入");
       await onMutated();
     } catch (err: any) {
       toast.error(`合入失败: ${err.message}`);
@@ -202,14 +365,17 @@ export function WorkbenchView({
     }
   };
 
-  const handleRejectMerge = async (taskId: string) => {
+  const handleRejectTask = async (taskId: string, actionLabel: string) => {
+    if (!window.confirm(`确认${actionLabel}并将任务 ${taskId} 标记为已废弃吗？`)) {
+      return;
+    }
     setMergingId(taskId);
     try {
       await apiFetch(`/api/tasks/${encodeURIComponent(taskId)}/control`, {
         method: "POST",
         body: JSON.stringify({ action: "abandon", note: "rejected_on_console_card" }),
       });
-      toast.info("已拒绝该合入请求");
+      toast.info(`已废弃任务 ${taskId}`);
       await onMutated();
     } catch (err: any) {
       toast.error(err.message);
@@ -225,7 +391,7 @@ export function WorkbenchView({
         method: "POST",
         body: JSON.stringify({ action: "autofix_review" }),
       });
-      toast.success(`🔧 已唤醒沙箱！正在按 Review 意见自动修复 ${taskId}…`);
+      toast.success(`已唤醒沙箱按 Review 意见自动修复 ${taskId}`);
       onSelectTask(taskId);
       await onMutated();
     } catch (err: any) {
@@ -235,506 +401,89 @@ export function WorkbenchView({
     }
   };
 
-  const pendingReviewFixTasks = React.useMemo(
-    () =>
-      tasks.filter(
-        (t) =>
-          !t.worker_alive &&
-          !["ACCEPTED_AND_CLOSED", "ABANDONED_OR_REVERTED", "WAITING_MERGE_APPROVAL"].includes(
-            t.lifecycle_status
-          ) &&
-          t.verification_evidence?.reviewer_report?.verdict === "BLOCK"
-      ),
-    [tasks]
-  );
-
-  React.useEffect(() => {
-    if (!targetRepo && repos.length > 0) {
-      setTargetRepo(repos[0].repo_id);
+  const handleDeleteTask = async (e: React.MouseEvent, t: TaskItem) => {
+    e.stopPropagation();
+    if (!window.confirm(`确认永久删除任务记录 ${t.task_id} 及其本地日志产物吗？`)) {
+      return;
     }
-  }, [repos, targetRepo]);
-
-  const handleSubmit = async (e?: React.FormEvent) => {
-    e?.preventDefault();
-    if (!targetRepo) return;
-    if (delegateMode === "existing_jira" && !existingJiraKey.trim()) return;
-    if (delegateMode === "raw" && !prompt.trim()) return;
-
-    setSubmitting(true);
+    setDeletingId(t.task_id);
     try {
-      const body =
-        delegateMode === "existing_jira"
-          ? {
-              target_repo: targetRepo,
-              raw_request: existingJiraKey.trim(),
-              jira_issue_key: existingJiraKey.trim(),
-              publish_pr: publishPr,
-              auto_merge: false,
-              accept_defaults: acceptDefaults,
-              auto_execute: true,
-            }
-          : {
-              target_repo: targetRepo,
-              raw_request: prompt.trim(),
-              require_jira_approval: requireJiraApproval,
-              publish_pr: publishPr,
-              auto_merge: false,
-              accept_defaults: acceptDefaults,
-              auto_execute: true,
-            };
-
-      const created = await apiFetch<TaskItem>("/api/tasks", {
-        method: "POST",
-        body: JSON.stringify(body),
+      await apiFetch(`/api/tasks/${encodeURIComponent(t.task_id)}`, {
+        method: "DELETE",
       });
-      setPrompt("");
-      setExistingJiraKey("");
-      if (created.lifecycle_status === "WAITING_JIRA_APPROVAL") {
-        toast.success(`📋 已起草 Jira 工单草稿 (${created.task_id})，请审核确认后建卡开工！`);
-      } else if (created.jira_issue_key) {
-        toast.success(`🎫 已拉取权威工单 ${created.jira_issue_key}，沙箱直接开工 (${created.task_id})！`);
-      } else {
-        toast.success(`已生成契约 ${created.task_id}`);
-      }
-      await onCreatedTask(created.task_id);
+      toast.success(`已删除任务记录 ${t.task_id}`);
+      await onMutated();
     } catch (err: any) {
       toast.error(err.message);
     } finally {
-      setSubmitting(false);
+      setDeletingId(null);
     }
   };
 
-  const filteredTasks = React.useMemo(
-    () => tasks.filter((t) => matchesFilter(t, filter)),
-    [tasks, filter]
-  );
+  const filteredTasks = React.useMemo(() => {
+    const qLower = searchQuery.trim().toLowerCase();
+    return tasks.filter((t) => {
+      if (!matchesStatusFilter(t, statusFilter)) return false;
+      if (repoFilter !== "ALL" && t.contract.target_repo !== repoFilter) return false;
+      if (channelFilter !== "ALL") {
+        if (channelFilter === "feishu" && !t.source_channel.startsWith("feishu")) return false;
+        if (channelFilter === "jira" && !t.source_channel.startsWith("jira") && !t.jira_issue_key)
+          return false;
+        if (channelFilter === "alert" && t.source_channel !== "alert_webhook") return false;
+        if (channelFilter === "web" && !["web", "cli"].includes(t.source_channel)) return false;
+      }
+      if (qLower) {
+        const hay = [
+          t.task_id,
+          t.jira_issue_key || "",
+          t.deliverable_pr_number ? `pr #${t.deliverable_pr_number} #${t.deliverable_pr_number}` : "",
+          t.branch_name,
+          t.contract.target_repo,
+          t.contract.objective,
+          t.raw_request,
+        ]
+          .join(" ")
+          .toLowerCase();
+        if (!hay.includes(qLower)) return false;
+      }
+      return true;
+    });
+  }, [tasks, statusFilter, repoFilter, channelFilter, searchQuery]);
+
+  const displayedTasks = filteredTasks.slice(0, visibleCount);
 
   return (
-    <div className="space-y-6">
-      {/* Bento KPI Strip */}
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-        {[
-          {
-            label: "累计委托任务",
-            val: metrics?.total_delegated ?? 0,
-            icon: Layers,
-            accent: "text-blue-500",
-          },
-          {
-            label: "证据门禁通过",
-            val: metrics?.evidence_gate_passed ?? 0,
-            icon: ShieldCheck,
-            accent: "text-emerald-500",
-          },
-          {
-            label: "已采纳合入闭环",
-            val: metrics?.accepted_without_rework ?? 0,
-            icon: GitMerge,
-            accent: "text-teal-500",
-          },
-          {
-            label: "预计净省人工耗时",
-            val: `${metrics?.estimated_net_human_minutes_saved ?? 0} min`,
-            icon: Clock,
-            accent: "text-indigo-500",
-          },
-          {
-            label: "累计模型费用 (KV折后)",
-            val: `$${(metrics?.total_cost_usd ?? 0).toFixed(4)}`,
-            icon: Coins,
-            accent: "text-amber-500",
-          },
-        ].map((k) => {
-          const Icon = k.icon;
-          return (
-            <SurfaceCard key={k.label} className="p-4">
-              <div className="flex items-center justify-between text-xs text-zinc-500 dark:text-zinc-400">
-                <span>{k.label}</span>
-                <Icon className={cn("h-4 w-4", k.accent)} />
-              </div>
-              <div className="mt-2 text-2xl font-semibold tracking-tight tabular-nums text-zinc-900 dark:text-zinc-50">
-                {k.val}
-              </div>
-            </SurfaceCard>
-          );
-        })}
-      </div>
-
-      {/* Interactive Jira Ticket Draft Review Cards (WAITING_JIRA_APPROVAL) */}
-      {pendingJiraTasks.length > 0 && (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-xs font-semibold text-amber-600 dark:text-amber-400">
-              <TicketCheck className="h-4 w-4 animate-pulse" />
-              <span>
-                待你审核 Jira 工单草稿 ({pendingJiraTasks.length} 张 — 审核批准后在真实 Jira 建卡，后续全程以 Jira 任务为准)
-              </span>
-            </div>
-            {!health?.jira_configured && onOpenJiraTab && (
-              <Button variant="outline" size="sm" onClick={onOpenJiraTab}>
-                前往配置 Jira 连接凭证
-              </Button>
-            )}
+    <div className="space-y-5">
+      {/* Missing Essential Setup Prompts (Only shown when unconfigured) */}
+      {health && health.llm_api_key_configured === false && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-xs text-amber-800 dark:text-amber-200">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            <span>尚未配置主编码大模型 API Key，任务派发后将无法执行推理。</span>
           </div>
-
-          <div className="grid gap-3">
-            {pendingJiraTasks.map((t) => {
-              const edit = draftEdits[t.task_id] || {
-                project_key: t.jira_draft?.project_key || "PROJ",
-                issue_type: t.jira_draft?.issue_type || "Task",
-                priority: t.jira_draft?.priority || "Medium",
-                summary: t.jira_draft?.summary || t.contract.objective,
-                description: t.jira_draft?.description || t.raw_request,
-                ac_text: (t.jira_draft?.acceptance_criteria || t.contract.acceptance_criteria).join("\n"),
-              };
-              const busy = mergingId === t.task_id;
-              const updateField = (patch: Partial<EditableJiraDraftState>) =>
-                setDraftEdits((prev) => ({
-                  ...prev,
-                  [t.task_id]: { ...edit, ...patch },
-                }));
-
-              return (
-                <div
-                  key={t.task_id}
-                  className="rounded-xl border border-amber-500/45 bg-gradient-to-r from-amber-500/8 via-white to-white p-5 shadow-md dark:from-amber-500/12 dark:via-zinc-900 dark:to-zinc-900 space-y-3.5"
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="inline-flex items-center gap-1 rounded-md bg-amber-600 px-2 py-0.5 text-[11px] font-semibold text-white">
-                        📋 待审建 Jira 工单
-                      </span>
-                      <span className="font-mono text-xs font-semibold text-zinc-800 dark:text-zinc-200">
-                        {t.task_id}
-                      </span>
-                      <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-600 dark:text-zinc-300">
-                        目标仓库: {t.contract.target_repo} ({t.contract.base_branch})
-                      </code>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Button
-                        variant="emerald"
-                        size="lg"
-                        disabled={busy}
-                        onClick={() => handleApproveJiraDraft(t.task_id)}
-                      >
-                        {busy ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <TicketCheck className="h-4 w-4" />
-                        )}
-                        ✅ 批准创建真实 Jira 工单并开工
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="default"
-                        disabled={busy}
-                        onClick={() => handleRejectMerge(t.task_id)}
-                      >
-                        放弃（不建卡）
-                      </Button>
-                    </div>
-                  </div>
-
-                  <div className="grid sm:grid-cols-4 gap-3 text-xs">
-                    <div>
-                      <label className="text-[11px] text-zinc-500 block mb-1">Jira Project Key</label>
-                      <input
-                        type="text"
-                        value={edit.project_key}
-                        onChange={(e) => updateField({ project_key: e.target.value.toUpperCase() })}
-                        className="h-8 w-full rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-xs uppercase dark:border-zinc-800 dark:bg-zinc-950"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[11px] text-zinc-500 block mb-1">工单类型 (Issue Type)</label>
-                      <select
-                        value={edit.issue_type}
-                        onChange={(e) => updateField({ issue_type: e.target.value })}
-                        className="h-8 w-full rounded-lg border border-zinc-200 bg-white px-2 text-xs dark:border-zinc-800 dark:bg-zinc-950"
-                      >
-                        <option value="Bug">Bug (缺陷)</option>
-                        <option value="Task">Task (研发任务)</option>
-                        <option value="Story">Story (需求故事)</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="text-[11px] text-zinc-500 block mb-1">优先级 (Priority)</label>
-                      <select
-                        value={edit.priority}
-                        onChange={(e) => updateField({ priority: e.target.value })}
-                        className="h-8 w-full rounded-lg border border-zinc-200 bg-white px-2 text-xs dark:border-zinc-800 dark:bg-zinc-950"
-                      >
-                        <option value="Highest">Highest</option>
-                        <option value="High">High</option>
-                        <option value="Medium">Medium</option>
-                        <option value="Low">Low</option>
-                      </select>
-                    </div>
-                    <div className="flex items-end">
-                      <span className="text-[11px] text-zinc-500">
-                        提示：飞书也已同步收到此草稿卡片，可直接回复 <code className="font-mono">建单</code>
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2 text-xs">
-                    <div>
-                      <label className="text-[11px] text-zinc-500 block mb-1">Jira 工单标题 (Summary)</label>
-                      <input
-                        type="text"
-                        value={edit.summary}
-                        onChange={(e) => updateField({ summary: e.target.value })}
-                        className="h-8 w-full rounded-lg border border-zinc-200 bg-white px-3 text-xs font-medium dark:border-zinc-800 dark:bg-zinc-950"
-                      />
-                    </div>
-                    <div className="grid sm:grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-[11px] text-zinc-500 block mb-1">
-                          权威需求描述 (Description)
-                        </label>
-                        <textarea
-                          rows={3}
-                          value={edit.description}
-                          onChange={(e) => updateField({ description: e.target.value })}
-                          className="w-full rounded-lg border border-zinc-200 bg-white p-2.5 text-xs dark:border-zinc-800 dark:bg-zinc-950"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[11px] text-zinc-500 block mb-1">
-                          验收标准 (Acceptance Criteria · 每行一条)
-                        </label>
-                        <textarea
-                          rows={3}
-                          value={edit.ac_text}
-                          onChange={(e) => updateField({ ac_text: e.target.value })}
-                          className="w-full rounded-lg border border-zinc-200 bg-white p-2.5 text-xs dark:border-zinc-800 dark:bg-zinc-950"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+          {onOpenSettings && (
+            <Button variant="primary" size="sm" onClick={() => onOpenSettings("models")}>
+              前往配置模型与密钥
+            </Button>
+          )}
         </div>
       )}
 
-      {/* Interactive Merge Approval Notification Cards (Console + Feishu Sync) */}
-      {pendingApprovalTasks.length > 0 && (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-xs font-semibold text-emerald-600 dark:text-emerald-400">
-              <BellRing className="h-4 w-4 animate-bounce" />
-              <span>
-                待你审批自动合入 ({pendingApprovalTasks.length} 张审批卡 — 接入飞书后同步推送至手机飞书审批)
-              </span>
-            </div>
+      {repos.length === 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-blue-500/35 bg-blue-500/8 px-4 py-3 text-xs text-blue-800 dark:text-blue-200">
+          <div className="flex items-center gap-2">
+            <FolderGit2 className="h-4 w-4 shrink-0" />
+            <span>尚未接入任何业务代码仓库，请先挂载本地或 GitHub 仓库再派发任务。</span>
           </div>
-
-          <div className="grid gap-3">
-            {pendingApprovalTasks.map((t) => {
-              const mc = t.merge_approval_card;
-              const ev = t.verification_evidence;
-              const busy = mergingId === t.task_id;
-              return (
-                <div
-                  key={t.task_id}
-                  className="rounded-xl border border-emerald-500/45 bg-gradient-to-r from-emerald-500/8 via-white to-white p-5 shadow-md dark:from-emerald-500/12 dark:via-zinc-900 dark:to-zinc-900 space-y-3.5"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2 py-0.5 text-[11px] font-semibold text-white">
-                          <ShieldCheck className="h-3 w-3" />
-                          审查与线上 CI 已全绿 · 待审批合入
-                        </span>
-                        <span className="font-mono text-xs font-semibold text-zinc-800 dark:text-zinc-200">
-                          {t.task_id}
-                        </span>
-                        <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-600 dark:text-zinc-300">
-                          {t.contract.target_repo} ({t.branch_name} → {t.contract.base_branch})
-                        </code>
-                        {t.deliverable_pr_url && (
-                          <a
-                            href={t.deliverable_pr_url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
-                          >
-                            PR #{t.deliverable_pr_number}
-                            <ArrowUpRight className="h-3.5 w-3.5" />
-                          </a>
-                        )}
-                      </div>
-                      <h4 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                        {t.contract.objective}
-                      </h4>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Button
-                        variant="emerald"
-                        size="lg"
-                        disabled={busy}
-                        onClick={() => handleApproveMerge(t.task_id)}
-                      >
-                        {busy ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <GitMerge className="h-4 w-4" />
-                        )}
-                        批准并自动 Squash 合入
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="default"
-                        onClick={() => onSelectTask(t.task_id)}
-                      >
-                        <FileDiff className="h-3.5 w-3.5" />
-                        审阅 Diff / 追改
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="default"
-                        disabled={busy}
-                        onClick={() => handleRejectMerge(t.task_id)}
-                      >
-                        拒绝
-                      </Button>
-                    </div>
-                  </div>
-
-                  {/* Evidence & Independent PR Review Digest */}
-                  <div className="grid sm:grid-cols-3 gap-2.5 text-xs">
-                    <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white/70 dark:bg-zinc-950/60 px-3 py-2">
-                      <span className="text-zinc-400 block text-[11px]">沙箱回归测试 (Fail → Pass)</span>
-                      <span className="font-mono text-[11.5px] text-emerald-600 dark:text-emerald-400 font-medium">
-                        ✅ {mc?.repro_test_target || ev?.repro_test_target}
-                      </span>
-                    </div>
-                    <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white/70 dark:bg-zinc-950/60 px-3 py-2">
-                      <span className="text-zinc-400 block text-[11px]">独立跨模型 PR Review Agent</span>
-                      <span className="font-medium text-emerald-600 dark:text-emerald-400">
-                        ✅ APPROVE · 0 Blocking ({mc?.reviewer_model || ev?.reviewer_report?.reviewer_model})
-                      </span>
-                    </div>
-                    <div className="rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-white/70 dark:bg-zinc-950/60 px-3 py-2">
-                      <span className="text-zinc-400 block text-[11px]">线上 GitHub Actions CI</span>
-                      <span className="font-medium text-emerald-600 dark:text-emerald-400">
-                        ✅ {mc?.ci_checks_count ?? 2} 项流水线检查全绿
-                      </span>
-                    </div>
-                  </div>
-
-                  {(mc?.reviewer_summary || ev?.reviewer_report?.summary) && (
-                    <p className="text-xs text-zinc-600 dark:text-zinc-300 leading-relaxed">
-                      <b className="text-zinc-800 dark:text-zinc-200">PR Review 简报：</b>
-                      {mc?.reviewer_summary || ev?.reviewer_report?.summary}
-                    </p>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+          {onOpenRepos && (
+            <Button variant="primary" size="sm" onClick={onOpenRepos}>
+              前往接入代码仓库
+            </Button>
+          )}
         </div>
       )}
 
-      {/* Interactive Review Blocked -> 1-Click Auto-Fix Cards */}
-      {pendingReviewFixTasks.length > 0 && (
-        <div className="space-y-3">
-          <div className="flex items-center gap-2 text-xs font-semibold text-amber-600 dark:text-amber-400">
-            <BellRing className="h-4 w-4" />
-            <span>
-              Code Review 待修复 ({pendingReviewFixTasks.length} 张卡片 — 飞书与控制台均支持一键唤醒自动修复)
-            </span>
-          </div>
-
-          <div className="grid gap-3">
-            {pendingReviewFixTasks.map((t) => {
-              const rep = t.verification_evidence?.reviewer_report;
-              const issues = rep?.blocking_issues ?? [];
-              const busy = mergingId === t.task_id;
-              return (
-                <div
-                  key={t.task_id}
-                  className="rounded-xl border border-amber-500/45 bg-gradient-to-r from-amber-500/8 via-white to-white p-5 shadow-md dark:from-amber-500/12 dark:via-zinc-900 dark:to-zinc-900 space-y-3"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="inline-flex items-center gap-1 rounded-md bg-amber-600 px-2 py-0.5 text-[11px] font-semibold text-white">
-                          🛑 Code Review 发现 {issues.length} 项阻断问题
-                        </span>
-                        <span className="font-mono text-xs font-semibold text-zinc-800 dark:text-zinc-200">
-                          {t.task_id}
-                        </span>
-                        {t.deliverable_pr_url && (
-                          <a
-                            href={t.pr_review_comment_url || t.deliverable_pr_url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
-                          >
-                            PR #{t.deliverable_pr_number} 审查评论
-                            <ArrowUpRight className="h-3.5 w-3.5" />
-                          </a>
-                        )}
-                      </div>
-                      <h4 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                        {t.contract.objective}
-                      </h4>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Button
-                        variant="primary"
-                        size="lg"
-                        disabled={busy}
-                        onClick={() => handleAutoFixReview(t.task_id)}
-                      >
-                        {busy ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <Sparkles className="h-4 w-4" />
-                        )}
-                        🔧 一键按 Review 意见自动修复
-                      </Button>
-                      <a
-                        href={`/reports/${encodeURIComponent(t.task_id)}/review`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex h-8 items-center gap-1 rounded-lg border border-zinc-200 bg-white px-3 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200"
-                      >
-                        📄 全量报告
-                        <ArrowUpRight className="h-3 w-3" />
-                      </a>
-                    </div>
-                  </div>
-
-                  <div className="space-y-1 rounded-lg border border-amber-500/20 bg-white/80 dark:bg-zinc-950/60 p-3 text-xs">
-                    {issues.slice(0, 3).map((b, idx) => (
-                      <div key={idx} className="text-zinc-700 dark:text-zinc-300">
-                        <b className="text-red-600 dark:text-red-400">[{b.severity}]</b>{" "}
-                        {b.path ? (
-                          <code className="font-mono mr-1">
-                            {b.path}
-                            {b.line ? `:${b.line}` : ""}
-                          </code>
-                        ) : null}
-                        {b.message}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Command-Bar Delegation Composer */}
+      {/* 1. TOP-OF-PAGE DELEGATION COMPOSER (Primary Action Always Above the Fold) */}
       <SurfaceCard className="p-5">
         <form onSubmit={handleSubmit} className="space-y-3.5">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -750,7 +499,7 @@ export function WorkbenchView({
                 )}
               >
                 <Sparkles className="h-3.5 w-3.5 text-blue-500" />
-                新需求委托（先审 Jira 草稿再建卡）
+                描述需求 / Bug 派发
               </button>
               <button
                 type="button"
@@ -763,29 +512,82 @@ export function WorkbenchView({
                 )}
               >
                 <TicketCheck className="h-3.5 w-3.5 text-emerald-500" />
-                已有 Jira 工单（直接按 Jira 开工）
+                按已有 Jira 工单开工
               </button>
             </div>
 
             <div className="flex items-center gap-1.5 text-[11px] text-zinc-400">
               <Command className="h-3 w-3" />
-              <span>快捷键 ⌘ + Enter 直接派发</span>
+              <span>⌘ + Enter 快速派发</span>
             </div>
           </div>
 
           {delegateMode === "existing_jira" ? (
-            <div className="space-y-2">
-              <input
-                type="text"
-                value={existingJiraKey}
-                onChange={(e) => setExistingJiraKey(e.target.value)}
-                placeholder="输入已有 Jira 工单号（如 KAN-12 / RAG-42）或粘贴完整链接 https://.../browse/KAN-12"
-                className="h-11 w-full rounded-xl border border-emerald-500/40 bg-emerald-500/5 px-4 font-mono text-sm text-zinc-900 placeholder:font-sans placeholder:text-zinc-400 focus:border-emerald-500 focus:bg-white focus:outline-none dark:bg-zinc-950 dark:text-zinc-100"
-                required
-              />
-              <p className="text-[11.5px] text-zinc-500">
-                已有真实 Jira 工单时将<strong>跳过建卡审核</strong>，直接拉取 Jira 标题、正文与最新评论作为唯一权威需求源进沙箱编码。
-              </p>
+            <div className="space-y-2.5">
+              <div className="flex flex-wrap gap-2">
+                <input
+                  type="text"
+                  value={existingJiraKey}
+                  onChange={(e) => {
+                    setExistingJiraKey(e.target.value);
+                    if (jiraPreview) setJiraPreview(null);
+                  }}
+                  placeholder="输入已有 Jira 单号（如 KAN-12）或粘贴完整链接 https://.../browse/KAN-12"
+                  className="h-10 flex-1 min-w-[240px] rounded-xl border border-zinc-200 bg-zinc-50/50 px-3.5 font-mono text-xs text-zinc-900 placeholder:font-sans placeholder:text-zinc-400 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100"
+                  required
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={!existingJiraKey.trim() || loadingJiraPreview}
+                  onClick={handlePreviewJira}
+                >
+                  {loadingJiraPreview ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Search className="h-3.5 w-3.5" />
+                  )}
+                  预览工单内容
+                </Button>
+                {!health?.jira_configured && onOpenSettings && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => onOpenSettings("jira")}
+                  >
+                    配置 Jira 凭证 →
+                  </Button>
+                )}
+              </div>
+
+              {jiraPreview && (
+                <div className="rounded-xl border border-blue-500/30 bg-blue-500/5 p-3.5 space-y-1.5 text-xs">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <a
+                        href={jiraPreview.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="rounded bg-blue-600 px-2 py-0.5 font-mono text-[11px] font-semibold text-white hover:bg-blue-500 inline-flex items-center gap-1"
+                      >
+                        {jiraPreview.key} <ArrowUpRight className="h-3 w-3" />
+                      </a>
+                      <span className="text-[11px] text-zinc-500">
+                        {jiraPreview.issue_type} · {jiraPreview.priority} · {jiraPreview.status}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="font-semibold text-zinc-900 dark:text-zinc-100">
+                    {jiraPreview.summary}
+                  </div>
+                  {jiraPreview.description && (
+                    <p className="line-clamp-3 text-zinc-600 dark:text-zinc-300 whitespace-pre-wrap">
+                      {jiraPreview.description}
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           ) : (
             <>
@@ -799,67 +601,108 @@ export function WorkbenchView({
                     handleSubmit();
                   }
                 }}
-                placeholder="输入自然语言需求、单测失败路径或直接包含已有 Jira 号（如 KAN-12）..."
+                placeholder="描述需要实现的研发改动、报错堆栈或回归测试路径..."
                 className="w-full resize-none rounded-xl border border-zinc-200 bg-zinc-50/50 p-3.5 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-blue-500 focus:bg-white focus:outline-none focus:ring-3 focus:ring-blue-500/12 dark:border-zinc-800 dark:bg-zinc-950/70 dark:text-zinc-100 dark:focus:bg-zinc-950"
                 required
               />
 
-              {/* Quick-fill Chips */}
-              <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-[11px] text-zinc-400 mr-1">产品 / 运营 / QA 业务诉求示例：</span>
-                {SAMPLE_PROMPTS.map((sp) => (
-                  <button
-                    key={sp.text}
-                    type="button"
-                    onClick={() => {
-                      setPrompt(sp.text);
-                      setTargetRepo(sp.repo);
-                    }}
-                    className="rounded-md border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11.5px] text-zinc-600 hover:border-zinc-300 hover:text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:border-zinc-700 dark:hover:text-zinc-200 cursor-pointer transition-colors"
-                  >
-                    {sp.text.slice(0, 42)}…
-                  </button>
-                ))}
-              </div>
+              {/* Only show sample prompts when the workspace has 0 tasks */}
+              {tasks.length === 0 && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[11px] text-zinc-400 mr-1">示例体验：</span>
+                  {SAMPLE_PROMPTS.map((sp) => (
+                    <button
+                      key={sp.text}
+                      type="button"
+                      onClick={() => {
+                        setPrompt(sp.text);
+                        if (repos.some((r) => r.repo_id === sp.repo)) {
+                          setTargetRepo(sp.repo);
+                        }
+                      }}
+                      className="rounded-md border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11.5px] text-zinc-600 hover:border-zinc-300 hover:text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 cursor-pointer"
+                    >
+                      {sp.text.slice(0, 36)}…
+                    </button>
+                  ))}
+                </div>
+              )}
             </>
           )}
 
-          {/* Bottom Controls Bar */}
-          <div className="flex flex-wrap items-center justify-between gap-4 pt-2 border-t border-zinc-100 dark:border-zinc-800/80">
-            <div className="flex flex-wrap items-center gap-5">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-medium text-zinc-500">仓库</span>
+          {/* Composer Controls Bar: Repo + Branch + Budget + Switches + Submit */}
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-zinc-100 dark:border-zinc-800/80">
+            <div className="flex flex-wrap items-center gap-3.5 text-xs">
+              {/* Repo Selector */}
+              <div className="flex items-center gap-1.5">
+                <span className="text-zinc-500">仓库</span>
                 <select
                   value={targetRepo}
                   onChange={(e) => setTargetRepo(e.target.value)}
-                  className="h-8 rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-xs text-zinc-800 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-200"
+                  className="h-8 rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-xs text-zinc-800 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-200"
                 >
                   {repos.map((r) => (
                     <option key={r.repo_id} value={r.repo_id}>
-                      {r.repo_id} ({r.default_base_branch})
+                      {r.repo_id}
                     </option>
                   ))}
                 </select>
               </div>
 
+              {/* Base Branch Selector */}
+              <div className="flex items-center gap-1.5">
+                <GitBranch className="h-3.5 w-3.5 text-zinc-400" />
+                <select
+                  value={baseBranch}
+                  onChange={(e) => setBaseBranch(e.target.value)}
+                  title="选择任务拉取的基线分支（PR 也将合入该分支）"
+                  className="h-8 rounded-lg border border-zinc-200 bg-white px-2 font-mono text-xs text-zinc-800 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-200"
+                >
+                  {repoBranches.map((b) => (
+                    <option key={b} value={b}>
+                      {b}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Max Budget Selector */}
+              <div className="flex items-center gap-1.5">
+                <Coins className="h-3.5 w-3.5 text-zinc-400" />
+                <select
+                  value={maxBudget}
+                  onChange={(e) => setMaxBudget(e.target.value)}
+                  title="单任务模型推理预算上限"
+                  className="h-8 rounded-lg border border-zinc-200 bg-white px-2 font-mono text-xs text-zinc-800 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-200"
+                >
+                  <option value="0.5">$0.50 上限</option>
+                  <option value="1.5">$1.50 上限</option>
+                  <option value="3.0">$3.00 上限</option>
+                  <option value="5.0">$5.00 上限</option>
+                </select>
+              </div>
+
+              <label className="flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
+                <Switch checked={publishPr} onCheckedChange={setPublishPr} />
+                <span>验证通过后推送 PR</span>
+              </label>
+
               {delegateMode === "raw" && (
-                <label className="flex items-center gap-2 text-xs text-amber-700 dark:text-amber-300 font-medium cursor-pointer select-none">
+                <label className="flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
                   <Switch
                     checked={requireJiraApproval}
-                    onCheckedChange={setRequireJiraApproval}
+                    onCheckedChange={(v) => {
+                      setRequireJiraApproval(v);
+                      localStorage.setItem("de_require_jira_draft", v ? "true" : "false");
+                    }}
                   />
-                  <span>先生成 Jira 工单草稿供我审核建卡（建卡后以 Jira 为准）</span>
+                  <span>先审建 Jira 卡</span>
                 </label>
               )}
 
-              <label className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
-                <Switch checked={publishPr} onCheckedChange={setPublishPr} />
-                <span>自动创建正式 PR（过审+CI全绿后推合入审批卡）</span>
-              </label>
-
-              <label className="flex items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
+              <label className="flex items-center gap-1.5 text-zinc-600 dark:text-zinc-400 cursor-pointer select-none">
                 <Switch checked={acceptDefaults} onCheckedChange={setAcceptDefaults} />
-                <span>轻微歧义按默认继续</span>
+                <span>轻微歧义默认继续</span>
               </label>
             </div>
 
@@ -867,24 +710,22 @@ export function WorkbenchView({
               {submitting ? (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  {delegateMode === "existing_jira"
-                    ? "正在拉取权威 Jira 工单并启动沙箱..."
-                    : "正在探测仓库起草工单与契约..."}
+                  正在启动任务...
                 </>
               ) : delegateMode === "existing_jira" ? (
                 <>
                   <TicketCheck className="h-4 w-4" />
-                  拉取 Jira 工单并直接开工
+                  拉取 Jira 并开工
                 </>
               ) : requireJiraApproval ? (
                 <>
                   <TicketCheck className="h-4 w-4" />
-                  起草 Jira 工单供我审核
+                  起草 Jira 草稿
                 </>
               ) : (
                 <>
                   <Sparkles className="h-4 w-4" />
-                  起草契约并执行委托
+                  派发编码任务
                 </>
               )}
             </Button>
@@ -892,78 +733,397 @@ export function WorkbenchView({
         </form>
       </SurfaceCard>
 
-      {/* Work Queue Table */}
+      {/* 2. ACTIONABLE PENDING INBOX (Merge Approvals / Review Fixes / Jira Drafts) */}
+      {(pendingApprovalTasks.length > 0 ||
+        pendingReviewFixTasks.length > 0 ||
+        pendingJiraTasks.length > 0) && (
+        <div className="space-y-3">
+          {/* Pending Merge Approvals */}
+          {pendingApprovalTasks.map((t) => {
+            const mc = t.merge_approval_card;
+            const ev = t.verification_evidence;
+            const busy = mergingId === t.task_id;
+            return (
+              <div
+                key={t.task_id}
+                className="rounded-xl border border-emerald-500/45 bg-gradient-to-r from-emerald-500/8 via-white to-white p-4 shadow-xs dark:from-emerald-500/12 dark:via-zinc-900 dark:to-zinc-900 space-y-2.5"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center gap-1 rounded-md bg-emerald-600 px-2 py-0.5 text-[11px] font-semibold text-white">
+                        <ShieldCheck className="h-3 w-3" />
+                        待审批合入
+                      </span>
+                      <span className="font-mono text-xs font-semibold text-zinc-800 dark:text-zinc-200">
+                        {t.task_id}
+                      </span>
+                      <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-600 dark:text-zinc-300">
+                        {t.contract.target_repo} ({t.branch_name} → {t.contract.base_branch})
+                      </code>
+                      {t.deliverable_pr_url && (
+                        <a
+                          href={t.deliverable_pr_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:underline dark:text-blue-400"
+                        >
+                          PR #{t.deliverable_pr_number}
+                          <ArrowUpRight className="h-3.5 w-3.5" />
+                        </a>
+                      )}
+                      <span className="text-[11px] text-emerald-600 dark:text-emerald-400">
+                        ✓ 单测通过 · Review {mc?.reviewer_model || ev?.reviewer_report?.reviewer_model} 通过 · CI 全绿
+                      </span>
+                    </div>
+                    <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 truncate">
+                      {t.contract.objective}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => onSelectTask(t.task_id)}
+                    >
+                      <FileDiff className="h-3.5 w-3.5" />
+                      审阅 Review 与 Diff
+                    </Button>
+                    <Button
+                      variant="emerald"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => handleApproveMerge(t)}
+                    >
+                      {busy ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <GitMerge className="h-3.5 w-3.5" />
+                      )}
+                      批准 Squash 合入
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => handleRejectTask(t.task_id, "拒绝合入")}
+                    >
+                      拒绝
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+
+          {/* Pending Code Review Block -> 1-Click Fix */}
+          {pendingReviewFixTasks.map((t) => {
+            const rep = t.verification_evidence?.reviewer_report;
+            const issues = rep?.blocking_issues ?? [];
+            const busy = mergingId === t.task_id;
+            return (
+              <div
+                key={t.task_id}
+                className="rounded-xl border border-amber-500/45 bg-gradient-to-r from-amber-500/8 via-white to-white p-4 shadow-xs dark:from-amber-500/12 dark:via-zinc-900 dark:to-zinc-900 space-y-2"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center gap-1 rounded-md bg-amber-600 px-2 py-0.5 text-[11px] font-semibold text-white">
+                        <BellRing className="h-3 w-3" />
+                        Review 发现 {issues.length} 项阻断问题
+                      </span>
+                      <span className="font-mono text-xs font-semibold">{t.task_id}</span>
+                      <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 text-[11px]">
+                        {t.contract.target_repo}
+                      </code>
+                    </div>
+                    <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 truncate">
+                      {t.contract.objective}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => onSelectTask(t.task_id)}
+                    >
+                      查看问题详情
+                    </Button>
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => handleAutoFixReview(t.task_id)}
+                    >
+                      {busy ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Sparkles className="h-3.5 w-3.5" />
+                      )}
+                      一键按审查意见自动修复
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+
+          {/* Pending Jira Drafts */}
+          {pendingJiraTasks.map((t) => {
+            const edit = draftEdits[t.task_id] || {
+              project_key: t.jira_draft?.project_key || "PROJ",
+              issue_type: t.jira_draft?.issue_type || "Task",
+              priority: t.jira_draft?.priority || "Medium",
+              summary: t.jira_draft?.summary || t.contract.objective,
+              description: t.jira_draft?.description || t.raw_request,
+              ac_text: (t.jira_draft?.acceptance_criteria || t.contract.acceptance_criteria).join("\n"),
+            };
+            const busy = mergingId === t.task_id;
+            const updateField = (patch: Partial<EditableJiraDraftState>) =>
+              setDraftEdits((prev) => ({
+                ...prev,
+                [t.task_id]: { ...edit, ...patch },
+              }));
+
+            return (
+              <div
+                key={t.task_id}
+                className="rounded-xl border border-amber-500/45 bg-gradient-to-r from-amber-500/8 via-white to-white p-4 shadow-xs dark:from-amber-500/12 dark:via-zinc-900 dark:to-zinc-900 space-y-3"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-1 rounded-md bg-amber-600 px-2 py-0.5 text-[11px] font-semibold text-white">
+                      待审建 Jira 工单
+                    </span>
+                    <span className="font-mono text-xs font-semibold">{t.task_id}</span>
+                    <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 text-[11px]">
+                      {t.contract.target_repo} ({t.contract.base_branch})
+                    </code>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {!health?.jira_configured && onOpenSettings && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => onOpenSettings("jira")}
+                      >
+                        配置 Jira 凭证
+                      </Button>
+                    )}
+                    <Button
+                      variant="emerald"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => handleApproveJiraDraft(t.task_id)}
+                    >
+                      {busy ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <TicketCheck className="h-3.5 w-3.5" />
+                      )}
+                      批准建卡并开工
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={busy}
+                      onClick={() => handleRejectTask(t.task_id, "放弃建卡")}
+                    >
+                      放弃
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="grid sm:grid-cols-4 gap-2.5 text-xs">
+                  <input
+                    type="text"
+                    value={edit.project_key}
+                    onChange={(e) => updateField({ project_key: e.target.value.toUpperCase() })}
+                    placeholder="Project Key"
+                    className="h-8 rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-xs uppercase dark:border-zinc-800 dark:bg-zinc-950"
+                  />
+                  <select
+                    value={edit.issue_type}
+                    onChange={(e) => updateField({ issue_type: e.target.value })}
+                    className="h-8 rounded-lg border border-zinc-200 bg-white px-2 text-xs dark:border-zinc-800 dark:bg-zinc-950"
+                  >
+                    <option value="Bug">Bug</option>
+                    <option value="Task">Task</option>
+                    <option value="Story">Story</option>
+                  </select>
+                  <input
+                    type="text"
+                    value={edit.summary}
+                    onChange={(e) => updateField({ summary: e.target.value })}
+                    placeholder="工单标题"
+                    className="sm:col-span-2 h-8 rounded-lg border border-zinc-200 bg-white px-3 text-xs font-medium dark:border-zinc-800 dark:bg-zinc-950"
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* 3. TASK QUEUE WITH SEARCH, REPO/SOURCE FILTERS, COMPACT TELEMETRY & CLEANUP */}
       <SurfaceCard className="overflow-hidden">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200/80 dark:border-zinc-800/80 px-5 py-3.5">
-          <div className="flex flex-wrap items-center gap-1">
-            {FILTERS.map((f) => {
-              const count = tasks.filter((t) => matchesFilter(t, f.id)).length;
-              const active = filter === f.id;
-              return (
-                <button
-                  key={f.id}
-                  type="button"
-                  onClick={() => setFilter(f.id)}
-                  className={cn(
-                    "inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors cursor-pointer",
-                    active
-                      ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
-                      : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800/70"
-                  )}
-                >
-                  <span>{f.label}</span>
-                  <span
+        {/* Top Filter & Search Bar */}
+        <div className="border-b border-zinc-200/80 dark:border-zinc-800/80 px-5 py-3.5 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            {/* Status Filter Pills */}
+            <div className="flex flex-wrap items-center gap-1">
+              {FILTERS.map((f) => {
+                const count = tasks.filter((t) => matchesStatusFilter(t, f.id)).length;
+                const active = statusFilter === f.id;
+                return (
+                  <button
+                    key={f.id}
+                    type="button"
+                    onClick={() => {
+                      setStatusFilter(f.id);
+                      setVisibleCount(25);
+                    }}
                     className={cn(
-                      "rounded-full px-1.5 py-0.2 text-[10.5px] tabular-nums",
+                      "inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer",
                       active
-                        ? "bg-white/20 text-white dark:bg-zinc-900/15 dark:text-zinc-900"
-                        : "bg-zinc-200/70 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                        ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                        : "text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800/70"
                     )}
                   >
-                    {count}
-                  </span>
-                </button>
-              );
-            })}
+                    <span>{f.label}</span>
+                    <span
+                      className={cn(
+                        "rounded-full px-1.5 py-0.2 text-[10.5px] tabular-nums",
+                        active
+                          ? "bg-white/20 text-white dark:bg-zinc-900/15 dark:text-zinc-900"
+                          : "bg-zinc-200/70 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                      )}
+                    >
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Compact Honest Telemetry Strip */}
+            {metrics && (
+              <div className="flex flex-wrap items-center gap-3 text-[11.5px] text-zinc-500 dark:text-zinc-400 tabular-nums">
+                <span>
+                  累计 <b className="text-zinc-800 dark:text-zinc-200">{metrics.total_delegated}</b>
+                </span>
+                <span>·</span>
+                <span>
+                  门禁通过{" "}
+                  <b className="text-emerald-600 dark:text-emerald-400">
+                    {metrics.evidence_gate_passed}
+                  </b>
+                </span>
+                <span>·</span>
+                <span>
+                  已闭环{" "}
+                  <b className="text-zinc-800 dark:text-zinc-200">
+                    {metrics.accepted_without_rework}
+                  </b>
+                </span>
+                <span>·</span>
+                <span>
+                  总消耗{" "}
+                  <b className="font-mono text-zinc-800 dark:text-zinc-200">
+                    ${metrics.total_cost_usd.toFixed(4)}
+                  </b>
+                </span>
+              </div>
+            )}
           </div>
 
-          <span className="text-[11.5px] text-zinc-400">
-            点击任意任务行在右侧抽屉查看完整契约、逐行 Diff 与飞书卡片
-          </span>
+          {/* Search Input + Repo Filter + Channel Filter */}
+          <div className="flex flex-wrap items-center gap-2.5 text-xs">
+            <div className="relative flex-1 min-w-[220px]">
+              <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-zinc-400" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="搜索任务 ID、Jira 单号、PR 编号、分支或需求关键词..."
+                className="h-8 w-full rounded-lg border border-zinc-200 bg-zinc-50/70 pl-8 pr-3 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100"
+              />
+            </div>
+
+            <select
+              value={repoFilter}
+              onChange={(e) => setRepoFilter(e.target.value)}
+              className="h-8 rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-xs text-zinc-700 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300"
+            >
+              <option value="ALL">全部仓库</option>
+              {repos.map((r) => (
+                <option key={r.repo_id} value={r.repo_id}>
+                  {r.repo_id}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={channelFilter}
+              onChange={(e) => setChannelFilter(e.target.value)}
+              className="h-8 rounded-lg border border-zinc-200 bg-white px-2.5 text-xs text-zinc-700 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300"
+            >
+              <option value="ALL">全部来源</option>
+              <option value="web">控制台 / CLI</option>
+              <option value="jira">Jira 工单</option>
+              <option value="feishu">飞书消息</option>
+              <option value="alert">生产告警 (Ops)</option>
+            </select>
+          </div>
         </div>
 
+        {/* Table */}
         <div className="overflow-x-auto">
           <table className="w-full border-collapse text-left text-xs">
             <thead>
               <tr className="border-b border-zinc-200/70 bg-zinc-50/70 text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:border-zinc-800/80 dark:bg-zinc-900/40 dark:text-zinc-400">
                 <th className="py-3 pl-5 pr-3">Task ID</th>
-                <th className="px-3 py-3">入口</th>
-                <th className="px-3 py-3">目标仓库</th>
-                <th className="px-3 py-3">契约目标</th>
-                <th className="px-3 py-3">当前状态</th>
-                <th className="px-3 py-3">回归验证</th>
+                <th className="px-3 py-3">来源</th>
+                <th className="px-3 py-3">仓库 / 分支</th>
+                <th className="px-3 py-3">任务目标与实时进度</th>
+                <th className="px-3 py-3">状态</th>
+                <th className="px-3 py-3">门禁与审查</th>
                 <th className="px-3 py-3">交付 PR</th>
                 <th className="px-3 py-3 text-right">费用</th>
-                <th className="py-3 pl-3 pr-5 text-right">净省工时</th>
+                <th className="py-3 pl-2 pr-4 text-right">操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800/60">
-              {filteredTasks.length === 0 ? (
+              {displayedTasks.length === 0 ? (
                 <tr>
                   <td colSpan={9} className="py-12 text-center text-xs text-zinc-400">
-                    当前筛选条件下暂无委托记录
+                    暂无匹配的委托任务记录
                   </td>
                 </tr>
               ) : (
-                filteredTasks.map((t) => {
+                displayedTasks.map((t) => {
                   const ev = t.verification_evidence;
                   const f2pPassed =
                     ev?.repro_test_failed_on_base && ev?.repro_test_passed_on_head;
+                  const revVerdict = ev?.reviewer_report?.verdict;
                   const ChannelIcon = t.source_channel.startsWith("feishu")
                     ? MessageSquare
-                    : t.source_channel === "cli"
-                    ? Terminal
-                    : Monitor;
+                    : t.source_channel === "alert_webhook"
+                      ? BellElectric
+                      : t.source_channel === "cli"
+                        ? Terminal
+                        : Monitor;
+                  const channelLabel = t.source_channel.startsWith("feishu")
+                    ? "飞书"
+                    : t.source_channel === "alert_webhook"
+                      ? "告警"
+                      : t.source_channel.startsWith("jira")
+                        ? "Jira"
+                        : t.source_channel.toUpperCase();
 
                   return (
                     <tr
@@ -971,8 +1131,7 @@ export function WorkbenchView({
                       onClick={() => onSelectTask(t.task_id)}
                       className={cn(
                         "group cursor-pointer transition-colors hover:bg-zinc-50/90 dark:hover:bg-zinc-800/40",
-                        selectedTaskId === t.task_id &&
-                          "bg-blue-50/70 dark:bg-blue-500/10"
+                        selectedTaskId === t.task_id && "bg-blue-50/70 dark:bg-blue-500/10"
                       )}
                     >
                       <td className="py-3.5 pl-5 pr-3 font-mono font-medium text-blue-600 dark:text-blue-400 whitespace-nowrap">
@@ -981,17 +1140,18 @@ export function WorkbenchView({
                       <td className="px-3 py-3.5 whitespace-nowrap text-zinc-500 dark:text-zinc-400">
                         <span className="inline-flex items-center gap-1.5">
                           <ChannelIcon className="h-3.5 w-3.5 opacity-75" />
-                          <span>
-                            {t.source_channel.startsWith("feishu")
-                              ? "飞书"
-                              : t.source_channel.toUpperCase()}
-                          </span>
+                          <span>{channelLabel}</span>
                         </span>
                       </td>
                       <td className="px-3 py-3.5 whitespace-nowrap">
-                        <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-700 dark:text-zinc-300">
-                          {t.contract.target_repo}
-                        </code>
+                        <div className="flex items-center gap-1">
+                          <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-700 dark:text-zinc-300">
+                            {t.contract.target_repo}
+                          </code>
+                          <span className="font-mono text-[10.5px] text-zinc-400">
+                            :{t.contract.base_branch}
+                          </span>
+                        </div>
                       </td>
                       <td className="px-3 py-3.5 max-w-md text-zinc-800 dark:text-zinc-200 font-medium">
                         <div className="flex items-center gap-1.5 truncate">
@@ -1022,7 +1182,7 @@ export function WorkbenchView({
                               {t.current_activity ||
                                 (t.worker_alive
                                   ? `第 ${t.sandbox_attempt_count || 1} 轮沙箱执行中…`
-                                  : "后台执行线程已离线（点开可一键唤醒）")}
+                                  : "后台执行线程已离线（点开可唤醒）")}
                             </span>
                           </div>
                         )}
@@ -1036,17 +1196,22 @@ export function WorkbenchView({
                         ) : ev.noop_verified ? (
                           <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400 font-medium">
                             <CheckCircle2 className="h-3.5 w-3.5" />
-                            No-Op · 全绿无需改
+                            No-Op 验证通过
                           </span>
-                        ) : f2pPassed ? (
+                        ) : f2pPassed && revVerdict !== "BLOCK" ? (
                           <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400 font-medium">
                             <CheckCircle2 className="h-3.5 w-3.5" />
-                            Fail → Pass
+                            单测 + 审查通过
+                          </span>
+                        ) : f2pPassed && revVerdict === "BLOCK" ? (
+                          <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400 font-medium">
+                            <AlertCircle className="h-3.5 w-3.5" />
+                            审查阻断待修
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1 text-red-500 font-medium">
                             <XCircle className="h-3.5 w-3.5" />
-                            未通过
+                            门禁未通过
                           </span>
                         )}
                       </td>
@@ -1059,8 +1224,8 @@ export function WorkbenchView({
                             onClick={(e) => e.stopPropagation()}
                             className="inline-flex items-center gap-1 rounded-md bg-blue-500/10 px-2 py-0.5 font-mono text-[11px] font-medium text-blue-600 hover:bg-blue-500/20 dark:text-blue-300"
                           >
-                            <GitPullRequestDraft className="h-3 w-3" />
-                            {t.deliverable_pr_number ? `PR #${t.deliverable_pr_number}` : "建单链接"}
+                            <GitPullRequest className="h-3 w-3" />
+                            {t.deliverable_pr_number ? `PR #${t.deliverable_pr_number}` : "查看 PR"}
                             <ArrowUpRight className="h-3 w-3" />
                           </a>
                         ) : (
@@ -1070,10 +1235,18 @@ export function WorkbenchView({
                       <td className="px-3 py-3.5 text-right font-mono tabular-nums text-zinc-600 dark:text-zinc-300 whitespace-nowrap">
                         ${t.total_cost_usd.toFixed(4)}
                       </td>
-                      <td className="py-3.5 pl-3 pr-5 text-right font-mono tabular-nums text-emerald-600 dark:text-emerald-400 whitespace-nowrap">
-                        {t.estimated_net_minutes_saved != null
-                          ? `${t.estimated_net_minutes_saved}m`
-                          : "—"}
+                      <td className="py-3.5 pl-2 pr-4 text-right whitespace-nowrap">
+                        {!t.worker_alive && (
+                          <button
+                            type="button"
+                            disabled={deletingId === t.task_id}
+                            onClick={(e) => handleDeleteTask(e, t)}
+                            title="删除此任务记录"
+                            className="rounded p-1 text-zinc-400 opacity-0 group-hover:opacity-100 hover:bg-rose-500/10 hover:text-rose-600 dark:hover:text-rose-400 transition-all cursor-pointer"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
                       </td>
                     </tr>
                   );
@@ -1082,6 +1255,20 @@ export function WorkbenchView({
             </tbody>
           </table>
         </div>
+
+        {/* Pagination Footer */}
+        {filteredTasks.length > visibleCount && (
+          <div className="border-t border-zinc-100 dark:border-zinc-800/80 px-5 py-3 text-center">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setVisibleCount((c) => c + 30)}
+            >
+              加载更多（当前展示 {displayedTasks.length} / {filteredTasks.length} 条）
+            </Button>
+          </div>
+        )}
       </SurfaceCard>
     </div>
   );

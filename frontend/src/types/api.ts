@@ -3,6 +3,9 @@ export interface HealthInfo {
   inference_mode: string;
   fast_model: string;
   reasoning_model: string;
+  llm_api_key_configured?: boolean;
+  default_max_budget_usd?: number;
+  enable_ops_mcp?: boolean;
   reviewer_model?: string;
   reviewer_provider?: string;
   registered_repositories: string[];
@@ -72,6 +75,7 @@ export interface RepositoryItem {
   github_repo: string;
   local_path: string;
   default_base_branch: string;
+  default_jira_project?: string;
   pytest_cmd: string[];
   lint_cmd: string[];
   policies?: DecisionPolicy[];
@@ -333,4 +337,19 @@ export interface JiraIssuePreview {
   priority: string;
   labels: string[];
   comments: string[];
+}
+
+export interface CoreEngineStatus {
+  llm_base_url: string;
+  llm_api_key_configured: boolean;
+  reasoning_model: string;
+  fast_model: string;
+  default_max_budget_usd: number;
+  github_configured: boolean;
+  github_api_base: string;
+  github_poller_enabled: boolean;
+  enable_ops_mcp: boolean;
+  ops_alert_webhook_url: string;
+  github_webhook_url: string;
+  alert_tasks_count: number;
 }

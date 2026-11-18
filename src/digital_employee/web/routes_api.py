@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -35,14 +36,17 @@ from digital_employee.web.schemas import (
     ApproveJiraPayload,
     ClarifyPayload,
     ControlPayload,
+    CoreEngineConfigPayload,
     CreateTaskPayload,
     FeishuConfigPayload,
     FeishuSimulatePayload,
     FollowupPayload,
     JiraConfigPayload,
     OnboardRepoPayload,
+    OpsAlertSimulatePayload,
     PromoteDecisionPayload,
     ReviewerConfigPayload,
+    UpdateRepoPayload,
     UpsertPolicyPayload,
     VerifyPolicyPayload,
 )
@@ -99,6 +103,9 @@ def build_api_router(
             "inference_mode": cfg.inference_mode,
             "fast_model": cfg.fast_model,
             "reasoning_model": cfg.reasoning_model,
+            "llm_api_key_configured": bool(cfg.llm_api_key),
+            "default_max_budget_usd": cfg.default_max_budget_usd,
+            "enable_ops_mcp": cfg.enable_ops_mcp,
             "reviewer_model": cfg.reviewer_model,
             "reviewer_provider": cfg.reviewer_provider,
             "registered_repositories": repos,
@@ -245,10 +252,92 @@ def build_api_router(
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @router.put("/repositories/{repo_id}")
+    def api_update_repository(repo_id: str, payload: UpdateRepoPayload) -> dict[str, Any]:
+        try:
+            updated = cfg.update_repository(
+                repo_id,
+                default_base_branch=payload.default_base_branch,
+                pytest_cmd=payload.pytest_cmd,
+                lint_cmd=payload.lint_cmd,
+                default_jira_project=payload.default_jira_project,
+            )
+            return updated.model_dump()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.delete("/repositories/{repo_id}")
+    def api_delete_repository(repo_id: str) -> dict[str, Any]:
+        removed = cfg.delete_repository(repo_id)
+        if not removed:
+            raise HTTPException(status_code=404, detail=f"仓库 {repo_id} 不存在")
+        orch.store.clear_repository_policies(repo_id)
+        return {"deleted": True, "repo_id": repo_id}
+
+    @router.get("/repositories/{repo_id}/branches")
+    def api_list_repository_branches(repo_id: str) -> dict[str, Any]:
+        try:
+            profile = cfg.resolve_repository(repo_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        branches: list[str] = []
+        repo_path = Path(profile.local_path)
+        if repo_path.is_dir():
+            proc = subprocess.run(
+                [
+                    "git",
+                    "for-each-ref",
+                    "--format=%(refname:short)",
+                    "refs/heads",
+                    "refs/remotes/origin",
+                ],
+                cwd=str(repo_path),
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if proc.returncode == 0:
+                for raw in proc.stdout.splitlines():
+                    b = raw.strip()
+                    if not b or b == "origin/HEAD" or b.endswith("/HEAD"):
+                        continue
+                    if b.startswith("origin/"):
+                        b = b.removeprefix("origin/")
+                    if b.startswith("ai-agent/"):
+                        continue
+                    if b not in branches:
+                        branches.append(b)
+        if profile.default_base_branch and profile.default_base_branch not in branches:
+            branches.insert(0, profile.default_base_branch)
+        elif profile.default_base_branch in branches:
+            branches.remove(profile.default_base_branch)
+            branches.insert(0, profile.default_base_branch)
+        return {
+            "repo_id": profile.repo_id,
+            "default_base_branch": profile.default_base_branch,
+            "branches": branches[:40],
+        }
+
     @router.get("/tasks")
-    def api_list_tasks(status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    def api_list_tasks(
+        status: str | None = None,
+        repo_id: str | None = None,
+        q: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
-        for t in orch.store.list_tasks(status=status, limit=limit):
+        for t in orch.store.list_tasks(
+            status=status,
+            target_repo=repo_id,
+            search_query=q,
+            limit=limit,
+            offset=offset,
+        ):
             d = t.model_dump()
             d["worker_alive"] = orch.is_task_actively_running(t.task_id)
             d["estimated_net_minutes_saved"] = (
@@ -264,6 +353,18 @@ def build_api_router(
             )
             items.append(d)
         return items
+
+    @router.delete("/tasks/{task_id}")
+    def api_delete_task(task_id: str) -> dict[str, Any]:
+        if orch.is_task_actively_running(task_id):
+            raise HTTPException(
+                status_code=400,
+                detail="任务正在后台沙箱运行中，请先中断后再清理记录",
+            )
+        deleted = orch.store.delete_task(task_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在")
+        return {"deleted": True, "task_id": task_id}
 
     @router.get("/tasks/{task_id}")
     def api_get_task(task_id: str) -> dict[str, Any]:
@@ -324,6 +425,7 @@ def build_api_router(
                 raw_request=payload.raw_request,
                 target_repo=payload.target_repo,
                 base_branch=payload.base_branch,
+                max_budget_usd=payload.max_budget_usd,
                 accept_defaults=payload.accept_defaults,
                 auto_execute=False,
                 publish_pr=payload.publish_pr,
@@ -457,6 +559,41 @@ def build_api_router(
                 publish_pr=state.auto_publish_pr or orch.github.is_configured,
                 followup_comment=followup,
             )
+            return state.model_dump()
+
+        if payload.action == "update_scope_and_retry":
+            state = orch.store.get_task(task_id)
+            if state is None:
+                raise HTTPException(status_code=404, detail="Task not found")
+            if payload.permitted_scopes is not None:
+                cleaned_scopes = [s.strip() for s in payload.permitted_scopes if s.strip()]
+                if cleaned_scopes:
+                    state.contract.permitted_scopes = cleaned_scopes
+                    state.contract.contract_version += 1
+            state.lifecycle_status = "QUEUED"
+            state.failure_class = "NONE"
+            state.failure_reason = None
+            state.handoff_bundle = None
+            orch.append_live_event(
+                state,
+                attempt=state.sandbox_attempt_count + 1,
+                kind="scope_expanded",
+                icon="🔓",
+                title=f"已批准更新允许修改范围 ({', '.join(state.contract.permitted_scopes)}) 并恢复沙箱执行…",
+                detail=payload.note.strip()[:200],
+            )
+            orch.store.save_task(
+                state,
+                step_name="scope_expanded_and_resumed",
+                note=f"Scopes: {state.contract.permitted_scopes}",
+            )
+            if not orch.is_task_actively_running(task_id):
+                background_tasks.add_task(
+                    orch.execute_task,
+                    task_id,
+                    publish_pr=state.auto_publish_pr or orch.github.is_configured,
+                    followup_comment=payload.note.strip(),
+                )
             return state.model_dump()
 
         try:
@@ -690,7 +827,11 @@ def build_api_router(
             api_key=cfg.reviewer_api_key,
             default_model=cfg.reviewer_model,
         )
-        orch.reviewer = FocusedReviewer(orch.reviewer_llm, skill_path=cfg.pr_review_skill_path)
+        orch.reviewer = FocusedReviewer(
+            orch.reviewer_llm,
+            skill_path=cfg.pr_review_skill_path,
+            store=orch.store,
+        )
         return {
             "ok": True,
             "provider": cfg.reviewer_provider,
@@ -799,5 +940,123 @@ def build_api_router(
             }
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # =========================================================================
+    # Core Coding Engine, GitHub Token & 7x24 Ops Alert Webhook Settings
+    # =========================================================================
+
+    @router.get("/integrations/core")
+    def api_get_core_config() -> dict[str, Any]:
+        alert_tasks = [
+            t
+            for t in orch.store.list_tasks(limit=200)
+            if t.source_channel == "alert_webhook"
+        ]
+        return {
+            "llm_base_url": cfg.llm_base_url,
+            "llm_api_key_configured": bool(cfg.llm_api_key),
+            "reasoning_model": cfg.reasoning_model,
+            "fast_model": cfg.fast_model,
+            "default_max_budget_usd": cfg.default_max_budget_usd,
+            "github_configured": orch.github.is_configured,
+            "github_api_base": cfg.github_api_base,
+            "github_poller_enabled": bool(poller_enabled_fn()),
+            "enable_ops_mcp": cfg.enable_ops_mcp,
+            "ops_alert_webhook_url": f"{orch.web_base_url}/webhooks/alert",
+            "github_webhook_url": f"{orch.web_base_url}/webhooks/github",
+            "alert_tasks_count": len(alert_tasks),
+        }
+
+    @router.post("/integrations/core/config")
+    def api_save_core_config(payload: CoreEngineConfigPayload) -> dict[str, Any]:
+        from digital_employee.agents.contract_drafter import ContractDrafter
+        from digital_employee.agents.runtime import create_coding_runtime
+        from digital_employee.integrations.github_client import GitHubIntegration
+        from digital_employee.llm.client import LLMClient
+
+        updates: dict[str, str] = {}
+        if payload.llm_base_url.strip():
+            cfg.llm_base_url = payload.llm_base_url.strip().rstrip("/")
+            updates["DE_LLM_BASE_URL"] = cfg.llm_base_url
+        if payload.llm_api_key.strip():
+            cfg.llm_api_key = payload.llm_api_key.strip()
+            updates["DE_LLM_API_KEY"] = cfg.llm_api_key
+        if payload.reasoning_model.strip():
+            cfg.reasoning_model = payload.reasoning_model.strip()
+            updates["DE_REASONING_MODEL"] = cfg.reasoning_model
+        if payload.fast_model.strip():
+            cfg.fast_model = payload.fast_model.strip()
+            updates["DE_FAST_MODEL"] = cfg.fast_model
+        if payload.github_token.strip():
+            cfg.github_token = payload.github_token.strip()
+            updates["DE_GITHUB_TOKEN"] = cfg.github_token
+        if payload.default_max_budget_usd is not None and payload.default_max_budget_usd > 0:
+            cfg.default_max_budget_usd = round(float(payload.default_max_budget_usd), 2)
+            updates["DE_DEFAULT_MAX_BUDGET_USD"] = str(cfg.default_max_budget_usd)
+        if payload.enable_ops_mcp is not None:
+            cfg.enable_ops_mcp = bool(payload.enable_ops_mcp)
+            updates["DE_ENABLE_OPS_MCP"] = "true" if cfg.enable_ops_mcp else "false"
+
+        if updates:
+            _upsert_dotenv_keys(PROJECT_ROOT / ".env", updates)
+
+        orch.llm = LLMClient(cfg)
+        orch.drafter = ContractDrafter(orch.llm, store=orch.store)
+        orch.coder = create_coding_runtime(cfg, store=orch.store)
+        orch.github = GitHubIntegration(
+            token=cfg.github_token,
+            api_base=cfg.github_api_base,
+        )
+        return {
+            "ok": True,
+            "reasoning_model": cfg.reasoning_model,
+            "fast_model": cfg.fast_model,
+            "llm_api_key_configured": bool(cfg.llm_api_key),
+            "github_configured": orch.github.is_configured,
+            "default_max_budget_usd": cfg.default_max_budget_usd,
+            "enable_ops_mcp": cfg.enable_ops_mcp,
+        }
+
+    @router.post("/integrations/ops/simulate-alert")
+    def api_simulate_ops_alert(
+        payload: OpsAlertSimulatePayload,
+        background_tasks: BackgroundTasks,
+    ) -> dict[str, Any]:
+        repos = cfg.load_repositories()
+        target_repo = payload.target_repo.strip() or (next(iter(repos.keys())) if repos else "")
+        if not target_repo:
+            raise HTTPException(status_code=400, detail="请先接入至少一个业务代码仓库")
+
+        raw_request = (
+            f"[7x24 Ops Alert · {payload.severity.upper()}] {payload.alert_name.strip()}\n"
+            f"Error: {payload.error_message.strip()}\n"
+        )
+        if payload.stack_trace.strip():
+            raw_request += f"Stack Trace / Diagnostic Context:\n{payload.stack_trace.strip()[:3000]}\n"
+        raw_request += (
+            "Please triage root cause using Ops diagnostics, write a Fail-to-Pass regression fix if caused by a code bug, "
+            "or exit via finish_noop with a root-cause report if repository tests are healthy."
+        )
+
+        try:
+            state = orch.submit_task(
+                raw_request=raw_request,
+                target_repo=target_repo,
+                accept_defaults=True,
+                auto_execute=False,
+                publish_pr=orch.github.is_configured,
+                source_channel="alert_webhook",
+                require_jira_approval=False,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if payload.auto_execute and state.lifecycle_status == "QUEUED":
+            background_tasks.add_task(
+                orch.execute_task,
+                state.task_id,
+                publish_pr=orch.github.is_configured,
+            )
+        return state.model_dump()
 
     return router

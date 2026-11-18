@@ -258,3 +258,98 @@ def test_managed_policy_closed_loop_and_health_circuit_breaker(tmp_path: Path) -
     )
     assert del_resp.status_code == 200
     assert del_resp.json()["deleted"] is True
+
+
+def test_console_management_endpoints_full_loop(tmp_path: Path) -> None:
+    import subprocess
+
+    from fastapi.testclient import TestClient
+
+    from digital_employee.onboarding import onboard_repository
+    from digital_employee.orchestrator import DelegationOrchestrator
+    from digital_employee.settings import Settings
+    from digital_employee.web.app import create_app
+
+    repo_dir = tmp_path / "inventory-api"
+    (repo_dir / "src").mkdir(parents=True)
+    (repo_dir / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (repo_dir / "pyproject.toml").write_text("[project]\nname='inventory-api'\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-b", "main"], cwd=str(repo_dir), check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "ci@example.com"], cwd=str(repo_dir), check=True)
+    subprocess.run(["git", "config", "user.name", "CI"], cwd=str(repo_dir), check=True)
+    subprocess.run(["git", "add", "."], cwd=str(repo_dir), check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo_dir), check=True, capture_output=True)
+    subprocess.run(["git", "branch", "release/1.0"], cwd=str(repo_dir), check=True)
+
+    cfg = Settings(
+        data_dir=tmp_path / "de-data",
+        repo_registry_path=tmp_path / "empty.yaml",
+        jira_poller_enabled=False,
+    )
+    profile = onboard_repository(cfg, str(repo_dir))
+    orch = DelegationOrchestrator(cfg)
+    app = create_app(cfg, orch, enable_background_daemons=False)
+    client = TestClient(app)
+
+    # 1. List git branches
+    br_resp = client.get(f"/api/repositories/{profile.repo_id}/branches")
+    assert br_resp.status_code == 200
+    assert "main" in br_resp.json()["branches"]
+    assert "release/1.0" in br_resp.json()["branches"]
+
+    # 2. Update repository config (default branch, pytest_cmd, lint_cmd, default_jira_project)
+    upd_repo = client.put(
+        f"/api/repositories/{profile.repo_id}",
+        json={
+            "default_base_branch": "release/1.0",
+            "pytest_cmd": ["python3", "-m", "pytest", "-q"],
+            "lint_cmd": ["ruff", "check"],
+            "default_jira_project": "INV",
+        },
+    )
+    assert upd_repo.status_code == 200
+    assert upd_repo.json()["default_base_branch"] == "release/1.0"
+    assert upd_repo.json()["default_jira_project"] == "INV"
+
+    # 3. Core engine config read
+    core_get = client.get("/api/integrations/core")
+    assert core_get.status_code == 200
+    assert "/webhooks/alert" in core_get.json()["ops_alert_webhook_url"]
+
+    # 4. Create sample tasks, search/filter, update scope, and delete task
+    t1 = DurableTaskState(
+        task_id="t-20261118-100001",
+        trace_id="tr-1",
+        raw_request="Fix stock deduction race condition",
+        source_channel="alert_webhook",
+        contract=TaskContract(
+            objective="Fix stock deduction race condition",
+            target_repo=profile.repo_id,
+            base_branch="release/1.0",
+            base_commit_sha="12345678",
+            reproduction_evidence="Concurrent requests cause negative stock",
+            permitted_scopes=["src/stock/*"],
+        ),
+        lifecycle_status="HANDED_OFF_INCOMPLETE",
+        failure_class="SECURITY_OR_SCOPE_VIOLATION",
+    )
+    orch.store.save_task(t1, step_name="handed_off")
+
+    search_hit = client.get("/api/tasks", params={"repo_id": profile.repo_id, "q": "deduction"})
+    assert search_hit.status_code == 200
+    assert len(search_hit.json()) == 1
+
+    search_miss = client.get("/api/tasks", params={"q": "nonexistent_keyword_xyz"})
+    assert search_miss.status_code == 200
+    assert len(search_miss.json()) == 0
+
+    # Delete task record
+    del_task = client.delete(f"/api/tasks/{t1.task_id}")
+    assert del_task.status_code == 200
+    assert del_task.json()["deleted"] is True
+    assert orch.store.get_task(t1.task_id) is None
+
+    # 5. Unbind repository cleanly
+    del_repo = client.delete(f"/api/repositories/{profile.repo_id}")
+    assert del_repo.status_code == 200
+    assert profile.repo_id not in cfg.load_repositories()

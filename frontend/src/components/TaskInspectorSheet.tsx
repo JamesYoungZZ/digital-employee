@@ -4,13 +4,17 @@ import {
   ArrowUpRight,
   BookMarked,
   CheckCircle2,
+  ChevronDown,
   Clock,
   Copy,
   FileDiff,
+  FolderPlus,
   GitBranch,
-  GitPullRequestDraft,
+  GitMerge,
+  GitPullRequest,
   Loader2,
   MessageSquarePlus,
+  Play,
   RefreshCw,
   Send,
   ShieldAlert,
@@ -40,18 +44,57 @@ interface Props {
   onMutated: () => Promise<void>;
 }
 
+const STEP_LABEL_MAP: Record<string, string> = {
+  queued: "任务已入队等待执行",
+  jira_draft_created: "已生成 Jira 工单草稿等待审核",
+  jira_ticket_created: "已在真实 Jira 创建工单",
+  jira_synced: "已同步最新 Jira 需求内容",
+  clarification_resolved: "人工已确认未决问题",
+  running_in_sandbox: "沙箱开始执行编码",
+  verifying_evidence: "开始执行单测与静态门禁",
+  scope_updated: "人工已更新允许修改目录范围",
+  scope_expanded_and_resumed: "人工已批准扩权并恢复沙箱执行",
+  decision_promoted: "已沉淀研发工程红线",
+  accepted_by_human: "人工确认采纳结单",
+  abandoned_by_human: "人工标记废弃任务",
+  merged_and_closed: "PR 已完成 Squash Merge 合入主干",
+  noop_verified_and_closed: "基线测试已全绿，No-Op 正常结单",
+};
+
+function formatStepLabel(raw: string): string {
+  if (STEP_LABEL_MAP[raw]) return STEP_LABEL_MAP[raw];
+  if (raw.startsWith("verifying_evidence_")) return `执行第 ${raw.split("_").pop()} 轮单测证据门禁`;
+  if (raw.startsWith("sandbox_attempt_")) return `启动第 ${raw.split("_").pop()} 轮沙箱推理`;
+  if (raw.startsWith("idempotent:push_branch")) return "推送代码分支至远端仓库";
+  if (raw.startsWith("idempotent:create_pr") || raw.startsWith("idempotent:ensure_pr"))
+    return "创建线上 GitHub Pull Request";
+  if (raw.startsWith("idempotent:notify_")) return "推送飞书状态通知卡片";
+  return raw;
+}
+
 export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
+  const [activeTab, setActiveTab] = React.useState<string>("contract");
+  const [replayExpanded, setReplayExpanded] = React.useState<boolean>(true);
   const [answers, setAnswers] = React.useState<Record<string, string>>({});
   const [followupText, setFollowupText] = React.useState("");
+
+  // Editable scopes state
+  const [editableScopes, setEditableScopes] = React.useState<string[]>([]);
+  const [newScopeInput, setNewScopeInput] = React.useState("");
+
+  // Rule promotion state
   const [ruleTitle, setRuleTitle] = React.useState("");
   const [ruleScope, setRuleScope] = React.useState("");
   const [ruleText, setRuleText] = React.useState("");
   const [showLedgerForm, setShowLedgerForm] = React.useState(false);
-  const [busyAction, setBusyAction] = React.useState<string | null>(null);
+
+  // Jira draft state
   const [jiraProject, setJiraProject] = React.useState("");
   const [jiraType, setJiraType] = React.useState("Task");
   const [jiraSummary, setJiraSummary] = React.useState("");
   const [jiraDesc, setJiraDesc] = React.useState("");
+
+  const [busyAction, setBusyAction] = React.useState<string | null>(null);
   const liveContainerRef = React.useRef<HTMLDivElement | null>(null);
 
   const taskId = detail?.task.task_id;
@@ -59,25 +102,55 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
 
   React.useEffect(() => {
     const el = liveContainerRef.current;
-    if (el) {
+    if (el && replayExpanded) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [liveCount, taskId]);
+  }, [liveCount, taskId, replayExpanded]);
 
+  // Context-aware initialization when switching to a task
   React.useEffect(() => {
     if (!detail) return;
-    const c = detail.task.contract;
+    const t = detail.task;
+    const c = t.contract;
+    const ev = t.verification_evidence;
+    const running = [
+      "DRAFTING_CONTRACT",
+      "QUEUED",
+      "RUNNING_IN_SANDBOX",
+      "VERIFYING_EVIDENCE",
+    ].includes(t.lifecycle_status);
+
+    setReplayExpanded(running);
+    setEditableScopes(c.permitted_scopes ?? []);
+    setNewScopeInput("");
     setRuleScope(c.permitted_scopes?.[0] ?? "*");
+
+    // Smart default tab based on lifecycle stage
+    if (
+      t.lifecycle_status === "WAITING_MERGE_APPROVAL" ||
+      ev?.reviewer_report != null
+    ) {
+      setActiveTab("evidence");
+    } else if (
+      ["PR_OPEN_FOLLOWING_UP", "DELIVERED_LOCAL_READY"].includes(t.lifecycle_status) &&
+      detail.diff
+    ) {
+      setActiveTab("diff");
+    } else {
+      setActiveTab("contract");
+    }
+
     const defaults: Record<string, string> = {};
     (c.unresolved_decisions ?? []).forEach((d, idx) => {
       defaults[String(idx)] = d.options?.[0] ?? d.default_assumption;
     });
     setAnswers(defaults);
-    if (detail.task.jira_draft) {
-      setJiraProject(detail.task.jira_draft.project_key || "PROJ");
-      setJiraType(detail.task.jira_draft.issue_type || "Task");
-      setJiraSummary(detail.task.jira_draft.summary || c.objective);
-      setJiraDesc(detail.task.jira_draft.description || c.reproduction_evidence);
+
+    if (t.jira_draft) {
+      setJiraProject(t.jira_draft.project_key || "PROJ");
+      setJiraType(t.jira_draft.issue_type || "Task");
+      setJiraSummary(t.jira_draft.summary || c.objective);
+      setJiraDesc(t.jira_draft.description || c.reproduction_evidence);
     }
   }, [taskId]);
 
@@ -101,20 +174,61 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
     "VERIFYING_EVIDENCE",
   ].includes(t.lifecycle_status);
 
-  const runControl = async (action: string) => {
+  const scopesModified =
+    JSON.stringify(editableScopes) !== JSON.stringify(c.permitted_scopes ?? []);
+
+  const runControl = async (
+    action: string,
+    extra?: { permitted_scopes?: string[]; note?: string; confirmMsg?: string }
+  ) => {
+    if (extra?.confirmMsg && !window.confirm(extra.confirmMsg)) {
+      return;
+    }
     setBusyAction(action);
     try {
       await apiFetch(`/api/tasks/${encodeURIComponent(t.task_id)}/control`, {
         method: "POST",
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({
+          action,
+          permitted_scopes: extra?.permitted_scopes,
+          note: extra?.note || "",
+        }),
       });
-      toast.success(`已执行操作：${action}`);
+      if (action === "approve_merge") {
+        toast.success("已批准并在 GitHub 完成 Squash Merge 合入主干");
+      } else if (action === "update_scope_and_retry") {
+        toast.success("已扩充允许修改范围并唤醒沙箱继续执行");
+        setReplayExpanded(true);
+      } else if (action === "update_scope") {
+        toast.success("已保存新的允许修改目录范围");
+      } else if (action === "cancel") {
+        toast.info("已中断任务并保留工作区现场");
+      } else {
+        toast.success("操作已生效");
+      }
       await onMutated();
     } catch (err: any) {
       toast.error(err.message);
     } finally {
       setBusyAction(null);
     }
+  };
+
+  const addScopeItem = (rawScope?: string) => {
+    const val = (rawScope ?? newScopeInput).trim();
+    if (!val) return;
+    if (!editableScopes.includes(val)) {
+      setEditableScopes([...editableScopes, val]);
+    }
+    if (!rawScope) setNewScopeInput("");
+  };
+
+  const removeScopeItem = (target: string) => {
+    if (editableScopes.length <= 1) {
+      toast.error("至少需保留一个允许修改目录");
+      return;
+    }
+    setEditableScopes(editableScopes.filter((s) => s !== target));
   };
 
   const submitApproveJira = async () => {
@@ -133,9 +247,8 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
           }),
         }
       );
-      toast.success(
-        `✅ 已创建真实 Jira 工单 ${updated.jira_issue_key || ""}，后续全程以该 Jira 工单为准！`
-      );
+      toast.success(`已创建 Jira 工单 ${updated.jira_issue_key || ""} 并启动沙箱执行`);
+      setReplayExpanded(true);
       await onMutated();
     } catch (err: any) {
       toast.error(err.message);
@@ -150,7 +263,7 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
       await apiFetch(`/api/tasks/${encodeURIComponent(t.task_id)}/sync-jira`, {
         method: "POST",
       });
-      toast.success(`🔄 已从权威 Jira 工单 ${t.jira_issue_key} 同步最新需求与评论！`);
+      toast.success(`已从 Jira 工单 ${t.jira_issue_key} 同步最新需求与评论`);
       await onMutated();
     } catch (err: any) {
       toast.error(err.message);
@@ -171,7 +284,8 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
           publish_pr: true,
         }),
       });
-      toast.success("已确认契约决策，隔离沙箱已唤醒执行");
+      toast.success("已确认方案，沙箱开始执行");
+      setReplayExpanded(true);
       await onMutated();
     } catch (err: any) {
       toast.error(err.message);
@@ -190,7 +304,8 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
         body: JSON.stringify({ comment_body: followupText.trim(), publish_pr: true }),
       });
       setFollowupText("");
-      toast.success("增量追改指令已下发，沙箱正在更新分支与 PR");
+      setReplayExpanded(true);
+      toast.success("追改指令已下发，沙箱正在增量修改并更新 PR");
       await onMutated();
     } catch (err: any) {
       toast.error(err.message);
@@ -220,12 +335,10 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
       setShowLedgerForm(false);
       if (entry.health_status === "INVALID_SCOPE") {
         toast.warning(
-          `已沉淀规则 ${entry.id}，但作用路径在仓库中未找到，请前往「仓库与治理规则」核对路径`
+          `已沉淀规则 ${entry.id}，但作用路径在仓库中未找到，请前往「代码仓库与规范」核对路径`
         );
       } else {
-        toast.success(
-          `已将规则 ${entry.id} 沉淀至仓库治理中心（可在「仓库与治理规则」随时编辑或停用）`
-        );
+        toast.success(`已沉淀研发红线 ${entry.id}（可在「代码仓库与规范」随时编辑）`);
       }
       await onMutated();
     } catch (err: any) {
@@ -235,15 +348,37 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
     }
   };
 
+  // Extract violated paths from scope_violations or handoff_bundle to offer 1-click scope chips
+  const suggestedScopeDirs = React.useMemo(() => {
+    const candidates = new Set<string>();
+    const files = [
+      ...(ev?.scope_violations ?? []),
+      ...(t.handoff_bundle?.modified_files ?? []),
+    ];
+    for (const f of files) {
+      const clean = f.trim().replace(/^\.\//, "");
+      if (!clean) continue;
+      const parts = clean.split("/");
+      const dir = parts.length > 1 ? `${parts.slice(0, 2).join("/")}/*` : clean;
+      if (!editableScopes.includes(dir) && !dir.startsWith(".env") && !dir.startsWith(".github")) {
+        candidates.add(dir);
+      }
+    }
+    return Array.from(candidates).slice(0, 4);
+  }, [ev?.scope_violations, t.handoff_bundle?.modified_files, editableScopes]);
+
   return (
-    <div className="fixed inset-0 z-40 flex justify-end bg-black/35 backdrop-blur-[1px]" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-40 flex justify-end bg-black/35 backdrop-blur-[1px]"
+      onClick={onClose}
+    >
       <div
         className="flex h-full w-full max-w-4xl flex-col border-l border-zinc-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Sticky Top Header */}
-        <div className="flex items-center justify-between border-b border-zinc-200 dark:border-zinc-800 px-6 py-4">
-          <div className="flex items-center gap-3">
+        {/* Sticky Top Header (Clean & Context-Accurate Actions Only) */}
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 dark:border-zinc-800 px-6 py-3.5">
+          <div className="flex flex-wrap items-center gap-2.5">
             <span className="font-mono text-sm font-semibold text-zinc-900 dark:text-zinc-100">
               {t.task_id}
             </span>
@@ -263,12 +398,14 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                 </a>
                 <button
                   type="button"
-                  title="从 Jira 拉取最新需求与评论覆盖同步"
+                  title="从 Jira 拉取最新需求与评论"
                   disabled={!!busyAction}
                   onClick={syncFromJira}
                   className="rounded p-1 text-zinc-500 hover:bg-zinc-100 hover:text-indigo-600 dark:hover:bg-zinc-800 cursor-pointer"
                 >
-                  <RefreshCw className={cn("h-3 w-3", busyAction === "sync_jira" && "animate-spin")} />
+                  <RefreshCw
+                    className={cn("h-3 w-3", busyAction === "sync_jira" && "animate-spin")}
+                  />
                 </button>
               </div>
             )}
@@ -286,7 +423,7 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
             </button>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {t.deliverable_pr_url ? (
               <a
                 href={t.deliverable_pr_url}
@@ -294,41 +431,51 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                 rel="noreferrer"
                 className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-blue-600 px-3 text-xs font-medium text-white hover:bg-blue-500 shadow-xs"
               >
-                <GitPullRequestDraft className="h-3.5 w-3.5" />
-                {t.deliverable_pr_number ? `Draft PR #${t.deliverable_pr_number}` : "前往 GitHub 建单"}
+                <GitPullRequest className="h-3.5 w-3.5" />
+                {t.deliverable_pr_number ? `PR #${t.deliverable_pr_number}` : "打开 GitHub PR"}
                 <ArrowUpRight className="h-3.5 w-3.5" />
               </a>
             ) : (
               ev?.repro_test_failed_on_base &&
-              ev?.repro_test_passed_on_head && (
+              ev?.repro_test_passed_on_head &&
+              t.lifecycle_status === "DELIVERED_LOCAL_READY" && (
                 <Button
                   variant="primary"
+                  size="sm"
                   disabled={!!busyAction}
                   onClick={() => runControl("publish_pr")}
                 >
-                  <GitPullRequestDraft className="h-3.5 w-3.5" />
-                  推送创建 Draft PR
+                  <GitPullRequest className="h-3.5 w-3.5" />
+                  推送创建 PR
                 </Button>
               )
             )}
 
-            {t.lifecycle_status === "WAITING_MERGE_APPROVAL" ? (
+            {t.lifecycle_status === "WAITING_MERGE_APPROVAL" && (
               <Button
                 variant="emerald"
+                size="sm"
                 disabled={!!busyAction}
-                onClick={() => runControl("approve_merge")}
+                onClick={() =>
+                  runControl("approve_merge", {
+                    confirmMsg: `确认将 PR #${t.deliverable_pr_number ?? ""} Squash Merge 合入 ${c.target_repo} (${c.base_branch}) 主干吗？`,
+                  })
+                }
               >
-                <CheckCircle2 className="h-3.5 w-3.5" />
-                批准并自动 Squash 合入
+                <GitMerge className="h-3.5 w-3.5" />
+                批准 Squash 合入
               </Button>
-            ) : (
+            )}
+
+            {t.lifecycle_status === "DELIVERED_LOCAL_READY" && (
               <Button
                 variant="emerald"
-                disabled={!!busyAction || t.lifecycle_status === "ACCEPTED_AND_CLOSED"}
+                size="sm"
+                disabled={!!busyAction}
                 onClick={() => runControl("accept")}
               >
                 <CheckCircle2 className="h-3.5 w-3.5" />
-                标记已采纳
+                标记本地已采纳
               </Button>
             )}
 
@@ -337,21 +484,35 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
               (ev?.reviewer_report?.verdict === "BLOCK" && !t.worker_alive)) && (
               <Button
                 variant="primary"
+                size="sm"
                 disabled={!!busyAction}
-                onClick={() => runControl("retry")}
+                onClick={() => {
+                  setReplayExpanded(true);
+                  runControl("retry");
+                }}
               >
                 <Sparkles className="h-3.5 w-3.5" />
-                {ev?.reviewer_report?.verdict === "BLOCK" ? "按 Review 意见自动返修" : "重新唤醒执行"}
+                {ev?.reviewer_report?.verdict === "BLOCK"
+                  ? "按 Review 意见自动修复"
+                  : "恢复执行"}
               </Button>
             )}
 
-            <Button
-              variant="outline"
-              disabled={!!busyAction || t.lifecycle_status === "HANDED_OFF_INCOMPLETE"}
-              onClick={() => runControl("cancel")}
-            >
-              中断交接
-            </Button>
+            {((isRunning && t.worker_alive) ||
+              t.lifecycle_status === "WAITING_CLARIFICATION") && (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!!busyAction}
+                onClick={() =>
+                  runControl("cancel", {
+                    confirmMsg: `确认中断当前运行中的任务 ${t.task_id} 并转为人工交接态吗？`,
+                  })
+                }
+              >
+                中断任务
+              </Button>
+            )}
 
             <Button variant="ghost" size="icon" onClick={onClose}>
               <X className="h-4 w-4" />
@@ -360,18 +521,19 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
         </div>
 
         {/* Scrollable Body */}
-        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
-          {/* Interactive Jira Draft Review Banner */}
+        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
+          {/* Jira Draft Review Banner */}
           {t.lifecycle_status === "WAITING_JIRA_APPROVAL" && (
             <div className="rounded-xl border border-amber-500/45 bg-amber-500/8 p-4 space-y-3 text-xs">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2 font-semibold text-amber-800 dark:text-amber-200 text-sm">
                   <TicketCheck className="h-4 w-4" />
-                  📋 待你审核 Jira 工单草稿（确认后正式建卡，后续都以 Jira 任务为准）
+                  待审核 Jira 工单草稿
                 </div>
                 <div className="flex items-center gap-2">
                   <Button
                     variant="emerald"
+                    size="sm"
                     disabled={!!busyAction}
                     onClick={submitApproveJira}
                   >
@@ -380,12 +542,17 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                     ) : (
                       <TicketCheck className="h-3.5 w-3.5" />
                     )}
-                    ✅ 批准创建真实 Jira 并开工
+                    批准建卡并开工
                   </Button>
                   <Button
                     variant="outline"
+                    size="sm"
                     disabled={!!busyAction}
-                    onClick={() => runControl("abandon")}
+                    onClick={() =>
+                      runControl("abandon", {
+                        confirmMsg: `确认放弃建卡并废弃任务 ${t.task_id} 吗？`,
+                      })
+                    }
                   >
                     放弃
                   </Button>
@@ -414,9 +581,6 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                     <option value="Story">Story</option>
                   </select>
                 </div>
-                <div className="flex items-end text-[11px] text-zinc-500">
-                  或在飞书卡片点击批准 / 回复 <code>建单</code>
-                </div>
               </div>
 
               <div className="space-y-2">
@@ -436,118 +600,143 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
             </div>
           )}
 
-          {/* Active Running Banner */}
+          {/* Merge Approval Banner */}
           {t.lifecycle_status === "WAITING_MERGE_APPROVAL" && (
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-3.5 text-xs text-emerald-800 dark:text-emerald-200">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-xs text-emerald-800 dark:text-emerald-200">
               <div>
                 <div className="flex flex-wrap items-center gap-2 font-semibold text-sm">
-                  <span>🛎️ 待你合入审批</span>
+                  <span>单测门禁、独立审查与线上 CI 已全部通过</span>
                   {ev?.reviewer_report?.quality_score != null && (
-                    <span className="rounded-full bg-emerald-600 px-2.5 py-0.5 text-xs font-bold text-white">
-                      综合评分 {ev.reviewer_report.quality_score}/100 · {ev.reviewer_report.merge_recommendation_label || "可合入"}
+                    <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[11px] font-bold text-white">
+                      {ev.reviewer_report.quality_score}/100 ·{" "}
+                      {ev.reviewer_report.merge_recommendation_label || "可合入"}
                     </span>
                   )}
                 </div>
-                <div className="mt-1 opacity-85">
-                  全部 4 道硬门禁与线上 GitHub Actions CI 已全绿；点击右侧按钮（或在飞书审批卡上点批准）将立即执行 SHA 锁定的自动 Squash Merge。
+                <div className="mt-0.5 opacity-85">
+                  请核对下方审查报告与代码 Diff 后点击批准合入主干。
                 </div>
               </div>
-              <Button
-                variant="emerald"
-                disabled={!!busyAction}
-                onClick={() => runControl("approve_merge")}
-              >
-                <CheckCircle2 className="h-3.5 w-3.5" />
-                批准并自动 Squash 合入
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setActiveTab("diff")}
+                >
+                  <FileDiff className="h-3.5 w-3.5" />
+                  查看代码 Diff
+                </Button>
+                <Button
+                  variant="emerald"
+                  size="sm"
+                  disabled={!!busyAction}
+                  onClick={() =>
+                    runControl("approve_merge", {
+                      confirmMsg: `确认将 PR #${t.deliverable_pr_number ?? ""} Squash Merge 合入 ${c.target_repo} (${c.base_branch}) 主干吗？`,
+                    })
+                  }
+                >
+                  <GitMerge className="h-3.5 w-3.5" />
+                  批准 Squash 合入
+                </Button>
+              </div>
             </div>
           )}
 
-          {/* Real-Time Agent Loop Live Stream Terminal */}
+          {/* Real-Time Agent Loop Terminal (Auto-expanded when running, collapsible when finished) */}
           {(isRunning || (detail.live_events && detail.live_events.length > 0)) && (
-            <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 text-zinc-100 shadow-sm">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/90 bg-zinc-900/90 px-4 py-2.5 text-xs">
+            <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 text-zinc-100 shadow-xs">
+              <button
+                type="button"
+                onClick={() => setReplayExpanded((v) => !v)}
+                className="flex w-full flex-wrap items-center justify-between gap-2 bg-zinc-900/90 px-4 py-2.5 text-xs hover:bg-zinc-900 cursor-pointer"
+              >
                 <div className="flex items-center gap-2 font-medium">
                   {isRunning && t.worker_alive ? (
                     <>
                       <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-400" />
-                      <span className="text-emerald-400">Agent Loop 实时运行中</span>
+                      <span className="text-emerald-400">Agent 内核实时执行中</span>
                     </>
                   ) : isRunning && !t.worker_alive ? (
                     <>
                       <span className="h-2 w-2 rounded-full bg-amber-400" />
-                      <span className="text-amber-300">后台线程曾中断（点击右上角「重新唤醒执行」立即恢复）</span>
+                      <span className="text-amber-300">后台线程已暂停（点击右上角「恢复执行」继续）</span>
                     </>
                   ) : (
                     <>
                       <CheckCircle2 className="h-3.5 w-3.5 text-zinc-400" />
-                      <span className="text-zinc-300">Agent Loop 执行实况回放</span>
+                      <span className="text-zinc-300">
+                        Agent 执行过程回放（共 {detail.live_events?.length ?? 0} 条记录）
+                      </span>
                     </>
                   )}
                   <span className="font-mono text-[11px] text-zinc-400">
-                    · 第 {t.sandbox_attempt_count || 1} 轮 · Step {t.current_step || 0}/{t.max_steps || 32} · 实时花费 ${t.total_cost_usd.toFixed(4)}
+                    · 第 {t.sandbox_attempt_count || 1} 轮 · Step {t.current_step || 0}/
+                    {t.max_steps || 32} · ${t.total_cost_usd.toFixed(4)}
                   </span>
                 </div>
-                {isRunning && (t.max_steps ?? 32) > 0 && (
-                  <div className="h-1.5 w-28 overflow-hidden rounded-full bg-zinc-800">
-                    <div
-                      className="h-full bg-emerald-500 transition-all duration-300"
-                      style={{
-                        width: `${Math.min(100, Math.round(((t.current_step || 1) / (t.max_steps || 32)) * 100))}%`,
-                      }}
-                    />
-                  </div>
-                )}
-              </div>
 
-              <div
-                ref={liveContainerRef}
-                className="max-h-60 overflow-y-auto px-4 py-3 space-y-2 font-mono text-[11.5px] leading-relaxed"
-              >
-                {(!detail.live_events || detail.live_events.length === 0) ? (
-                  <div className="text-zinc-500">正在等待首个沙箱动作事件写入…</div>
-                ) : (
-                  detail.live_events.map((evItem, idx) => {
-                    const timeStr = evItem.ts ? evItem.ts.slice(11, 19) : "";
-                    return (
-                      <div key={idx} className="space-y-0.5 border-l-2 border-zinc-800 pl-2.5">
-                        <div className="flex items-start gap-2">
-                          <span className="text-zinc-500 shrink-0">{timeStr}</span>
-                          <span className="shrink-0">{evItem.icon}</span>
-                          <span
-                            className={cn(
-                              "text-zinc-200",
-                              evItem.kind === "thinking" && "text-blue-300",
-                              evItem.kind === "thought" && "text-zinc-400 italic",
-                              evItem.kind === "gate_rejected" && "text-amber-300",
-                              evItem.kind === "error" && "text-red-400",
-                              (evItem.kind === "finish_task" || evItem.kind === "deliver") &&
-                                "text-emerald-300 font-semibold"
-                            )}
-                          >
-                            {evItem.title}
-                          </span>
-                        </div>
-                        {evItem.detail && (
-                          <div className="pl-16 text-[11px] text-zinc-400 whitespace-pre-wrap break-words">
-                            {evItem.detail}
+                <div className="flex items-center gap-2 text-[11px] text-zinc-400">
+                  <span>{replayExpanded ? "收起日志" : "展开查看"}</span>
+                  <ChevronDown
+                    className={cn(
+                      "h-3.5 w-3.5 transition-transform",
+                      replayExpanded && "rotate-180"
+                    )}
+                  />
+                </div>
+              </button>
+
+              {replayExpanded && (
+                <div
+                  ref={liveContainerRef}
+                  className="max-h-56 overflow-y-auto border-t border-zinc-800/90 px-4 py-3 space-y-2 font-mono text-[11.5px] leading-relaxed"
+                >
+                  {!detail.live_events || detail.live_events.length === 0 ? (
+                    <div className="text-zinc-500">正在等待首个沙箱动作事件写入…</div>
+                  ) : (
+                    detail.live_events.map((evItem, idx) => {
+                      const timeStr = evItem.ts ? evItem.ts.slice(11, 19) : "";
+                      return (
+                        <div key={idx} className="space-y-0.5 border-l-2 border-zinc-800 pl-2.5">
+                          <div className="flex items-start gap-2">
+                            <span className="text-zinc-500 shrink-0">{timeStr}</span>
+                            <span className="shrink-0">{evItem.icon}</span>
+                            <span
+                              className={cn(
+                                "text-zinc-200",
+                                evItem.kind === "thinking" && "text-blue-300",
+                                evItem.kind === "thought" && "text-zinc-400 italic",
+                                evItem.kind === "gate_rejected" && "text-amber-300",
+                                evItem.kind === "error" && "text-red-400",
+                                (evItem.kind === "finish_task" || evItem.kind === "deliver") &&
+                                  "text-emerald-300 font-semibold"
+                              )}
+                            >
+                              {evItem.title}
+                            </span>
                           </div>
-                        )}
-                      </div>
-                    );
-                  })
-                )}
-              </div>
+                          {evItem.detail && (
+                            <div className="pl-16 text-[11px] text-zinc-400 whitespace-pre-wrap break-words">
+                              {evItem.detail}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              )}
             </div>
           )}
 
-          {/* 5-Second Micro Clarification Interactive Module */}
+          {/* Clarification Module */}
           {t.lifecycle_status === "WAITING_CLARIFICATION" &&
             c.unresolved_decisions?.length > 0 && (
               <div className="rounded-xl border border-amber-500/40 bg-amber-500/8 p-4 space-y-3.5">
                 <div className="flex items-center gap-2 text-amber-700 dark:text-amber-300 text-xs font-semibold">
                   <AlertTriangle className="h-4 w-4 shrink-0" />
-                  需你 5 秒微确认（发现影响行为边界的关键未决问题）
+                  存在关键行为边界歧义，请确认实现方案
                 </div>
 
                 {c.unresolved_decisions.map((dec, qIdx) => (
@@ -588,9 +777,6 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                         );
                       })}
                     </div>
-                    <div className="text-[11px] text-zinc-500">
-                      默认假设：<code className="text-amber-700 dark:text-amber-300">{dec.default_assumption}</code>
-                    </div>
                   </div>
                 ))}
 
@@ -600,38 +786,38 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                     disabled={busyAction === "clarify"}
                     onClick={() => submitClarify(false)}
                   >
-                    提交所选方案并启动沙箱
+                    按所选方案执行
                   </Button>
                   <Button
                     variant="outline"
                     disabled={busyAction === "clarify"}
                     onClick={() => submitClarify(true)}
                   >
-                    直接按默认假设继续
+                    按默认假设继续
                   </Button>
                 </div>
               </div>
             )}
 
-          {/* Verified No-Op Banner */}
-          {ev?.noop_verified && (
-            <div className="rounded-xl border border-emerald-500/35 bg-emerald-500/8 p-4 space-y-1.5 text-xs">
-              <div className="flex items-center gap-2 font-semibold text-emerald-700 dark:text-emerald-300">
-                <CheckCircle2 className="h-4 w-4" />
-                沙箱独立实测已全绿 · 无需代码改动 (No-Op Clean Exit)
-              </div>
-              <p className="text-zinc-600 dark:text-zinc-300 leading-relaxed">
-                {ev.noop_summary || "目标测试集已在远端基准分支全部通过，未产生多余改动或无效 PR。"}
-              </p>
-            </div>
-          )}
-
-          {/* Handoff Bundle Alert */}
+          {/* Handoff Bundle Alert + One-Click Scope Expansion Recovery */}
           {t.handoff_bundle && (
-            <div className="rounded-xl border border-red-500/35 bg-red-500/8 p-4 space-y-2 text-xs">
-              <div className="flex items-center gap-2 font-semibold text-red-700 dark:text-red-300">
-                <ShieldAlert className="h-4 w-4" />
-                结构化交接包 ({t.handoff_bundle.failure_class})：{t.handoff_bundle.reason}
+            <div className="rounded-xl border border-red-500/35 bg-red-500/8 p-4 space-y-2.5 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 font-semibold text-red-700 dark:text-red-300">
+                  <ShieldAlert className="h-4 w-4 shrink-0" />
+                  任务暂停交接 ({t.handoff_bundle.failure_class})：{t.handoff_bundle.reason}
+                </div>
+                {t.handoff_bundle.failure_class === "SECURITY_OR_SCOPE_VIOLATION" && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setActiveTab("contract")}
+                  >
+                    <FolderPlus className="h-3.5 w-3.5" />
+                    在下方扩充目录范围并续跑
+                  </Button>
+                )}
               </div>
               <p className="text-zinc-600 dark:text-zinc-400">
                 建议下一步：{t.handoff_bundle.recommended_next_step}
@@ -639,32 +825,45 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
             </div>
           )}
 
-          {/* Main 4 Radix Tabs */}
-          <Tabs defaultValue="contract">
-            <TabsList className="w-full justify-start">
+          {/* Verified No-Op Banner */}
+          {ev?.noop_verified && (
+            <div className="rounded-xl border border-emerald-500/35 bg-emerald-500/8 p-4 space-y-1.5 text-xs">
+              <div className="flex items-center gap-2 font-semibold text-emerald-700 dark:text-emerald-300">
+                <CheckCircle2 className="h-4 w-4" />
+                沙箱独立实测已通过 · 无需修改代码 (No-Op)
+              </div>
+              <p className="text-zinc-600 dark:text-zinc-300 leading-relaxed">
+                {ev.noop_summary || "目标测试集已在基线分支全部通过，未产生多余改动。"}
+              </p>
+            </div>
+          )}
+
+          {/* Controlled Tabs */}
+          <Tabs value={activeTab} onValueChange={setActiveTab}>
+            <TabsList className="w-full justify-start flex-wrap h-auto">
               <TabsTrigger value="contract">
                 <Sparkles className="h-3.5 w-3.5" />
-                1. 契约与边界
+                契约与权限范围
               </TabsTrigger>
               <TabsTrigger value="evidence">
                 <ShieldCheck className="h-3.5 w-3.5" />
-                2. 证据门禁与盲区
+                门禁与审查报告
               </TabsTrigger>
               <TabsTrigger value="diff">
                 <FileDiff className="h-3.5 w-3.5" />
-                3. 逐行补丁与日志
+                代码补丁与日志
               </TabsTrigger>
-              <TabsTrigger value="feishu">
+              <TabsTrigger value="timeline">
                 <Clock className="h-3.5 w-3.5" />
-                4. 飞书卡片与状态轨迹
+                状态轨迹与通知
               </TabsTrigger>
             </TabsList>
 
-            {/* TAB 1: CONTRACT */}
+            {/* TAB 1: CONTRACT & INTERACTIVE SCOPE MANAGEMENT */}
             <TabsContent value="contract" className="space-y-4">
               <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-3">
                 <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
-                  推断契约目标 (TaskContract v{c.contract_version})
+                  任务契约目标 (Contract v{c.contract_version})
                 </div>
                 <p className="text-sm font-medium leading-relaxed text-zinc-900 dark:text-zinc-100">
                   {c.objective}
@@ -675,56 +874,134 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                     <span className="font-mono font-medium">{c.target_repo}</span>
                   </div>
                   <div>
-                    <span className="text-zinc-400 block text-[11px]">基线 Commit</span>
-                    <span className="font-mono">{c.base_branch}@{c.base_commit_sha.slice(0, 8)}</span>
+                    <span className="text-zinc-400 block text-[11px]">基线分支 @ Commit</span>
+                    <span className="font-mono">
+                      {c.base_branch}@{c.base_commit_sha.slice(0, 8)}
+                    </span>
                   </div>
                   <div>
-                    <span className="text-zinc-400 block text-[11px]">真实模型耗时 / 成本</span>
+                    <span className="text-zinc-400 block text-[11px]">耗时 / 模型费用</span>
                     <span className="font-mono">
                       {t.agent_elapsed_seconds.toFixed(1)}s · ${t.total_cost_usd.toFixed(4)}
                     </span>
                   </div>
                   <div>
-                    <span className="text-zinc-400 block text-[11px]">净节省人工时间</span>
-                    <span className="font-mono text-emerald-600 dark:text-emerald-400">
-                      {t.estimated_net_minutes_saved != null ? `${t.estimated_net_minutes_saved} min` : "—"}
-                    </span>
+                    <span className="text-zinc-400 block text-[11px]">预算上限</span>
+                    <span className="font-mono">${c.max_budget_usd.toFixed(2)}</span>
                   </div>
                 </div>
               </div>
 
-              <div className="grid sm:grid-cols-2 gap-4">
-                <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-2">
-                  <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
-                    允许修改白名单 (Permitted Scopes)
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {c.permitted_scopes.map((s) => (
-                      <code
-                        key={s}
-                        className="rounded-md bg-blue-500/10 px-2 py-0.5 text-[11.5px] text-blue-700 dark:text-blue-300"
-                      >
-                        {s}
-                      </code>
-                    ))}
+              {/* Interactive Permitted Scopes Editor */}
+              <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-xs font-semibold text-zinc-800 dark:text-zinc-200">
+                      允许修改目录白名单 (Permitted Scopes)
+                    </div>
+                    <p className="text-[11px] text-zinc-500">
+                      沙箱写入受限于以下路径前缀；若因跨模块修改被拦截，可在此添加目录并一键恢复执行。
+                    </p>
                   </div>
                 </div>
 
-                <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-2">
-                  <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
-                    明确禁止触碰边界 (Out of Scope)
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {c.out_of_scope.slice(0, 6).map((s) => (
-                      <code
-                        key={s}
-                        className="rounded-md bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-600 dark:text-zinc-400"
+                <div className="flex flex-wrap gap-1.5">
+                  {editableScopes.map((s) => (
+                    <span
+                      key={s}
+                      className="inline-flex items-center gap-1 rounded-md bg-blue-500/10 px-2 py-1 font-mono text-xs text-blue-700 dark:text-blue-300"
+                    >
+                      {s}
+                      {t.lifecycle_status !== "ACCEPTED_AND_CLOSED" && (
+                        <button
+                          type="button"
+                          onClick={() => removeScopeItem(s)}
+                          className="ml-0.5 rounded hover:bg-blue-500/20 p-0.5 cursor-pointer"
+                          title="移除此目录"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      )}
+                    </span>
+                  ))}
+                </div>
+
+                {suggestedScopeDirs.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                    <span className="text-amber-600 dark:text-amber-400 font-medium">
+                      检测到被拦截路径，点击快速加入白名单：
+                    </span>
+                    {suggestedScopeDirs.map((dir) => (
+                      <button
+                        key={dir}
+                        type="button"
+                        onClick={() => addScopeItem(dir)}
+                        className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 font-mono text-amber-700 dark:text-amber-300 hover:bg-amber-500/20 cursor-pointer"
                       >
-                        {s.slice(0, 48)}
-                      </code>
+                        + {dir}
+                      </button>
                     ))}
                   </div>
-                </div>
+                )}
+
+                {t.lifecycle_status !== "ACCEPTED_AND_CLOSED" && (
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <input
+                      type="text"
+                      value={newScopeInput}
+                      onChange={(e) => setNewScopeInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          addScopeItem();
+                        }
+                      }}
+                      placeholder="输入允许修改的目录前缀（如 src/common/* 或 scripts/*）回车添加"
+                      className="h-8 flex-1 min-w-[220px] rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-950"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => addScopeItem()}
+                    >
+                      添加目录
+                    </Button>
+
+                    {scopesModified && (
+                      <>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={!!busyAction}
+                          onClick={() =>
+                            runControl("update_scope", {
+                              permitted_scopes: editableScopes,
+                            })
+                          }
+                        >
+                          仅保存范围
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="primary"
+                          size="sm"
+                          disabled={!!busyAction}
+                          onClick={() =>
+                            runControl("update_scope_and_retry", {
+                              permitted_scopes: editableScopes,
+                              note: "Human expanded permitted_scopes; please complete task.",
+                            })
+                          }
+                        >
+                          <Play className="h-3.5 w-3.5" />
+                          保存范围并恢复执行
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 space-y-2">
@@ -742,11 +1019,11 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
               </div>
             </TabsContent>
 
-            {/* TAB 2: EVIDENCE */}
+            {/* TAB 2: EVIDENCE & CODE REVIEW */}
             <TabsContent value="evidence" className="space-y-4">
               {!ev ? (
                 <div className="rounded-xl border border-dashed border-zinc-200 dark:border-zinc-800 p-10 text-center text-xs text-zinc-500">
-                  沙箱尚未执行到门禁阶段，完成后在此展示硬性回归证据单
+                  沙箱尚未运行到门禁阶段，完成后在此展示回归单测证据与独立审查报告
                 </div>
               ) : (
                 <>
@@ -754,9 +1031,12 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                     {[
                       { label: "基线复现失败 (Fail)", ok: ev.repro_test_failed_on_base },
                       { label: "修复后通过 (Pass)", ok: ev.repro_test_passed_on_head },
-                      { label: "原有测试套件全绿", ok: ev.existing_test_suite_passed },
-                      { label: "反作弊扫描 (零删改)", ok: ev.tests_weakened_check },
-                      { label: "范围与 Linter 合规", ok: ev.scope_compliance_check && ev.static_analysis_passed },
+                      { label: "存量单测全绿", ok: ev.existing_test_suite_passed },
+                      { label: "测试零弱化作弊", ok: ev.tests_weakened_check },
+                      {
+                        label: "目录与静态检查",
+                        ok: ev.scope_compliance_check && ev.static_analysis_passed,
+                      },
                     ].map((item) => (
                       <div
                         key={item.label}
@@ -788,34 +1068,29 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                         <span className="font-semibold text-zinc-800 dark:text-zinc-200">
                           独立跨模型 Code Review 报告
                         </span>
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setActiveTab("diff")}
+                          >
+                            <FileDiff className="h-3 w-3" />
+                            对照代码 Diff
+                          </Button>
                           <a
                             href={`/reports/${encodeURIComponent(t.task_id)}/review`}
                             target="_blank"
                             rel="noreferrer"
-                            className="inline-flex items-center gap-1 rounded-md bg-blue-500/10 px-2 py-0.5 font-medium text-blue-600 hover:bg-blue-500/20 dark:text-blue-300"
+                            className="inline-flex items-center gap-1 rounded-md bg-blue-500/10 px-2 py-1 font-medium text-blue-600 hover:bg-blue-500/20 dark:text-blue-300"
                           >
-                            📄 打开独立全量 Review 报告
+                            独立全屏报告
                             <ArrowUpRight className="h-3 w-3" />
                           </a>
                           {ev.reviewer_report.reviewer_model && (
                             <code className="rounded bg-purple-500/10 px-2 py-0.5 text-[11px] text-purple-600 dark:text-purple-300">
                               {ev.reviewer_report.reviewer_model}
                             </code>
-                          )}
-                          {ev.reviewer_report.quality_score != null && (
-                            <span
-                              className={cn(
-                                "rounded-full px-2.5 py-0.5 text-[11px] font-bold",
-                                ev.reviewer_report.merge_recommendation === "DO_NOT_MERGE"
-                                  ? "bg-red-600 text-white"
-                                  : ev.reviewer_report.merge_recommendation === "MERGE_WITH_CAUTION"
-                                    ? "bg-amber-500/20 text-amber-700 dark:text-amber-300"
-                                    : "bg-emerald-600 text-white"
-                              )}
-                            >
-                              {ev.reviewer_report.quality_score}/100 · {ev.reviewer_report.merge_recommendation_label || "可合入"}
-                            </span>
                           )}
                           <span
                             className={cn(
@@ -825,7 +1100,8 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                                 : "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
                             )}
                           >
-                            {ev.reviewer_report.verdict ?? "APPROVE"} · {(ev.reviewer_report.blocking_issues ?? []).length} 阻断
+                            {ev.reviewer_report.verdict ?? "APPROVE"} ·{" "}
+                            {(ev.reviewer_report.blocking_issues ?? []).length} 阻断
                           </span>
                         </div>
                       </div>
@@ -837,7 +1113,7 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                       {(ev.reviewer_report.change_overview ?? []).length > 0 && (
                         <div className="rounded-lg bg-zinc-50 dark:bg-zinc-900 p-3 space-y-1">
                           <div className="font-semibold text-zinc-700 dark:text-zinc-300">
-                            📦 本次改动做了什么：
+                            改动概览：
                           </div>
                           <ul className="list-disc pl-4 space-y-0.5 text-zinc-600 dark:text-zinc-400">
                             {(ev.reviewer_report.change_overview ?? []).map((ln, idx) => (
@@ -850,38 +1126,31 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                       {(ev.reviewer_report.blocking_issues ?? []).length > 0 && (
                         <div className="rounded-lg border border-red-500/30 bg-red-500/8 p-3 space-y-2">
                           <div className="font-semibold text-red-600 dark:text-red-400">
-                            🚨 必须修改的阻断级审查意见 (Blocking Comments)：
+                            阻断级审查问题：
                           </div>
                           {(ev.reviewer_report.blocking_issues ?? []).map((b, idx) => (
                             <div key={idx} className="space-y-0.5 text-red-700 dark:text-red-300">
                               <div>
-                                <b>[{b.severity} · {b.category}]</b>{" "}
-                                {b.path ? <code className="font-mono">{b.path}{b.line ? `:${b.line}` : ""}</code> : null}
-                                {" — "}{b.message}
+                                <b>
+                                  [{b.severity} · {b.category}]
+                                </b>{" "}
+                                {b.path ? (
+                                  <code className="font-mono">
+                                    {b.path}
+                                    {b.line ? `:${b.line}` : ""}
+                                  </code>
+                                ) : null}
+                                {" — "}
+                                {b.message}
                               </div>
                               {b.suggestion && (
                                 <div className="pl-3 text-emerald-700 dark:text-emerald-300">
-                                  <b>建议改法：</b>{b.suggestion}
+                                  <b>建议改法：</b>
+                                  {b.suggestion}
                                 </div>
                               )}
                             </div>
                           ))}
-                        </div>
-                      )}
-
-                      {(ev.reviewer_report.notable_observations ?? []).length > 0 && (
-                        <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 space-y-1">
-                          <div className="font-semibold text-blue-700 dark:text-blue-300">
-                            💡 审查补充观察（非阻断建议）：
-                          </div>
-                          <ul className="list-disc pl-4 space-y-0.5 text-zinc-600 dark:text-zinc-300">
-                            {(ev.reviewer_report.notable_observations ?? []).map((o, idx) => (
-                              <li key={idx}>
-                                {o.path ? <code className="font-mono mr-1">{o.path}{o.line ? `:${o.line}` : ""}</code> : null}
-                                {o.note}
-                              </li>
-                            ))}
-                          </ul>
                         </div>
                       )}
 
@@ -892,7 +1161,7 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                               <tr>
                                 <th className="px-3 py-1.5">审查维度</th>
                                 <th className="px-3 py-1.5">结论</th>
-                                <th className="px-3 py-1.5">具体核查依据</th>
+                                <th className="px-3 py-1.5">核查依据</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800/80">
@@ -900,9 +1169,15 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                                 <tr key={idx}>
                                   <td className="px-3 py-1.5 font-medium">{row.dimension}</td>
                                   <td className="px-3 py-1.5 font-mono font-semibold">
-                                    {row.status === "PASS" ? "✅ PASS" : row.status === "WARN" ? "⚠️ WARN" : "❌ FAIL"}
+                                    {row.status === "PASS"
+                                      ? "PASS"
+                                      : row.status === "WARN"
+                                        ? "WARN"
+                                        : "FAIL"}
                                   </td>
-                                  <td className="px-3 py-1.5 text-zinc-600 dark:text-zinc-400">{row.detail}</td>
+                                  <td className="px-3 py-1.5 text-zinc-600 dark:text-zinc-400">
+                                    {row.detail}
+                                  </td>
                                 </tr>
                               ))}
                             </tbody>
@@ -912,19 +1187,22 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                     </div>
                   )}
 
-                  <div className="rounded-xl border border-amber-500/30 bg-amber-500/6 p-4 space-y-2 text-xs">
-                    <div className="flex items-center gap-1.5 font-semibold text-amber-700 dark:text-amber-300">
-                      <AlertTriangle className="h-4 w-4" />
-                      未验证风险盲区诚实披露 (Unverified Risks — 人类 Review 只需重点关注以下项)
+                  {(ev.reviewer_report?.unverified_risks ?? ev.unverified_risks ?? []).length >
+                    0 && (
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/6 p-4 space-y-2 text-xs">
+                      <div className="flex items-center gap-1.5 font-semibold text-amber-700 dark:text-amber-300">
+                        <AlertTriangle className="h-4 w-4" />
+                        人工审阅重点关注项 (Unverified Risks)
+                      </div>
+                      <ul className="list-disc pl-5 space-y-1 text-zinc-700 dark:text-zinc-300">
+                        {(ev.reviewer_report?.unverified_risks ?? ev.unverified_risks ?? []).map(
+                          (r, i) => (
+                            <li key={i}>{r}</li>
+                          )
+                        )}
+                      </ul>
                     </div>
-                    <ul className="list-disc pl-5 space-y-1 text-zinc-700 dark:text-zinc-300">
-                      {(ev.reviewer_report?.unverified_risks ?? ev.unverified_risks ?? []).map(
-                        (r, i) => (
-                          <li key={i}>{r}</li>
-                        )
-                      )}
-                    </ul>
-                  </div>
+                  )}
                 </>
               )}
             </TabsContent>
@@ -934,47 +1212,49 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
               <DiffViewer diff={detail.diff} verificationLog={detail.verification_log} />
             </TabsContent>
 
-            {/* TAB 4: FEISHU CARD & CHECKPOINTS */}
-            <TabsContent value="feishu">
-              <div className="grid lg:grid-cols-2 gap-5">
-                <div className="space-y-2">
-                  <div className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">
-                    系统推送给用户的飞书交互卡片 1:1 渲染：
-                  </div>
+            {/* TAB 4: HUMAN-READABLE TIMELINE & COLLAPSIBLE CARD DEBUG */}
+            <TabsContent value="timeline" className="space-y-4">
+              <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 max-h-[380px] overflow-y-auto">
+                <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-300 mb-3">
+                  任务状态流转时间线 ({detail.checkpoints.length} 个节点)
+                </div>
+                <ol className="relative border-l border-zinc-200 dark:border-zinc-800 ml-2 space-y-3">
+                  {detail.checkpoints.map((cp) => (
+                    <li key={cp.id} className="ml-4 text-xs">
+                      <span className="absolute -left-1.5 mt-1 h-2.5 w-2.5 rounded-full border border-white bg-blue-500 dark:border-zinc-950" />
+                      <div className="flex flex-wrap items-center gap-2 text-[11.5px]">
+                        <span className="font-mono text-zinc-400 tabular-nums">
+                          {cp.created_at.slice(11, 19)}
+                        </span>
+                        <span className="font-medium text-zinc-800 dark:text-zinc-200">
+                          {formatStepLabel(cp.step_name)}
+                        </span>
+                        <code className="text-[10px] text-zinc-400">{cp.step_name}</code>
+                      </div>
+                      {cp.note && (
+                        <p className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400 break-all">
+                          {cp.note.slice(0, 160)}
+                        </p>
+                      )}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+
+              <details className="group rounded-xl border border-zinc-200 dark:border-zinc-800 p-4">
+                <summary className="cursor-pointer text-xs font-semibold text-zinc-600 dark:text-zinc-400 flex items-center justify-between select-none">
+                  <span>查看当前阶段推送的飞书交互卡片预览</span>
+                  <ChevronDown className="h-4 w-4 text-zinc-400 transition-transform group-open:rotate-180" />
+                </summary>
+                <div className="mt-3">
                   <FeishuCardPreview payload={detail.feishu_card_preview} />
                 </div>
-
-                <div className="space-y-2">
-                  <div className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">
-                    SQLite WAL 持久化检查点轨迹 ({detail.checkpoints.length} 步)：
-                  </div>
-                  <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 max-h-[420px] overflow-y-auto">
-                    <ol className="relative border-l border-zinc-200 dark:border-zinc-800 ml-2 space-y-3.5">
-                      {detail.checkpoints.map((cp) => (
-                        <li key={cp.id} className="ml-4 text-xs">
-                          <span className="absolute -left-1.5 mt-1 h-2.5 w-2.5 rounded-full border border-white bg-blue-500 dark:border-zinc-950" />
-                          <div className="flex items-center gap-2 font-mono text-[11px] text-zinc-400 tabular-nums">
-                            <span>{cp.created_at.slice(11, 19)}</span>
-                            <span className="font-semibold text-zinc-700 dark:text-zinc-200">
-                              {cp.step_name}
-                            </span>
-                          </div>
-                          {cp.note && (
-                            <p className="mt-0.5 text-[11.5px] text-zinc-500 dark:text-zinc-400 break-all">
-                              {cp.note.slice(0, 140)}
-                            </p>
-                          )}
-                        </li>
-                      ))}
-                    </ol>
-                  </div>
-                </div>
-              </div>
+              </details>
             </TabsContent>
           </Tabs>
         </div>
 
-        {/* Sticky Bottom Follow-Up & Decision Ledger Bar */}
+        {/* Sticky Bottom Follow-Up & Engineering Guardrail Bar */}
         <div className="border-t border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-900/50 px-6 py-3.5 space-y-3">
           <form onSubmit={submitFollowup} className="flex items-center gap-2">
             <div className="relative flex-1">
@@ -983,7 +1263,7 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                 type="text"
                 value={followupText}
                 onChange={(e) => setFollowupText(e.target.value)}
-                placeholder="追加修改意见（唤醒原沙箱增量修改并同步更新 GitHub Draft PR）..."
+                placeholder="输入追加修改意见（唤醒原沙箱增量修改代码并同步更新 PR）..."
                 className="h-9 w-full rounded-lg border border-zinc-200 bg-white pl-9 pr-3 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100"
               />
             </div>
@@ -997,7 +1277,7 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
               onClick={() => setShowLedgerForm((v) => !v)}
             >
               <BookMarked className="h-3.5 w-3.5" />
-              沉淀规则
+              沉淀工程红线
             </Button>
           </form>
 
@@ -1028,7 +1308,7 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                 className="h-8 flex-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 text-xs dark:border-zinc-800 dark:bg-zinc-950"
               />
               <Button type="submit" variant="emerald" size="sm" disabled={busyAction === "rule"}>
-                保存至治理中心
+                保存红线
               </Button>
             </form>
           )}

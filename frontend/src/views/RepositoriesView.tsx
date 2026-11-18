@@ -6,15 +6,18 @@ import {
   Edit3,
   FolderGit2,
   GitBranch,
+  HelpCircle,
   Loader2,
   PauseCircle,
   PlayCircle,
   Plus,
   RefreshCw,
+  Settings2,
   ShieldAlert,
   ShieldCheck,
   Terminal,
   Trash2,
+  Unplug,
   UserCheck,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -86,13 +89,27 @@ interface PolicyEditorState {
   status: "APPROVED_POLICY" | "PAUSED";
 }
 
+interface RepoConfigEditorState {
+  repoId: string;
+  defaultBaseBranch: string;
+  pytestCmdText: string;
+  lintCmdText: string;
+  defaultJiraProject: string;
+}
+
 export function RepositoriesView({ repos, onRefresh }: Props) {
+  const [showHelp, setShowHelp] = React.useState(false);
+
   // Onboard repository dialog state
   const [onboardOpen, setOnboardOpen] = React.useState(false);
   const [source, setSource] = React.useState("");
   const [repoId, setRepoId] = React.useState("");
   const [branch, setBranch] = React.useState("");
   const [onboardLoading, setOnboardLoading] = React.useState(false);
+
+  // Repo settings edit dialog state
+  const [repoEditor, setRepoEditor] = React.useState<RepoConfigEditorState | null>(null);
+  const [savingRepo, setSavingRepo] = React.useState(false);
 
   // Policy create/edit dialog state
   const [editor, setEditor] = React.useState<PolicyEditorState | null>(null);
@@ -122,6 +139,76 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
       toast.error(err.message);
     } finally {
       setOnboardLoading(false);
+    }
+  };
+
+  const openRepoConfigEditor = (r: RepositoryItem) => {
+    setRepoEditor({
+      repoId: r.repo_id,
+      defaultBaseBranch: r.default_base_branch || "main",
+      pytestCmdText: (r.pytest_cmd ?? []).join(" "),
+      lintCmdText: (r.lint_cmd ?? []).join(" "),
+      defaultJiraProject: r.default_jira_project || "",
+    });
+  };
+
+  const handleSaveRepoConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!repoEditor) return;
+    const pytestParts = repoEditor.pytestCmdText
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+    if (pytestParts.length === 0) {
+      toast.error("测试门禁命令不能为空");
+      return;
+    }
+    const lintParts = repoEditor.lintCmdText
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+
+    setSavingRepo(true);
+    try {
+      await apiFetch(`/api/repositories/${encodeURIComponent(repoEditor.repoId)}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          default_base_branch: repoEditor.defaultBaseBranch.trim() || "main",
+          pytest_cmd: pytestParts,
+          lint_cmd: lintParts,
+          default_jira_project: repoEditor.defaultJiraProject.trim().toUpperCase(),
+        }),
+      });
+      toast.success(`已更新仓库 ${repoEditor.repoId} 的基线与测试门禁配置`);
+      setRepoEditor(null);
+      await onRefresh();
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setSavingRepo(false);
+    }
+  };
+
+  const handleUnbindRepo = async (r: RepositoryItem) => {
+    if (
+      !window.confirm(
+        `确认从控制台解绑仓库「${r.repo_id}」吗？\n\n注：仅移除控制台托管配置与规则，不会删除宿主机目录 ${r.local_path} 中的任何代码。`
+      )
+    ) {
+      return;
+    }
+    const key = `unbind:${r.repo_id}`;
+    setBusyKey(key);
+    try {
+      await apiFetch(`/api/repositories/${encodeURIComponent(r.repo_id)}`, {
+        method: "DELETE",
+      });
+      toast.success(`已解绑仓库 ${r.repo_id}`);
+      await onRefresh();
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setBusyKey(null);
     }
   };
 
@@ -271,7 +358,7 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
       if (res.added > 0) {
         toast.success(`已从仓库 .ai/DECISIONS.yaml 增量导入 ${res.added} 条新规则`);
       } else {
-        toast.info("仓库内置 .ai/DECISIONS.yaml 暂无新增规则");
+        toast.info("仓库内置 .ai/DECISIONS.yaml 暂无新增工程规则");
       }
       await onRefresh();
     } catch (err: any) {
@@ -282,31 +369,41 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
-            受管代码仓库与研发工程红线
-          </h2>
+          <div className="flex items-center gap-2">
+            <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
+              代码仓库与研发工程规范
+            </h2>
+            <button
+              type="button"
+              onClick={() => setShowHelp((v) => !v)}
+              className="inline-flex items-center gap-1 rounded-md border border-zinc-200 dark:border-zinc-800 px-2 py-0.5 text-[11px] text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200 cursor-pointer"
+            >
+              <HelpCircle className="h-3 w-3" />
+              {showHelp ? "收起说明" : "运作机制"}
+            </button>
+          </div>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-            仅托管代码架构禁令、安全规范、构建/CI 必跑命令与代码质量要求（产品功能需求归工单与单测管理） · 独立存库零侵入业务代码
+            管理受控 Git 仓库、测试/Lint 门禁命令与纯研发工程红线（产品需求请通过工单派发）
           </p>
         </div>
 
         <Dialog open={onboardOpen} onOpenChange={setOnboardOpen}>
           <DialogTrigger asChild>
-            <Button variant="primary" size="lg">
+            <Button variant="primary">
               <Plus className="h-4 w-4" />
               接入新代码仓库
             </Button>
           </DialogTrigger>
           <DialogContent>
             <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
-              一键接入新业务仓库 (Auto-Onboarding)
+              接入业务代码仓库
             </h3>
             <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-              支持填入 GitHub <code className="font-mono">owner/repo</code>、SSH/HTTPS 克隆地址或宿主机本地目录，自动探测 Python / Node / Go 测试运行器。
+              支持 GitHub <code className="font-mono">owner/repo</code>、SSH/HTTPS 克隆地址或宿主机本地目录，自动探测测试运行器。
             </p>
             <form onSubmit={handleOnboard} className="mt-4 space-y-3.5">
               <div>
@@ -368,341 +465,486 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
         </Dialog>
       </div>
 
-      {/* Closed-loop Governance Explanation Banner */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-        <div className="rounded-xl border border-zinc-200/80 bg-white/90 p-3.5 dark:border-zinc-800/80 dark:bg-zinc-900/50">
-          <div className="text-xs font-semibold text-zinc-800 dark:text-zinc-100">
-            1. 规则从哪来？
+      {/* On-demand Help Panel (hidden by default so screen stays clean) */}
+      {showHelp && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 animate-in fade-in">
+          <div className="rounded-xl border border-zinc-200/80 bg-white/90 p-3.5 dark:border-zinc-800/80 dark:bg-zinc-900/50 text-xs">
+            <div className="font-semibold text-zinc-800 dark:text-zinc-100">1. 零侵入独立托管</div>
+            <p className="mt-1 text-[11.5px] text-zinc-500 dark:text-zinc-400">
+              规则存储在数字员工本地 SQLite 数据库中，标明来源与维护人，不污染业务代码仓库。
+            </p>
           </div>
-          <p className="mt-1 text-[11.5px] leading-relaxed text-zinc-500 dark:text-zinc-400">
-            支持<span className="font-medium text-zinc-700 dark:text-zinc-200">本页直接创建</span>、<span className="font-medium text-zinc-700 dark:text-zinc-200">任务抽屉复盘沉淀</span>及<span className="font-medium text-zinc-700 dark:text-zinc-200">仓库内置导入</span>，独立存库不污染业务代码。
-          </p>
-        </div>
-        <div className="rounded-xl border border-zinc-200/80 bg-white/90 p-3.5 dark:border-zinc-800/80 dark:bg-zinc-900/50">
-          <div className="text-xs font-semibold text-zinc-800 dark:text-zinc-100">
-            2. 谁来维护与更新？
+          <div className="rounded-xl border border-zinc-200/80 bg-white/90 p-3.5 dark:border-zinc-800/80 dark:bg-zinc-900/50 text-xs">
+            <div className="font-semibold text-zinc-800 dark:text-zinc-100">2. 只管工程不管需求</div>
+            <p className="mt-1 text-[11.5px] text-zinc-500 dark:text-zinc-400">
+              仅收录依赖分层禁令、安全规范、本地构建/CI 必跑命令与代码质量规范。
+            </p>
           </div>
-          <p className="mt-1 text-[11.5px] leading-relaxed text-zinc-500 dark:text-zinc-400">
-            每条规则绑定<span className="font-medium text-zinc-700 dark:text-zinc-200">维护人</span>与<span className="font-medium text-zinc-700 dark:text-zinc-200">核验日期</span>；人类可随时增删改停，AI 运行时严禁篡改规则。
-          </p>
-        </div>
-        <div className="rounded-xl border border-zinc-200/80 bg-white/90 p-3.5 dark:border-zinc-800/80 dark:bg-zinc-900/50">
-          <div className="text-xs font-semibold text-zinc-800 dark:text-zinc-100">
-            3. 怎么确保规则没过期？
+          <div className="rounded-xl border border-zinc-200/80 bg-white/90 p-3.5 dark:border-zinc-800/80 dark:bg-zinc-900/50 text-xs">
+            <div className="font-semibold text-zinc-800 dark:text-zinc-100">3. 路径失效自动熔断</div>
+            <p className="mt-1 text-[11.5px] text-zinc-500 dark:text-zinc-400">
+              实时校验作用目录与引用脚本在仓库中是否存在；代码重构后旧规则自动熔断停止注入 AI。
+            </p>
           </div>
-          <p className="mt-1 text-[11.5px] leading-relaxed text-zinc-500 dark:text-zinc-400">
-            系统实时核对<span className="font-medium text-zinc-700 dark:text-zinc-200">作用目录与引用脚本</span>在仓库中是否存在；一旦重构失效<span className="font-medium text-rose-600 dark:text-rose-400">自动熔断停用</span>，绝不误导 AI。
-          </p>
-        </div>
-        <div className="rounded-xl border border-zinc-200/80 bg-white/90 p-3.5 dark:border-zinc-800/80 dark:bg-zinc-900/50">
-          <div className="text-xs font-semibold text-zinc-800 dark:text-zinc-100">
-            4. 如何约束编码与审查？
+          <div className="rounded-xl border border-zinc-200/80 bg-white/90 p-3.5 dark:border-zinc-800/80 dark:bg-zinc-900/50 text-xs">
+            <div className="font-semibold text-zinc-800 dark:text-zinc-100">4. 编码+审查双门禁</div>
+            <p className="mt-1 text-[11.5px] text-zinc-500 dark:text-zinc-400">
+              有效规则按修改文件匹配注入编码内核，并在 PR 审查阶段由异构审查模型逐条验真。
+            </p>
           </div>
-          <p className="mt-1 text-[11.5px] leading-relaxed text-zinc-500 dark:text-zinc-400">
-            仅<span className="font-medium text-emerald-600 dark:text-emerald-400">生效且路径健康</span>的规则按目录匹配注入编码内核，并在 PR 阶段由独立审查模型逐条验真。
-          </p>
         </div>
-      </div>
+      )}
 
-      {/* Repository Cards */}
-      <div className="grid gap-5">
-        {repos.map((r) => {
-          const allPolicies = r.policies ?? r.active_policies ?? [];
-          const activeCount =
-            r.policy_summary?.active_effective ??
-            allPolicies.filter((p) => p.effective_for_ai !== false && p.status === "APPROVED_POLICY").length;
-          const pausedCount =
-            r.policy_summary?.paused ??
-            allPolicies.filter((p) => p.status !== "APPROVED_POLICY").length;
-          const unhealthyCount =
-            r.policy_summary?.unhealthy ??
-            allPolicies.filter((p) => p.health_status && p.health_status !== "HEALTHY").length;
+      {/* Empty state if 0 repos */}
+      {repos.length === 0 ? (
+        <SurfaceCard className="p-12 text-center space-y-3">
+          <FolderGit2 className="h-8 w-8 mx-auto text-zinc-400" />
+          <div className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
+            尚未接入任何业务代码仓库
+          </div>
+          <p className="text-xs text-zinc-500 max-w-md mx-auto">
+            点击右上角「接入新代码仓库」填入本地 Git 仓库路径或 GitHub 地址，即可开始派发编码任务。
+          </p>
+        </SurfaceCard>
+      ) : (
+        <div className="grid gap-5">
+          {repos.map((r) => {
+            const allPolicies = r.policies ?? r.active_policies ?? [];
+            const activeCount =
+              r.policy_summary?.active_effective ??
+              allPolicies.filter(
+                (p) => p.effective_for_ai !== false && p.status === "APPROVED_POLICY"
+              ).length;
+            const pausedCount =
+              r.policy_summary?.paused ??
+              allPolicies.filter((p) => p.status !== "APPROVED_POLICY").length;
+            const unhealthyCount =
+              r.policy_summary?.unhealthy ??
+              allPolicies.filter(
+                (p) => p.health_status && p.health_status !== "HEALTHY"
+              ).length;
 
-          return (
-            <SurfaceCard key={r.repo_id} className="p-5 space-y-4">
-              {/* Repo Top Metadata */}
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400">
-                    <FolderGit2 className="h-5 w-5" />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-                        {r.repo_id}
-                      </span>
-                      <span className="inline-flex items-center gap-1 rounded-md bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 font-mono text-[11px] text-zinc-600 dark:text-zinc-300">
-                        <GitBranch className="h-3 w-3" />
-                        {r.default_base_branch}
-                      </span>
+            return (
+              <SurfaceCard key={r.repo_id} className="p-5 space-y-4">
+                {/* Repo Top Metadata & Config Controls */}
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400">
+                      <FolderGit2 className="h-5 w-5" />
                     </div>
-                    <div className="text-xs text-zinc-500 mt-0.5">
-                      {r.github_repo} · <code className="text-[11px]">{r.local_path}</code>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-3 py-1.5 font-mono text-[11px] text-zinc-600 dark:text-zinc-400">
-                  <Terminal className="h-3.5 w-3.5 text-zinc-400" />
-                  {r.pytest_cmd.join(" ")}
-                </div>
-              </div>
-
-              {/* Governance Ledger Panel */}
-              <div className="rounded-xl border border-zinc-200/70 dark:border-zinc-800/80 bg-zinc-50/60 dark:bg-zinc-950/50 p-4 space-y-3.5">
-                <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-zinc-200/70 dark:border-zinc-800/80">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="flex items-center gap-1.5 text-xs font-semibold text-zinc-800 dark:text-zinc-200">
-                      <BookMarked className="h-3.5 w-3.5 text-teal-500" />
-                      研发工程红线与构建避坑规范
-                    </span>
-                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
-                      <ShieldCheck className="h-3 w-3" />
-                      {activeCount} 条向 AI 生效
-                    </span>
-                    {unhealthyCount > 0 && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-300">
-                        <AlertTriangle className="h-3 w-3" />
-                        {unhealthyCount} 条需复核/失效
-                      </span>
-                    )}
-                    {pausedCount > 0 && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-zinc-500/10 px-2 py-0.5 text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
-                        {pausedCount} 条已停用
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={busyKey === `sync:${r.repo_id}`}
-                      onClick={() => handleSyncRepoPolicies(r.repo_id)}
-                      title="从仓库本地 .ai/DECISIONS.yaml 增量导入尚未收录的新规则（不会覆盖控制台已有修改）"
-                    >
-                      <RefreshCw
-                        className={cn(
-                          "h-3 w-3",
-                          busyKey === `sync:${r.repo_id}` && "animate-spin"
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                          {r.repo_id}
+                        </span>
+                        <span className="inline-flex items-center gap-1 rounded-md bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 font-mono text-[11px] text-zinc-600 dark:text-zinc-300">
+                          <GitBranch className="h-3 w-3" />
+                          默认分支: {r.default_base_branch}
+                        </span>
+                        {r.default_jira_project && (
+                          <span className="inline-flex items-center rounded-md bg-indigo-500/10 px-2 py-0.5 font-mono text-[11px] text-indigo-600 dark:text-indigo-300">
+                            Jira: {r.default_jira_project}
+                          </span>
                         )}
-                      />
-                      同步仓库文件
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="primary"
-                      size="sm"
-                      onClick={() => openCreatePolicy(r.repo_id)}
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                      新增规则
-                    </Button>
+                      </div>
+                      <div className="text-xs text-zinc-500 mt-0.5">
+                        {r.github_repo ? `${r.github_repo} · ` : ""}
+                        <code className="text-[11px]">{r.local_path}</code>
+                      </div>
+                    </div>
                   </div>
-                </div>
 
-                {allPolicies.length === 0 ? (
-                  <div className="py-6 text-center space-y-2">
-                    <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                      当前仓库尚未配置任何专属治理规则，AI 将默认遵循仓库现有代码与单测规范。
-                    </p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200/80 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 px-2.5 py-1 font-mono text-[11px] text-zinc-600 dark:text-zinc-400 max-w-md truncate"
+                      title={r.pytest_cmd.join(" ")}
+                    >
+                      <Terminal className="h-3.5 w-3.5 text-zinc-400 shrink-0" />
+                      <span className="truncate">{r.pytest_cmd.join(" ")}</span>
+                    </div>
+
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
-                      onClick={() => openCreatePolicy(r.repo_id)}
+                      onClick={() => openRepoConfigEditor(r)}
+                      title="修改默认分支、测试运行器命令、Lint 命令或默认 Jira 项目"
                     >
-                      <Plus className="h-3.5 w-3.5" />
-                      添加第一条研发工程红线
+                      <Settings2 className="h-3.5 w-3.5" />
+                      配置仓库
+                    </Button>
+
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="text-zinc-500 hover:text-rose-600 dark:hover:text-rose-400"
+                      disabled={busyKey === `unbind:${r.repo_id}`}
+                      onClick={() => handleUnbindRepo(r)}
+                      title="从控制台解绑此仓库（不删除宿主机代码）"
+                    >
+                      <Unplug className="h-3.5 w-3.5" />
+                      解绑
                     </Button>
                   </div>
-                ) : (
-                  <div className="space-y-2.5">
-                    {allPolicies.map((p) => {
-                      const catKey = (
-                        p.category in CATEGORY_META ? p.category : "CODE_QUALITY"
-                      ) as PolicyCategory;
-                      const catMeta = CATEGORY_META[catKey];
-                      const isActive = p.status === "APPROVED_POLICY";
-                      const isInvalidScope = p.health_status === "INVALID_SCOPE";
-                      const isWarn =
-                        p.health_status === "WARN_STALE_REF" ||
-                        p.health_status === "WARN_NEEDS_REVIEW";
-                      const effective = isActive && !isInvalidScope;
+                </div>
 
-                      return (
-                        <div
-                          key={p.id}
+                {/* Governance Ledger Panel */}
+                <div className="rounded-xl border border-zinc-200/70 dark:border-zinc-800/80 bg-zinc-50/60 dark:bg-zinc-950/50 p-4 space-y-3.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-zinc-200/70 dark:border-zinc-800/80">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="flex items-center gap-1.5 text-xs font-semibold text-zinc-800 dark:text-zinc-200">
+                        <BookMarked className="h-3.5 w-3.5 text-teal-500" />
+                        研发工程红线与构建避坑规范
+                      </span>
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
+                        <ShieldCheck className="h-3 w-3" />
+                        {activeCount} 条生效
+                      </span>
+                      {unhealthyCount > 0 && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-300">
+                          <AlertTriangle className="h-3 w-3" />
+                          {unhealthyCount} 条路径异常/待复核
+                        </span>
+                      )}
+                      {pausedCount > 0 && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-zinc-500/10 px-2 py-0.5 text-[11px] font-medium text-zinc-600 dark:text-zinc-400">
+                          {pausedCount} 条已停用
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={busyKey === `sync:${r.repo_id}`}
+                        onClick={() => handleSyncRepoPolicies(r.repo_id)}
+                        title="从仓库本地 .ai/DECISIONS.yaml 增量导入新规则（不覆盖已有修改）"
+                      >
+                        <RefreshCw
                           className={cn(
-                            "rounded-lg border p-3.5 transition-colors space-y-2",
-                            !isActive
-                              ? "border-zinc-200/60 bg-zinc-100/50 opacity-75 dark:border-zinc-800/60 dark:bg-zinc-900/30"
-                              : isInvalidScope
-                                ? "border-rose-300/80 bg-rose-50/40 dark:border-rose-900/70 dark:bg-rose-950/20"
-                                : isWarn
-                                  ? "border-amber-300/80 bg-amber-50/30 dark:border-amber-900/60 dark:bg-amber-950/15"
-                                  : "border-zinc-200/80 bg-white dark:border-zinc-800/80 dark:bg-zinc-900/70"
+                            "h-3 w-3",
+                            busyKey === `sync:${r.repo_id}` && "animate-spin"
                           )}
-                        >
-                          {/* Top Row: Category + Title + ID + AI Status + Actions */}
-                          <div className="flex flex-wrap items-start justify-between gap-2">
-                            <div className="flex flex-wrap items-center gap-2 min-w-0">
-                              <span
-                                className={cn(
-                                  "inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-semibold ring-1 ring-inset",
-                                  catMeta.badgeClass
+                        />
+                        同步仓库文件
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="primary"
+                        size="sm"
+                        onClick={() => openCreatePolicy(r.repo_id)}
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        新增规则
+                      </Button>
+                    </div>
+                  </div>
+
+                  {allPolicies.length === 0 ? (
+                    <div className="py-5 text-center space-y-2">
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                        暂无额外工程红线，AI 默认遵守仓库现有代码结构与测试套件。
+                      </p>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => openCreatePolicy(r.repo_id)}
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        添加第一条研发工程红线
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5">
+                      {allPolicies.map((p) => {
+                        const catKey = (
+                          p.category in CATEGORY_META ? p.category : "CODE_QUALITY"
+                        ) as PolicyCategory;
+                        const catMeta = CATEGORY_META[catKey];
+                        const isActive = p.status === "APPROVED_POLICY";
+                        const isInvalidScope = p.health_status === "INVALID_SCOPE";
+                        const isWarn =
+                          p.health_status === "WARN_STALE_REF" ||
+                          p.health_status === "WARN_NEEDS_REVIEW";
+                        const effective = isActive && !isInvalidScope;
+
+                        return (
+                          <div
+                            key={p.id}
+                            className={cn(
+                              "rounded-lg border p-3.5 transition-colors space-y-2",
+                              !isActive
+                                ? "border-zinc-200/60 bg-zinc-100/50 opacity-75 dark:border-zinc-800/60 dark:bg-zinc-900/30"
+                                : isInvalidScope
+                                  ? "border-rose-300/80 bg-rose-50/40 dark:border-rose-900/70 dark:bg-rose-950/20"
+                                  : isWarn
+                                    ? "border-amber-300/80 bg-amber-50/30 dark:border-amber-900/60 dark:bg-amber-950/15"
+                                    : "border-zinc-200/80 bg-white dark:border-zinc-800/80 dark:bg-zinc-900/70"
+                            )}
+                          >
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div className="flex flex-wrap items-center gap-2 min-w-0">
+                                <span
+                                  className={cn(
+                                    "inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-semibold ring-1 ring-inset",
+                                    catMeta.badgeClass
+                                  )}
+                                >
+                                  {catMeta.label}
+                                </span>
+                                <span className="text-xs sm:text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">
+                                  {p.title || p.rule}
+                                </span>
+                                <span className="rounded bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 font-mono text-[10.5px] text-zinc-500 dark:text-zinc-400">
+                                  {p.id}
+                                </span>
+
+                                {effective ? (
+                                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10.5px] font-medium text-emerald-700 dark:text-emerald-300">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                                    生效中
+                                  </span>
+                                ) : !isActive ? (
+                                  <span className="inline-flex items-center gap-1 rounded-full bg-zinc-500/15 px-2 py-0.5 text-[10.5px] font-medium text-zinc-600 dark:text-zinc-400">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-zinc-400" />
+                                    已停用
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 rounded-full bg-rose-500/15 px-2 py-0.5 text-[10.5px] font-semibold text-rose-700 dark:text-rose-300">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-rose-500" />
+                                    已自动熔断（路径不存在）
+                                  </span>
                                 )}
-                              >
-                                {catMeta.label}
-                              </span>
-                              <span className="text-xs sm:text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">
-                                {p.title || p.rule}
-                              </span>
-                              <span className="rounded bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 font-mono text-[10.5px] text-zinc-500 dark:text-zinc-400">
-                                {p.id}
-                              </span>
+                              </div>
 
-                              {effective ? (
-                                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10.5px] font-medium text-emerald-700 dark:text-emerald-300">
-                                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                                  向 AI 生效中
-                                </span>
-                              ) : !isActive ? (
-                                <span className="inline-flex items-center gap-1 rounded-full bg-zinc-500/15 px-2 py-0.5 text-[10.5px] font-medium text-zinc-600 dark:text-zinc-400">
-                                  <span className="h-1.5 w-1.5 rounded-full bg-zinc-400" />
-                                  已停用（不注入 AI）
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center gap-1 rounded-full bg-rose-500/15 px-2 py-0.5 text-[10.5px] font-semibold text-rose-700 dark:text-rose-300">
-                                  <span className="h-1.5 w-1.5 rounded-full bg-rose-500" />
-                                  已自动熔断（路径不存在）
-                                </span>
-                              )}
-                            </div>
-
-                            {/* Action Buttons */}
-                            <div className="flex items-center gap-1 shrink-0">
-                              {(isWarn || isInvalidScope) && (
+                              <div className="flex items-center gap-1 shrink-0">
+                                {(isWarn || isInvalidScope) && (
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    disabled={busyKey === `verify:${r.repo_id}:${p.id}`}
+                                    onClick={() => handleVerifyPolicy(r.repo_id, p)}
+                                  >
+                                    <CheckCircle2 className="h-3 w-3 text-emerald-600" />
+                                    确认有效
+                                  </Button>
+                                )}
                                 <Button
                                   type="button"
-                                  variant="outline"
+                                  variant="ghost"
                                   size="sm"
-                                  disabled={busyKey === `verify:${r.repo_id}:${p.id}`}
-                                  onClick={() => handleVerifyPolicy(r.repo_id, p)}
-                                  title="人工复核确认该规则有效并刷新核验日期"
+                                  onClick={() => openEditPolicy(r.repo_id, p)}
                                 >
-                                  <CheckCircle2 className="h-3 w-3 text-emerald-600" />
-                                  确认有效
+                                  <Edit3 className="h-3.5 w-3.5" />
+                                  编辑
                                 </Button>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  disabled={busyKey === `toggle:${r.repo_id}:${p.id}`}
+                                  onClick={() => handleTogglePolicy(r.repo_id, p)}
+                                >
+                                  {isActive ? (
+                                    <>
+                                      <PauseCircle className="h-3.5 w-3.5 text-amber-500" />
+                                      停用
+                                    </>
+                                  ) : (
+                                    <>
+                                      <PlayCircle className="h-3.5 w-3.5 text-emerald-500" />
+                                      启用
+                                    </>
+                                  )}
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  className="text-rose-600 hover:text-rose-700 dark:text-rose-400"
+                                  disabled={busyKey === `del:${r.repo_id}:${p.id}`}
+                                  onClick={() => handleDeletePolicy(r.repo_id, p)}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </Button>
+                              </div>
+                            </div>
+
+                            <div className="space-y-1 text-xs">
+                              <p className="text-zinc-800 dark:text-zinc-200 leading-relaxed">
+                                <span className="font-medium text-zinc-500 dark:text-zinc-400">
+                                  工程约束：
+                                </span>
+                                {p.rule}
+                              </p>
+                              {p.reason && (
+                                <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                                  <span className="font-medium">原因：</span>
+                                  {p.reason}
+                                </p>
                               )}
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => openEditPolicy(r.repo_id, p)}
-                                title="编辑规则内容、作用目录或维护人"
-                              >
-                                <Edit3 className="h-3.5 w-3.5" />
-                                编辑
-                              </Button>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                disabled={busyKey === `toggle:${r.repo_id}:${p.id}`}
-                                onClick={() => handleTogglePolicy(r.repo_id, p)}
-                                title={isActive ? "暂时停用该规则" : "重新启用该规则"}
-                              >
-                                {isActive ? (
-                                  <>
-                                    <PauseCircle className="h-3.5 w-3.5 text-amber-500" />
-                                    停用
-                                  </>
-                                ) : (
-                                  <>
-                                    <PlayCircle className="h-3.5 w-3.5 text-emerald-500" />
-                                    启用
-                                  </>
-                                )}
-                              </Button>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                className="text-rose-600 hover:text-rose-700 dark:text-rose-400"
-                                disabled={busyKey === `del:${r.repo_id}:${p.id}`}
-                                onClick={() => handleDeletePolicy(r.repo_id, p)}
-                                title="永久删除此规则"
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </Button>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 pt-1.5 border-t border-zinc-100 dark:border-zinc-800/70 text-[11px] text-zinc-500 dark:text-zinc-400">
+                              <span className="inline-flex items-center gap-1">
+                                <span>范围:</span>
+                                <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 font-mono text-zinc-700 dark:text-zinc-300">
+                                  {p.scope || "*"}
+                                </code>
+                              </span>
+
+                              {p.health_status === "INVALID_SCOPE" ? (
+                                <span className="inline-flex items-center gap-1 font-medium text-rose-600 dark:text-rose-400">
+                                  <ShieldAlert className="h-3.5 w-3.5" />
+                                  {p.health_message}
+                                </span>
+                              ) : isWarn ? (
+                                <span className="inline-flex items-center gap-1 font-medium text-amber-600 dark:text-amber-400">
+                                  <AlertTriangle className="h-3.5 w-3.5" />
+                                  {p.health_message}
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+                                  <CheckCircle2 className="h-3.5 w-3.5" />
+                                  {p.health_message || "路径校验通过"}
+                                </span>
+                              )}
+
+                              <span>来源: {renderSourceLabel(p)}</span>
+
+                              <span className="inline-flex items-center gap-1 ml-auto">
+                                <UserCheck className="h-3 w-3 text-zinc-400" />
+                                {p.owner || "jamesyang"} · 核验于 {p.verified_at?.slice(0, 10) || "今日"}
+                              </span>
                             </div>
                           </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </SurfaceCard>
+            );
+          })}
+        </div>
+      )}
 
-                          {/* Middle Row: Rule & Why */}
-                          <div className="space-y-1 text-xs">
-                            <p className="text-zinc-800 dark:text-zinc-200 leading-relaxed">
-                              <span className="font-medium text-zinc-500 dark:text-zinc-400">
-                                强制约束：
-                              </span>
-                              {p.rule}
-                            </p>
-                            {p.reason && (
-                              <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
-                                <span className="font-medium">制定原因：</span>
-                                {p.reason}
-                              </p>
-                            )}
-                          </div>
+      {/* Edit Repository Config Modal */}
+      <Dialog
+        open={repoEditor !== null}
+        onOpenChange={(open) => {
+          if (!open) setRepoEditor(null);
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          {repoEditor && (
+            <>
+              <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+                配置仓库门禁与基线 · {repoEditor.repoId}
+              </h3>
+              <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                调整默认基线分支、沙箱 <code className="font-mono">Fail-to-Pass</code> 测试运行器命令、静态检查命令及默认关联的 Jira Project。
+              </p>
 
-                          {/* Bottom Row: Scope + Health Audit + Provenance + Owner */}
-                          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 pt-1.5 border-t border-zinc-100 dark:border-zinc-800/70 text-[11px] text-zinc-500 dark:text-zinc-400">
-                            <span className="inline-flex items-center gap-1">
-                              <span>作用范围:</span>
-                              <code className="rounded bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 font-mono text-zinc-700 dark:text-zinc-300">
-                                {p.scope || "*"}
-                              </code>
-                            </span>
-
-                            {p.health_status === "INVALID_SCOPE" ? (
-                              <span className="inline-flex items-center gap-1 font-medium text-rose-600 dark:text-rose-400">
-                                <ShieldAlert className="h-3.5 w-3.5" />
-                                {p.health_message}
-                              </span>
-                            ) : isWarn ? (
-                              <span className="inline-flex items-center gap-1 font-medium text-amber-600 dark:text-amber-400">
-                                <AlertTriangle className="h-3.5 w-3.5" />
-                                {p.health_message}
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
-                                <CheckCircle2 className="h-3.5 w-3.5" />
-                                {p.health_message || "路径校验通过"}
-                              </span>
-                            )}
-
-                            <span>来源: {renderSourceLabel(p)}</span>
-
-                            <span className="inline-flex items-center gap-1 ml-auto">
-                              <UserCheck className="h-3 w-3 text-zinc-400" />
-                              维护人:{" "}
-                              <strong className="font-medium text-zinc-700 dark:text-zinc-300">
-                                {p.owner || "jamesyang"}
-                              </strong>
-                              <span>· 核验于 {p.verified_at?.slice(0, 10) || "今日"}</span>
-                            </span>
-                          </div>
-                        </div>
-                      );
-                    })}
+              <form onSubmit={handleSaveRepoConfig} className="mt-4 space-y-3.5 text-xs">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                      默认基线分支 *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={repoEditor.defaultBaseBranch}
+                      onChange={(e) =>
+                        setRepoEditor({
+                          ...repoEditor,
+                          defaultBaseBranch: e.target.value,
+                        })
+                      }
+                      placeholder="main / dev"
+                      className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-3 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-950"
+                    />
                   </div>
-                )}
-              </div>
-            </SurfaceCard>
-          );
-        })}
-      </div>
+                  <div>
+                    <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                      默认关联 Jira Project (可选)
+                    </label>
+                    <input
+                      type="text"
+                      value={repoEditor.defaultJiraProject}
+                      onChange={(e) =>
+                        setRepoEditor({
+                          ...repoEditor,
+                          defaultJiraProject: e.target.value.toUpperCase(),
+                        })
+                      }
+                      placeholder="如 KAN / RAG"
+                      className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-3 font-mono text-xs uppercase dark:border-zinc-800 dark:bg-zinc-950"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                    单元测试门禁命令 (Test Runner) *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={repoEditor.pytestCmdText}
+                    onChange={(e) =>
+                      setRepoEditor({
+                        ...repoEditor,
+                        pytestCmdText: e.target.value,
+                      })
+                    }
+                    placeholder="/path/to/.venv/bin/python -m pytest"
+                    className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-3 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-950"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                    静态代码检查命令 (Linter · 可选)
+                  </label>
+                  <input
+                    type="text"
+                    value={repoEditor.lintCmdText}
+                    onChange={(e) =>
+                      setRepoEditor({
+                        ...repoEditor,
+                        lintCmdText: e.target.value,
+                      })
+                    }
+                    placeholder="留空则跳过；例如 .venv/bin/ruff check"
+                    className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-3 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-950"
+                  />
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setRepoEditor(null)}
+                  >
+                    取消
+                  </Button>
+                  <Button type="submit" variant="primary" disabled={savingRepo}>
+                    {savingRepo && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    保存仓库配置
+                  </Button>
+                </div>
+              </form>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* Create / Edit Policy Modal */}
       <Dialog
@@ -716,11 +958,11 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
             <>
               <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
                 {editor.mode === "create"
-                  ? `新增仓库治理规则 · ${editor.repoId}`
-                  : `编辑治理规则 · ${editor.policyId}`}
+                  ? `新增研发工程红线 · ${editor.repoId}`
+                  : `编辑研发工程红线 · ${editor.policyId}`}
               </h3>
               <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                保存后系统将立即自动核验作用目录与引用文件在 <code className="font-mono">{editor.repoId}</code> 仓库中是否真实存在。
+                保存后系统立即自动核验作用目录与引用文件在 <code className="font-mono">{editor.repoId}</code> 中是否存在。
               </p>
 
               <form onSubmit={handleSavePolicy} className="mt-4 space-y-3.5">
@@ -736,13 +978,13 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
                       onChange={(e) =>
                         setEditor({ ...editor, title: e.target.value })
                       }
-                      placeholder="例如：架构分层：禁止在线模块导入 legacy 目录"
+                      placeholder="例如：模块依赖禁令：禁止在线代码 import legacy 目录"
                       className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-3 text-xs dark:border-zinc-800 dark:bg-zinc-950"
                     />
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
-                      规则分类
+                      工程分类
                     </label>
                     <select
                       value={editor.category}
@@ -797,7 +1039,7 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
 
                 <div>
                   <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
-                    具体执行约束（AI 编码与 Code Review 必须遵守的硬要求）*
+                    代码/构建级硬性约束 *
                   </label>
                   <textarea
                     required
@@ -806,14 +1048,14 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
                     onChange={(e) =>
                       setEditor({ ...editor, rule: e.target.value })
                     }
-                    placeholder="用清晰直白的人话写明：修改该目录代码时必须做什么、严禁做什么..."
+                    placeholder="请写明具体的代码、依赖或提交前必跑命令要求（请勿在此处填写产品业务需求）..."
                     className="w-full rounded-lg border border-zinc-200 bg-white p-3 text-xs leading-relaxed dark:border-zinc-800 dark:bg-zinc-950"
                   />
                 </div>
 
                 <div>
                   <label className="block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1">
-                    制定原因 / 背景（方便后续团队判断该规则何时可以废弃）
+                    制定原因（方便团队后续判断是否仍需保留）
                   </label>
                   <input
                     type="text"
@@ -821,7 +1063,7 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
                     onChange={(e) =>
                       setEditor({ ...editor, reason: e.target.value })
                     }
-                    placeholder="例如：线上 CI 会校验测试统计数，漏跑脚本会导致 PR 被阻断"
+                    placeholder="例如：线上 CI 会运行 --check 校验测试统计数，漏跑会导致流水线报错"
                     className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-3 text-xs dark:border-zinc-800 dark:bg-zinc-950"
                   />
                 </div>

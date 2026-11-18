@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
@@ -160,18 +161,70 @@ class DurableStore:
         self,
         *,
         status: str | None = None,
+        target_repo: str | None = None,
+        search_query: str | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[DurableTaskState]:
         query = "SELECT state_json FROM tasks"
+        clauses: list[str] = []
         params: list[Any] = []
         if status:
-            query += " WHERE lifecycle_status = ?"
+            clauses.append("lifecycle_status = ?")
             params.append(status)
-        query += " ORDER BY updated_at DESC LIMIT ?"
-        params.append(limit)
+        if target_repo:
+            clauses.append("target_repo = ?")
+            params.append(target_repo)
+        if search_query and search_query.strip():
+            like_val = f"%{search_query.strip()}%"
+            clauses.append("(task_id LIKE ? OR state_json LIKE ?)")
+            params.extend([like_val, like_val])
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, max(0, offset)])
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [DurableTaskState.model_validate_json(r["state_json"]) for r in rows]
+
+    def count_tasks(
+        self,
+        *,
+        status: str | None = None,
+        target_repo: str | None = None,
+        search_query: str | None = None,
+    ) -> int:
+        query = "SELECT COUNT(*) AS cnt FROM tasks"
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status:
+            clauses.append("lifecycle_status = ?")
+            params.append(status)
+        if target_repo:
+            clauses.append("target_repo = ?")
+            params.append(target_repo)
+        if search_query and search_query.strip():
+            like_val = f"%{search_query.strip()}%"
+            clauses.append("(task_id LIKE ? OR state_json LIKE ?)")
+            params.extend([like_val, like_val])
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        with self._connect() as conn:
+            row = conn.execute(query, params).fetchone()
+        return int(row["cnt"]) if row else 0
+
+    def delete_task(self, task_id: str) -> bool:
+        """Delete a task record, its checkpoints, idempotency entries, and local artifacts."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM checkpoints WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM idempotency_ledger WHERE task_id = ?", (task_id,))
+            cur = conn.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+        if cur.rowcount > 0:
+            tdir = self.artifacts_dir / task_id
+            if tdir.exists():
+                shutil.rmtree(tdir, ignore_errors=True)
+            return True
+        return False
 
     def list_checkpoints(self, task_id: str) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -392,6 +445,11 @@ class DurableStore:
                 (repo_id, policy_id),
             )
         return cur.rowcount > 0
+
+    def clear_repository_policies(self, repo_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM repository_policies WHERE repo_id = ?", (repo_id,))
+            conn.execute("DELETE FROM repository_policy_sync WHERE repo_id = ?", (repo_id,))
 
     def next_policy_id(self, repo_id: str) -> str:
         existing = self.list_repository_policies(repo_id)
