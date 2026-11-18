@@ -17,7 +17,7 @@ from digital_employee.kernel.permissions import PermissionMode
 
 def _fallback_config_from_settings():
     from digital_employee.kernel.config import AppConfig, MCPServerConfig, ProviderConfig
-    from digital_employee.settings import load_settings
+    from digital_employee.settings import PROJECT_ROOT, load_settings
 
     settings = load_settings()
     if not settings.llm_api_key and settings.inference_mode == "cloud_api":
@@ -37,17 +37,30 @@ def _fallback_config_from_settings():
         api_key=settings.llm_api_key,
         thinking=("reasoner" in lower_model or "r1" in lower_model),
     )
-    mcp_servers = (
-        [
+    mcp_servers: list[MCPServerConfig] = []
+    if settings.enable_ops_mcp:
+        mcp_servers.append(
             MCPServerConfig(
                 name="ops-diagnostics",
                 command=sys.executable,
                 args=["-m", "digital_employee.mcp_servers.ops_diagnostics"],
+                env={"PYTHONPATH": str(PROJECT_ROOT / "src")},
             )
-        ]
-        if settings.enable_ops_mcp
-        else []
-    )
+        )
+    if settings.enable_claude_mem:
+        mcp_servers.append(
+            MCPServerConfig(
+                name="claude-mem",
+                command=sys.executable,
+                args=["-m", "digital_employee.mcp_servers.claude_mem_mcp"],
+                env={
+                    "PYTHONPATH": str(PROJECT_ROOT / "src"),
+                    "DE_CLAUDE_MEM_DB_PATH": str(settings.claude_mem_db_path),
+                    "DE_CLAUDE_MEM_URL": settings.claude_mem_url,
+                    "DE_CLAUDE_MEM_DEFAULT_PROJECT": Path.cwd().name,
+                },
+            )
+        )
     return AppConfig(providers=[provider], mcp_servers=mcp_servers, enable_verification_agent=True)
 
 

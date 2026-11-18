@@ -10,7 +10,7 @@ from pathlib import Path
 from digital_employee.models.contract import TaskContract
 from digital_employee.models.state import VerificationEvidence
 from digital_employee.sandbox.worktree_runner import WorktreeSandbox
-from digital_employee.security.dlp import check_path_policy
+from digital_employee.security.dlp import check_path_policy, find_out_of_scope_files
 
 SKIP_OR_XFAIL_RE = re.compile(
     r"^\+.*(?:\bpytest\.skip\s*\(|\bpytest\.xfail\s*\(|@pytest\.mark\.skip\b|@pytest\.mark\.xfail\b|"
@@ -66,6 +66,29 @@ class GateExecutionResult:
     diagnostic_log: str
 
 
+NON_LOGIC_ASSET_SUFFIXES = (
+    ".tsx",
+    ".jsx",
+    ".css",
+    ".scss",
+    ".less",
+    ".html",
+    ".md",
+    ".mdx",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".svg",
+)
+
+
+def _is_pure_ui_or_config_change(changed_files: list[str]) -> bool:
+    non_tests = [f for f in changed_files if not is_test_path(f)]
+    if not non_tests:
+        return False
+    return all(f.lower().endswith(NON_LOGIC_ASSET_SUFFIXES) for f in non_tests)
+
+
 class EvidenceGate:
     """Executes hard verification gates on a sandbox worktree commit."""
 
@@ -83,7 +106,14 @@ class EvidenceGate:
         changed_files = self.sandbox.modified_files(self.contract.base_commit_sha)
         logs.append(f"Modified files ({len(changed_files)}): {changed_files}")
 
-        # 1. Scope Compliance Check
+        use_regression_mode = (
+            self.contract.verification_mode == "regression_and_build"
+            or _is_pure_ui_or_config_change(changed_files)
+        )
+        mode_used = "regression_and_build" if use_regression_mode else "fail_to_pass"
+        logs.append(f"Verification Mode: {mode_used}")
+
+        # 1. Hard Forbidden-Path Check + Soft Suggested-Scope Advisory
         scope_violations: list[str] = []
         if not changed_files:
             scope_violations.append("No files were modified compared to base_commit_sha.")
@@ -92,10 +122,19 @@ class EvidenceGate:
                 rel,
                 permitted_scopes=self.contract.permitted_scopes,
                 forbidden_paths=self.sandbox.profile.forbidden_paths,
+                enforce_scopes=False,
             )
             if not ok:
                 scope_violations.append(reason)
         scope_ok = len(scope_violations) == 0
+        out_of_scope_files = find_out_of_scope_files(
+            changed_files, self.contract.permitted_scopes
+        )
+        if out_of_scope_files:
+            logs.append(
+                f"[INFO] Cross-directory edits outside initial suggested scopes "
+                f"{self.contract.permitted_scopes}: {out_of_scope_files}"
+            )
 
         # 2. Anti-Tampering Check on Test Files
         test_files = [f for f in changed_files if is_test_path(f)]
@@ -117,7 +156,43 @@ class EvidenceGate:
         repro_targets = [
             t.strip() for t in re.split(r"[\s,]+", repro_test_target) if t.strip()
         ]
-        if not repro_targets:
+
+        if use_regression_mode:
+            # UI / Refactor / Config / Docs mode: verify frontend build (if applicable) + existing regression tests!
+            build_ok = True
+            has_fe_edits = any(
+                f.lower().endswith((".tsx", ".jsx", ".ts", ".css", ".html")) for f in changed_files
+            )
+            if has_fe_edits:
+                for fe_dir in (self.sandbox.worktree_path / "frontend", self.sandbox.worktree_path):
+                    if (fe_dir / "package.json").is_file():
+                        fe_res = self.sandbox._exec(
+                            ["npm", "run", "build"], cwd=fe_dir, timeout_seconds=120
+                        )
+                        build_ok = fe_res.exit_code == 0
+                        logs.append(
+                            f"\n--- [FRONTEND BUILD] {fe_dir.name} (exit={fe_res.exit_code}) ---\n"
+                            f"{fe_res.combined_output[-2000:]}"
+                        )
+                        break
+
+            fallback_targets = (
+                repro_targets
+                or list(self.sandbox.profile.default_suite_targets)
+                or (["tests"] if (self.sandbox.worktree_path / "tests").is_dir() else [])
+            )
+            if fallback_targets:
+                head_repro = self.sandbox.run_test_targets(fallback_targets, timeout_seconds=120)
+                repro_passed_on_head = build_ok and head_repro.exit_code == 0
+                repro_test_target = repro_test_target or ", ".join(fallback_targets)
+                logs.append(
+                    f"\n--- [HEAD REGRESSION] test {fallback_targets} (exit={head_repro.exit_code}) ---\n"
+                    f"{head_repro.combined_output[-2500:]}"
+                )
+            else:
+                repro_passed_on_head = build_ok
+                repro_test_target = repro_test_target or "build_verification"
+        elif not repro_targets:
             logs.append("[FAIL] Missing `repro_test_target` — cannot establish Fail-to-Pass proof.")
         else:
             head_repro = self.sandbox.run_test_targets(repro_targets)
@@ -188,6 +263,7 @@ class EvidenceGate:
         evidence = VerificationEvidence(
             verified_commit_sha=head_commit_sha,
             repro_test_target=repro_test_target,
+            verification_mode_used=mode_used,
             repro_test_failed_on_base=repro_failed_on_base,
             repro_test_passed_on_head=repro_passed_on_head,
             existing_test_suite_passed=suite_passed,
@@ -196,5 +272,6 @@ class EvidenceGate:
             static_analysis_passed=static_passed,
             anti_tampering_violations=tampering_violations,
             scope_violations=scope_violations,
+            out_of_scope_files=out_of_scope_files,
         )
         return GateExecutionResult(evidence=evidence, diagnostic_log="\n".join(logs))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -148,6 +149,19 @@ def markdown_to_adf(text: str) -> dict[str, Any]:
     return {"type": "doc", "version": 1, "content": blocks}
 
 
+BOT_COMMENT_PREFIXES = (
+    "🤖",
+    "🔎 GitHub PR",
+    "✅ GitHub PR",
+    "✅ 经沙箱独立单测验证",
+)
+
+
+def _is_self_bot_jira_comment(body_md: str) -> bool:
+    stripped = (body_md or "").strip()
+    return any(stripped.startswith(p) for p in BOT_COMMENT_PREFIXES)
+
+
 @dataclass
 class JiraIssueData:
     """Normalized authoritative Jira ticket fetched from Jira REST API."""
@@ -162,6 +176,13 @@ class JiraIssueData:
     priority: str = "Medium"
     labels: list[str] = field(default_factory=list)
     comments: list[str] = field(default_factory=list)
+    raw_comments: list[dict[str, str]] = field(default_factory=list)
+    updated_at: str = ""
+
+    @property
+    def spec_fingerprint(self) -> str:
+        norm = f"{self.summary.strip()}\n{self.description.strip()}"
+        return hashlib.sha256(norm.encode()).hexdigest()[:16]
 
     def render_authoritative_spec(self) -> str:
         """Render the Jira ticket as the binding 100%-authority work-order specification."""
@@ -283,12 +304,26 @@ class JiraIntegration:
         prio = str((fields.get("priority") or {}).get("name") or "Medium")
         labels = [str(x) for x in (fields.get("labels") or []) if str(x).strip()]
 
-        comments_raw = ((fields.get("comment") or {}).get("comments") or [])[-5:]
-        comments = [
-            f"{(c.get('author') or {}).get('displayName', 'user')}: {adf_to_markdown(c.get('body'))}"
-            for c in comments_raw
-            if isinstance(c, dict)
-        ]
+        comments_raw = ((fields.get("comment") or {}).get("comments") or [])[-10:]
+        comments: list[str] = []
+        structured_comments: list[dict[str, str]] = []
+        for c in comments_raw:
+            if not isinstance(c, dict):
+                continue
+            body_md = adf_to_markdown(c.get("body"))
+            if _is_self_bot_jira_comment(body_md):
+                continue
+            author = str((c.get("author") or {}).get("displayName") or "user")
+            cid = str(c.get("id") or "")
+            comments.append(f"{author}: {body_md}")
+            structured_comments.append(
+                {
+                    "id": cid,
+                    "author": author,
+                    "body": body_md,
+                    "created": str(c.get("created") or ""),
+                }
+            )
 
         return JiraIssueData(
             key=str(data.get("key") or clean_key),
@@ -300,7 +335,9 @@ class JiraIntegration:
             status=status_name,
             priority=prio,
             labels=labels,
-            comments=comments,
+            comments=comments[-5:],
+            raw_comments=structured_comments[-5:],
+            updated_at=str(fields.get("updated") or ""),
         )
 
     def _resolve_valid_issue_type(

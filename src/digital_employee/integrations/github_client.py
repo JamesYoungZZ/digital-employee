@@ -31,7 +31,15 @@ def render_evidence_pr_body(state: DurableTaskState) -> str:
         [
             f"- **Objective**: {c.objective}",
             f"- **Base / Head**: `{c.base_branch}` (`{c.base_commit_sha[:8]}`) → `{state.branch_name}` (`{(state.head_commit_sha or '')[:8]}`)",
-            f"- **Permitted Scopes**: `{', '.join(c.permitted_scopes)}`",
+            f"- **Suggested Scopes**: `{', '.join(c.permitted_scopes)}`",
+        ]
+    )
+    if ev and ev.out_of_scope_files:
+        lines.append(
+            f"- **📌 Cross-Scope Edits**: `{', '.join(ev.out_of_scope_files)}` *(modified beyond initial suggested scopes)*"
+        )
+    lines.extend(
+        [
             "",
             "## 🧪 Deterministic Sandbox Gate",
         ]

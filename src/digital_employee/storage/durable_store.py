@@ -99,10 +99,10 @@ class DurableStore:
         self,
         state: DurableTaskState,
         *,
-        step_name: str = "state_update",
+        step_name: str | None = None,
         note: str = "",
     ) -> DurableTaskState:
-        """Persist current task state and append an immutable step checkpoint."""
+        """Persist current task state and optionally append an explicit milestone checkpoint."""
         state.updated_at = utc_now_iso()
         serialized = state.model_dump_json()
         with self._connect() as conn:
@@ -131,21 +131,22 @@ class DurableStore:
                     state.updated_at,
                 ),
             )
-            conn.execute(
-                """
-                INSERT INTO checkpoints (
-                    task_id, step_name, lifecycle_status, state_json, note, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    state.task_id,
-                    step_name,
-                    state.lifecycle_status,
-                    serialized,
-                    redact_sensitive_text(note)[:1000],
-                    state.updated_at,
-                ),
-            )
+            if step_name and step_name != "state_update":
+                conn.execute(
+                    """
+                    INSERT INTO checkpoints (
+                        task_id, step_name, lifecycle_status, state_json, note, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        state.task_id,
+                        step_name,
+                        state.lifecycle_status,
+                        serialized,
+                        redact_sensitive_text(note)[:1000],
+                        state.updated_at,
+                    ),
+                )
         return state
 
     def get_task(self, task_id: str) -> DurableTaskState | None:

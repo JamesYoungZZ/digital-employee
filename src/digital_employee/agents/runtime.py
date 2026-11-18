@@ -17,6 +17,7 @@ from digital_employee.security.dlp import redact_sensitive_text, wrap_untrusted_
 from digital_employee.settings import Settings
 
 if TYPE_CHECKING:
+    from digital_employee.memory.claude_mem import ClaudeMemService
     from digital_employee.storage.durable_store import DurableStore
 
 
@@ -159,6 +160,7 @@ def create_coding_runtime(
     *,
     llm: LLMClient | None = None,
     store: DurableStore | None = None,
+    claude_mem: ClaudeMemService | None = None,
 ) -> CodingRuntime:
     """Instantiate the configured sandbox coding runtime (`kernel` | `external_cli`)."""
     mode = getattr(settings, "coding_runtime", "kernel")
@@ -168,4 +170,9 @@ def create_coding_runtime(
 
     from digital_employee.agents.kernel_runtime import NativeKernelRuntime
 
-    return NativeKernelRuntime(settings=settings, injected_llm=llm, store=store)
+    return NativeKernelRuntime(
+        settings=settings,
+        injected_llm=llm,
+        store=store,
+        claude_mem=claude_mem,
+    )

@@ -37,6 +37,7 @@ from digital_employee.web.schemas import (
     ClarifyPayload,
     ControlPayload,
     CoreEngineConfigPayload,
+    CreateMemoryPayload,
     CreateTaskPayload,
     FeishuConfigPayload,
     FeishuSimulatePayload,
@@ -45,6 +46,7 @@ from digital_employee.web.schemas import (
     OnboardRepoPayload,
     OpsAlertSimulatePayload,
     PromoteDecisionPayload,
+    RefineJiraPayload,
     ReviewerConfigPayload,
     UpdateRepoPayload,
     UpsertPolicyPayload,
@@ -119,6 +121,8 @@ def build_api_router(
             "jira_base_url": orch.jira.base_url,
             "jira_default_project": orch.jira.default_project,
             "jira_poller_enabled": bool(orch.jira.is_configured and cfg.jira_poller_enabled),
+            "claude_mem_enabled": orch.claude_mem.enabled,
+            "claude_mem_mode": orch.claude_mem.mode,
         }
 
     @router.get("/metrics")
@@ -145,15 +149,26 @@ def build_api_router(
             ledger = DecisionLedger.for_repository(orch.store, p)
             policies = ledger.serialize_with_health()
             active = [pol for pol in policies if pol["effective_for_ai"]]
+            candidates = [pol for pol in policies if pol["status"] == "CANDIDATE_DRAFT"]
             item = p.model_dump()
             item["policies"] = policies
             item["active_policies"] = active
             item["policy_summary"] = {
                 "total": len(policies),
                 "active_effective": len(active),
-                "paused": sum(1 for pol in policies if pol["status"] != "APPROVED_POLICY"),
-                "unhealthy": sum(1 for pol in policies if pol["health_status"] != "HEALTHY"),
+                "candidate_drafts": len(candidates),
+                "paused": sum(
+                    1
+                    for pol in policies
+                    if pol["status"] not in ("APPROVED_POLICY", "CANDIDATE_DRAFT")
+                ),
+                "unhealthy": sum(
+                    1
+                    for pol in policies
+                    if pol["status"] == "APPROVED_POLICY" and pol["health_status"] != "HEALTHY"
+                ),
             }
+            item["memory_summary"] = orch.get_repository_memory_stats(p.repo_id)
             result.append(item)
         return result
 
@@ -235,6 +250,77 @@ def build_api_router(
         try:
             added = orch.sync_repository_policies(repo_id)
             return {"added": added, "repo_id": repo_id}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.post("/repositories/{repo_id}/policies/distill-from-memory")
+    def api_distill_repository_policies(repo_id: str) -> dict[str, Any]:
+        try:
+            created = orch.distill_repository_policies_from_memory(repo_id, max_candidates=3)
+            return {
+                "repo_id": repo_id,
+                "created_count": len(created),
+                "candidates": [_serialize_entry_for_repo(repo_id, c) for c in created],
+            }
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.post("/repositories/{repo_id}/policies/{policy_id}/approve")
+    def api_approve_candidate_policy(
+        repo_id: str, policy_id: str, payload: VerifyPolicyPayload | None = None
+    ) -> dict[str, Any]:
+        try:
+            entry = orch.approve_candidate_policy(
+                repo_id, policy_id, owner=payload.owner if payload else ""
+            )
+            return _serialize_entry_for_repo(repo_id, entry)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.get("/repositories/{repo_id}/memories")
+    def api_list_repository_memories(
+        repo_id: str,
+        query: str = "",
+        obs_type: str = "",
+        limit: int = 30,
+    ) -> dict[str, Any]:
+        try:
+            items = orch.list_repository_memories(
+                repo_id, query=query, obs_type=obs_type, limit=limit
+            )
+            return {
+                "repo_id": repo_id,
+                "stats": orch.get_repository_memory_stats(repo_id),
+                "observations": [m.model_dump() for m in items],
+            }
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.post("/repositories/{repo_id}/memories")
+    def api_create_repository_memory(
+        repo_id: str, payload: CreateMemoryPayload
+    ) -> dict[str, Any]:
+        try:
+            obs = orch.create_repository_memory(
+                repo_id,
+                title=payload.title,
+                narrative=payload.narrative,
+                obs_type=payload.obs_type,
+                files_modified=payload.files_modified,
+            )
+            return obs.model_dump()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.delete("/repositories/{repo_id}/memories/{obs_id}")
+    def api_delete_repository_memory(repo_id: str, obs_id: int) -> dict[str, Any]:
+        try:
+            deleted = orch.delete_repository_memory(repo_id, obs_id)
+            if not deleted:
+                raise HTTPException(status_code=404, detail=f"记忆 #{obs_id} 不存在")
+            return {"deleted": True, "id": obs_id}
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -387,7 +473,11 @@ def build_api_router(
             and state.verification_evidence.reviewer_report.verdict == "BLOCK"
         )
         if state.lifecycle_status == "WAITING_JIRA_APPROVAL":
-            active_card = build_jira_approval_card(state, orch.web_base_url)
+            active_card = build_jira_approval_card(
+                state,
+                orch.web_base_url,
+                candidate_repos=list(cfg.load_repositories().keys()),
+            )
         elif state.lifecycle_status == "WAITING_CLARIFICATION":
             active_card = build_clarification_card(state, orch.web_base_url)
         elif state.lifecycle_status == "WAITING_MERGE_APPROVAL":
@@ -450,6 +540,7 @@ def build_api_router(
         background_tasks: BackgroundTasks,
     ) -> dict[str, Any]:
         overrides: dict[str, Any] = {
+            "target_repo": payload.target_repo,
             "project_key": payload.project_key,
             "issue_type": payload.issue_type,
             "summary": payload.summary,
@@ -475,6 +566,14 @@ def build_api_router(
                 publish_pr=state.auto_publish_pr or orch.github.is_configured,
             )
         return state.model_dump()
+
+    @router.post("/tasks/{task_id}/refine-jira")
+    def api_refine_jira_task(task_id: str, payload: RefineJiraPayload) -> dict[str, Any]:
+        try:
+            state = orch.refine_jira_draft(task_id, payload.instruction)
+            return state.model_dump()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/tasks/{task_id}/sync-jira")
     def api_sync_jira_task(task_id: str) -> dict[str, Any]:

@@ -101,6 +101,7 @@ CRITICAL RULES:
     "当【常规合规业务场景】时，系统正常响应且不发生误伤或回退"
   ],
   "objective": "简洁工程目标（≤45字）",
+  "verification_mode": "fail_to_pass | regression_and_build",
   "reproduction_evidence": "工程复现线索与代码定位",
   "target_repro_test": "pytest file or node id if identifiable, else empty string",
   "acceptance_criteria": ["工程级验收项1（可含单测与脚本要求）", "工程级验收项2"],
@@ -283,6 +284,13 @@ class ContractDrafter:
             else str(data.get("reproduction_evidence") or "Reproduce via failing unit test.")
         )
 
+        vmode_raw = str(data.get("verification_mode") or "fail_to_pass").strip().lower()
+        vmode = (
+            "regression_and_build"
+            if vmode_raw == "regression_and_build"
+            else "fail_to_pass"
+        )
+
         contract = TaskContract(
             contract_version=1,
             jira_issue_key=authoritative_jira.key if authoritative_jira else "",
@@ -293,6 +301,7 @@ class ContractDrafter:
             base_commit_sha=base_sha,
             reproduction_evidence=repro_ev,
             target_repro_test=str(data.get("target_repro_test") or ""),
+            verification_mode=vmode,  # type: ignore[arg-type]
             acceptance_criteria=ac_list,
             permitted_scopes=scopes,
             out_of_scope=[
@@ -348,3 +357,56 @@ class ContractDrafter:
             labels=["ai-delegated", profile.repo_id],
         )
         return contract, jira_draft, metrics.estimated_cost_usd
+
+    def refine_jira_draft(
+        self,
+        *,
+        current_draft: JiraTicketDraft,
+        instruction: str,
+    ) -> tuple[JiraTicketDraft, float]:
+        """Apply conversational human edits to a pending JiraTicketDraft while preserving PM/QA purity."""
+        skills_block = load_jira_authoring_skills()
+        sys_prompt = (
+            "You are a Product Manager / QA Engineer updating a pending Jira Ticket Draft according to the human reviewer's feedback.\n"
+            "Strictly maintain pure business/product/QA black-box language (ZERO source file paths, `.py` names, `pytest`, or internal code jargon).\n"
+            "Return strict JSON with keys: `issue_type` (Story|Task|Bug), `priority` (Highest|High|Medium|Low), `summary`, `description`, `acceptance_criteria` (list of 2-4 strings).\n\n"
+            + skills_block
+        )
+        user_prompt = (
+            f"## Current Jira Draft\n{current_draft.model_dump_json(indent=2)}\n\n"
+            f"## Human Revision Feedback\n{wrap_untrusted_input('human_jira_revision', instruction)}"
+        )
+        data, metrics = self.llm.complete_json(
+            [
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            model=self.llm.settings.fast_model,
+        )
+        itype = str(data.get("issue_type") or current_draft.issue_type)
+        if itype not in ("Bug", "Task", "Story"):
+            itype = current_draft.issue_type
+        prio = str(data.get("priority") or current_draft.priority)
+        if prio not in ("Highest", "High", "Medium", "Low"):
+            prio = current_draft.priority
+        summary = _clean_jira_summary(
+            str(data.get("summary") or current_draft.summary), current_draft.summary
+        )
+        desc = str(data.get("description") or current_draft.description).strip()
+        raw_ac = [
+            str(x)
+            for x in (data.get("acceptance_criteria") or current_draft.acceptance_criteria)
+            if str(x).strip()
+        ]
+        ac = _filter_business_ac(raw_ac, current_draft.acceptance_criteria)
+
+        updated = current_draft.model_copy(
+            update={
+                "issue_type": itype,
+                "priority": prio,
+                "summary": summary,
+                "description": desc,
+                "acceptance_criteria": ac,
+            }
+        )
+        return updated, metrics.estimated_cost_usd

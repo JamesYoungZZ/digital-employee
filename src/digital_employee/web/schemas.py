@@ -9,7 +9,7 @@ from digital_employee.context.decision_ledger import PolicyCategory, PolicyStatu
 
 class CreateTaskPayload(BaseModel):
     raw_request: str
-    target_repo: str = "modular-rag"
+    target_repo: str = ""
     base_branch: str | None = None
     max_budget_usd: float | None = None
     accept_defaults: bool = False
@@ -21,6 +21,7 @@ class CreateTaskPayload(BaseModel):
 
 
 class ApproveJiraPayload(BaseModel):
+    target_repo: str = ""
     project_key: str = ""
     issue_type: str = ""
     summary: str = ""
@@ -29,6 +30,10 @@ class ApproveJiraPayload(BaseModel):
     priority: str = ""
     labels: list[str] | None = None
     auto_execute: bool = True
+
+
+class RefineJiraPayload(BaseModel):
+    instruction: str
 
 
 class ClarifyPayload(BaseModel):
@@ -70,6 +75,13 @@ class UpsertPolicyPayload(BaseModel):
 
 class VerifyPolicyPayload(BaseModel):
     owner: str = ""
+
+
+class CreateMemoryPayload(BaseModel):
+    title: str
+    narrative: str
+    obs_type: str = "discovery"
+    files_modified: list[str] = Field(default_factory=list)
 
 
 class OnboardRepoPayload(BaseModel):

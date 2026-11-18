@@ -45,6 +45,11 @@ def build_webhook_router(orch: DelegationOrchestrator) -> APIRouter:
                         "content": f"✅ 已批准！正在创建真实 Jira 工单并启动任务 {tid}…",
                     }
                 }
+            if tid and act == "switch_jira_repo":
+                new_repo = str(val.get("target_repo") or "")
+                if new_repo:
+                    background_tasks.add_task(orch.switch_jira_draft_repo, tid, new_repo)
+                return {"toast": {"type": "success", "content": f"🔀 已切换目标仓库为 {new_repo}"}}
             if tid and act == "reject_jira":
                 background_tasks.add_task(
                     orch.update_scope_or_cancel,
@@ -262,19 +267,14 @@ def build_webhook_router(orch: DelegationOrchestrator) -> APIRouter:
                     background_tasks.add_task(orch.sync_contract_from_jira, existing.task_id)
                 return {"ok": True, "synced_task_id": existing.task_id, "jira_issue_key": issue_key}
 
-        # 2. If labeled `ai-delegate`, dispatch directly from authoritative Jira issue
+        # 2. If labeled `ai-delegate`, dispatch directly from authoritative Jira issue (smart repo routing!)
         if "ai-delegate" in labels or bool(body.get("auto_dispatch", False)):
             repos = orch.settings.load_repositories()
             if not repos:
                 return {"ok": False, "error": "no_repositories_registered"}
-            chosen_repo = next(iter(repos.keys()))
-            for r_id in repos:
-                if r_id.lower() in labels:
-                    chosen_repo = r_id
-                    break
             state = orch.submit_task(
                 raw_request=issue_key,
-                target_repo=chosen_repo,
+                target_repo="",
                 jira_issue_key=issue_key,
                 accept_defaults=True,
                 auto_execute=False,

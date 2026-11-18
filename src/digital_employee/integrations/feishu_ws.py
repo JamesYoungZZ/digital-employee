@@ -111,7 +111,9 @@ def start_feishu_long_connection_if_configured(orchestrator: DelegationOrchestra
         toast = CallBackToast()
         try:
             ev = data.event
-            chat_id = str(getattr(getattr(ev, "context", None), "open_chat_id", "") or "")
+            ctx = getattr(ev, "context", None)
+            chat_id = str(getattr(ctx, "open_chat_id", "") or "")
+            open_msg_id = str(getattr(ctx, "open_message_id", "") or "")
             if chat_id:
                 orchestrator.bind_feishu_default_chat_id(chat_id)
 
@@ -123,7 +125,11 @@ def start_feishu_long_connection_if_configured(orchestrator: DelegationOrchestra
                 threading.Thread(
                     target=orchestrator.approve_and_create_jira_ticket,
                     args=(tid,),
-                    kwargs={"approved_by": "feishu_ws_card", "auto_execute": True},
+                    kwargs={
+                        "approved_by": "feishu_ws_card",
+                        "auto_execute": True,
+                        "trigger_message_id": open_msg_id,
+                    },
                     daemon=True,
                 ).start()
                 toast.type = "success"
@@ -131,11 +137,29 @@ def start_feishu_long_connection_if_configured(orchestrator: DelegationOrchestra
                 resp.toast = toast
                 return resp
 
+            if tid and act == "switch_jira_repo":
+                new_repo = str(val.get("target_repo") or "")
+                if new_repo:
+                    threading.Thread(
+                        target=orchestrator.switch_jira_draft_repo,
+                        args=(tid, new_repo),
+                        kwargs={"trigger_message_id": open_msg_id},
+                        daemon=True,
+                    ).start()
+                toast.type = "success"
+                toast.content = f"🔀 已将任务 {tid} 目标仓库切换为 {new_repo} 并重新探测目录！"
+                resp.toast = toast
+                return resp
+
             if tid and act == "reject_jira":
                 threading.Thread(
                     target=orchestrator.update_scope_or_cancel,
                     args=(tid,),
-                    kwargs={"action": "abandon", "note": "Jira ticket draft rejected via Feishu WS card"},
+                    kwargs={
+                        "action": "abandon",
+                        "note": "已在飞书放弃建卡",
+                        "trigger_message_id": open_msg_id,
+                    },
                     daemon=True,
                 ).start()
                 toast.type = "info"
@@ -147,7 +171,7 @@ def start_feishu_long_connection_if_configured(orchestrator: DelegationOrchestra
                 threading.Thread(
                     target=orchestrator.approve_and_merge,
                     args=(tid,),
-                    kwargs={"approved_by": "feishu_ws_card"},
+                    kwargs={"approved_by": "feishu_ws_card", "trigger_message_id": open_msg_id},
                     daemon=True,
                 ).start()
                 toast.type = "success"
@@ -178,7 +202,11 @@ def start_feishu_long_connection_if_configured(orchestrator: DelegationOrchestra
                 threading.Thread(
                     target=orchestrator.update_scope_or_cancel,
                     args=(tid,),
-                    kwargs={"action": "abandon", "note": "Rejected via Feishu WS card"},
+                    kwargs={
+                        "action": "abandon",
+                        "note": "已在飞书暂缓/拒绝合入",
+                        "trigger_message_id": open_msg_id,
+                    },
                     daemon=True,
                 ).start()
                 toast.type = "info"

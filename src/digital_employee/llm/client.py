@@ -30,6 +30,8 @@ class LLMCallMetrics:
     completion_tokens: int = 0
     estimated_cost_usd: float = 0.0
     actual_model: str = ""
+    fallback_from: str = ""
+    fallback_reason: str = ""
 
 
 def extract_json_object(raw_text: str) -> dict[str, Any]:
@@ -318,7 +320,12 @@ class LLMClient:
                     api_key=self.settings.llm_api_key,
                     default_model=self.settings.fast_model,
                 )
-                return fallback_client.chat(messages, model=self.settings.fast_model, json_mode=True, max_tokens=8192)
+                fb_msg, fb_metrics = fallback_client.chat(
+                    messages, model=self.settings.fast_model, json_mode=True, max_tokens=8192
+                )
+                fb_metrics.fallback_from = agy_model
+                fb_metrics.fallback_reason = err_detail.splitlines()[-1][:160] if err_detail else "CLI unavailable"
+                return fb_msg, fb_metrics
             raise TransientLLMError(
                 f"agy CLI ({agy_model}) exited {proc.returncode}: {err_detail[:320]}"
             )
@@ -389,6 +396,8 @@ class LLMClient:
                     metrics.estimated_cost_usd + metrics2.estimated_cost_usd, 6
                 ),
                 actual_model=metrics2.actual_model or metrics.actual_model,
+                fallback_from=metrics2.fallback_from or metrics.fallback_from,
+                fallback_reason=metrics2.fallback_reason or metrics.fallback_reason,
             )
             content = (msg2.get("content") or "").strip()
             return extract_json_object(content), metrics

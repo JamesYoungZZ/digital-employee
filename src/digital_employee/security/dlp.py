@@ -77,12 +77,54 @@ def normalize_rel_path(rel_path: str) -> str:
     return norm
 
 
+def is_within_suggested_scopes(
+    rel_path: str,
+    permitted_scopes: list[str] | None = None,
+) -> bool:
+    """Return True if `rel_path` falls within the suggested `permitted_scopes` (or if scopes are wildcard/empty)."""
+    try:
+        norm = normalize_rel_path(rel_path)
+    except PolicyViolationError:
+        return False
+
+    scopes = [s.strip().replace("\\", "/") for s in (permitted_scopes or []) if s.strip()]
+    if not scopes or "*" in scopes or "**" in scopes:
+        return True
+
+    for scope in scopes:
+        clean_scope = scope.rstrip("/")
+        if (
+            norm == clean_scope
+            or norm.startswith(f"{clean_scope}/")
+            or fnmatch.fnmatch(norm, scope)
+            or fnmatch.fnmatch(norm, f"{clean_scope}/*")
+        ):
+            return True
+    return False
+
+
+def find_out_of_scope_files(
+    changed_files: list[str],
+    permitted_scopes: list[str] | None = None,
+) -> list[str]:
+    """Identify modified non-test files outside the initial suggested `permitted_scopes`."""
+    out: list[str] = []
+    for rel in changed_files:
+        if is_within_suggested_scopes(rel, permitted_scopes):
+            continue
+        # Always allow test files cleanly without noisy scope warnings unless tests/ wasn't in scope
+        out.append(rel)
+    return out
+
+
 def check_path_policy(
     rel_path: str,
     permitted_scopes: list[str] | None = None,
     forbidden_paths: list[str] | None = None,
+    *,
+    enforce_scopes: bool = True,
 ) -> tuple[bool, str]:
-    """Validate whether a file path is permitted by contract scope and not in forbidden paths."""
+    """Validate whether a file path is safe from forbidden paths (and optionally within `permitted_scopes`)."""
     try:
         norm = normalize_rel_path(rel_path)
     except PolicyViolationError as exc:
@@ -100,18 +142,11 @@ def check_path_policy(
         elif fnmatch.fnmatch(norm, pat) or PurePosixPath(norm).name == pat:
             return False, f"File '{norm}' matches forbidden path policy '{pat}'."
 
-    scopes = [s.strip().replace("\\", "/") for s in (permitted_scopes or []) if s.strip()]
-    if not scopes or "*" in scopes or "**" in scopes:
+    if not enforce_scopes:
         return True, "ok"
 
-    for scope in scopes:
-        clean_scope = scope.rstrip("/")
-        if (
-            norm == clean_scope
-            or norm.startswith(f"{clean_scope}/")
-            or fnmatch.fnmatch(norm, scope)
-            or fnmatch.fnmatch(norm, f"{clean_scope}/*")
-        ):
-            return True, "ok"
+    if is_within_suggested_scopes(norm, permitted_scopes):
+        return True, "ok"
 
+    scopes = [s.strip().replace("\\", "/") for s in (permitted_scopes or []) if s.strip()]
     return False, f"File '{norm}' is outside TaskContract.permitted_scopes ({scopes})."

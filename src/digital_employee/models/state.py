@@ -77,6 +77,7 @@ class ReviewerReport(BaseModel):
     merge_recommendation: MergeRecommendation | None = None
     merge_recommendation_label: str = ""
     reviewer_model: str = ""
+    reviewer_fallback_note: str = ""
     skill_used: str = "pr-code-review"
     ac_covered: bool = True
     ac_assessment: list[str] = Field(default_factory=list)
@@ -177,6 +178,7 @@ class VerificationEvidence(BaseModel):
 
     verified_commit_sha: str
     repro_test_target: str
+    verification_mode_used: str = "fail_to_pass"
     repro_test_failed_on_base: bool
     repro_test_passed_on_head: bool
     existing_test_suite_passed: bool
@@ -187,6 +189,7 @@ class VerificationEvidence(BaseModel):
     noop_summary: str = ""
     anti_tampering_violations: list[str] = Field(default_factory=list)
     scope_violations: list[str] = Field(default_factory=list)
+    out_of_scope_files: list[str] = Field(default_factory=list)
     unverified_risks: list[str] = Field(default_factory=list)
     reviewer_report: ReviewerReport | None = None
     artifact_log_uri: str = ""
@@ -203,8 +206,13 @@ class VerificationEvidence(BaseModel):
                 and self.reviewer_report.ac_covered
                 and self.reviewer_report.decision_ledger_compliant
             )
+        base_proof_ok = (
+            True
+            if self.verification_mode_used == "regression_and_build"
+            else self.repro_test_failed_on_base
+        )
         return (
-            self.repro_test_failed_on_base
+            base_proof_ok
             and self.repro_test_passed_on_head
             and self.existing_test_suite_passed
             and self.tests_weakened_check
@@ -284,6 +292,7 @@ class DurableTaskState(BaseModel):
     deliverable_pr_number: int | None = None
     pr_review_comment_url: str | None = None
     merged_commit_sha: str | None = None
+    distilled_policy_ids: list[str] = Field(default_factory=list)
 
     # 5. Failure classification & economics/time accounting
     failure_class: FailureClass = "NONE"

@@ -422,7 +422,7 @@ def test_kernel_mid_flight_clarification_pauses_and_resumes_losslessly(tmp_path:
     del base_sha
 
 
-def test_contract_path_sandbox_enforces_permitted_scopes_and_allows_de_session(tmp_path: Path) -> None:
+def test_contract_path_sandbox_blocks_forbidden_paths_and_allows_cross_module_and_de_session(tmp_path: Path) -> None:
     wt = tmp_path / "wt"
     (wt / "src").mkdir(parents=True)
     (wt / "docs").mkdir(parents=True)
@@ -440,12 +440,19 @@ def test_contract_path_sandbox_enforces_permitted_scopes_and_allows_de_session(t
     ok_de, _ = sandbox.check_deny_write(str(wt / ".de" / "sessions" / "s1.jsonl"))
     assert ok_de is True
 
-    ok_docs, reason_docs = sandbox.check_deny_write(str(wt / "docs" / "guide.md"))
-    assert ok_docs is False
-    assert "permitted_scopes" in reason_docs
+    # Soft scope: cross-directory non-forbidden edits inside worktree are permitted (surfaced as advisory)
+    ok_docs, _ = sandbox.check_deny_write(str(wt / "docs" / "guide.md"))
+    assert ok_docs is True
 
+    # Hard blacklist: CI workflows, .env, and outside-worktree writes remain strictly blocked
     ok_ci, _ = sandbox.check_deny_write(str(wt / ".github" / "workflows" / "ci.yml"))
     assert ok_ci is False
+
+    ok_env, _ = sandbox.check_deny_write(str(wt / ".env"))
+    assert ok_env is False
+
+    ok_outside, _ = sandbox.check_deny_write(str(tmp_path / "outside.txt"))
+    assert ok_outside is False
 
 
 @pytest.mark.asyncio
