@@ -752,8 +752,10 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                 <>
                   <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
                     {[
-                      { label: "基线复现失败 (Fail)", ok: ev.repro_test_failed_on_base },
-                      { label: "修复后通过 (Pass)", ok: ev.repro_test_passed_on_head },
+                      ev.verification_mode_used === "regression_and_build"
+                        ? { label: "构建与存量模式适配", ok: ev.repro_test_passed_on_head }
+                        : { label: "基线复现失败 (Fail)", ok: ev.repro_test_failed_on_base },
+                      { label: "修改后通过 (Pass)", ok: ev.repro_test_passed_on_head },
                       { label: "原有测试套件全绿", ok: ev.existing_test_suite_passed },
                       { label: "反作弊扫描 (零删改)", ok: ev.tests_weakened_check },
                       { label: "范围与 Linter 合规", ok: ev.scope_compliance_check && ev.static_analysis_passed },
@@ -833,6 +835,13 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                       <p className="leading-relaxed text-zinc-700 dark:text-zinc-200 font-medium">
                         {ev.reviewer_report.summary}
                       </p>
+
+                      {ev.reviewer_report.reviewer_fallback_note && (
+                        <div className="rounded-lg border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-[11.5px] text-amber-800 dark:text-amber-200">
+                          <b>⚠️ 审查模型降级提示：</b>
+                          {ev.reviewer_report.reviewer_fallback_note}
+                        </div>
+                      )}
 
                       {(ev.reviewer_report.change_overview ?? []).length > 0 && (
                         <div className="rounded-lg bg-zinc-50 dark:bg-zinc-900 p-3 space-y-1">

@@ -24,6 +24,7 @@ from digital_employee.kernel.agent import (
     ThinkingText,
     ToolResultEvent,
     ToolUseEvent,
+    TurnComplete,
 )
 from digital_employee.kernel.agents.loader import AgentLoader
 from digital_employee.kernel.agents.task_manager import TaskManager
@@ -822,9 +823,14 @@ class NativeKernelRuntime:
 
         thought_buf = ""
         last_tool_name = ""
+        llm_turns = 0
+        budget_warned = False
+        grace_finalize_nudged = False
+        warn_threshold = max(4, self.max_turns - 4)
 
         try:
             while turn_count < self.max_turns:
+                hit_turn_ceiling = False
                 async for event in agent.run(conv):
                     if isinstance(event, ThinkingText):
                         thought_buf += event.text
@@ -832,10 +838,10 @@ class NativeKernelRuntime:
                         if thought_buf.strip():
                             one_line = " ".join(thought_buf.split())[:180]
                             _emit_live(
-                                outcome.steps_used + 1,
+                                llm_turns + 1,
                                 "thought",
                                 "💭",
-                                f"Step {outcome.steps_used + 1}/{self.max_turns} · 内核推理摘要",
+                                f"Turn {llm_turns + 1}/{self.max_turns} · 内核推理摘要",
                                 one_line,
                             )
                             thought_buf = ""
@@ -847,17 +853,17 @@ class NativeKernelRuntime:
                         )
                         t_icon, t_title = _describe_kernel_tool(event.tool_name, event.arguments)
                         _emit_live(
-                            outcome.steps_used,
+                            llm_turns + 1,
                             "tool_call",
                             t_icon,
-                            f"Step {outcome.steps_used}/{self.max_turns} · {t_title}",
+                            f"Turn {llm_turns + 1}/{self.max_turns} (Tool #{outcome.steps_used}) · {t_title}",
                             "" if event.tool_name in ("ReadFile", "EditFile", "WriteFile") else arg_preview,
                         )
                     elif isinstance(event, ToolResultEvent):
                         if event.is_error and "Permission denied" in event.output:
                             outcome.trace_log.append(f"  -> POLICY BLOCKED: {event.output[:220]}")
                             _emit_live(
-                                outcome.steps_used,
+                                llm_turns + 1,
                                 "policy_block",
                                 "🛡️",
                                 "契约权限硬拦截",
@@ -867,17 +873,42 @@ class NativeKernelRuntime:
                             tail_lines = [ln.strip() for ln in event.output.splitlines() if ln.strip()]
                             tail = tail_lines[-1][:140] if tail_lines else ""
                             _emit_live(
-                                outcome.steps_used,
+                                llm_turns + 1,
                                 "tool_result",
                                 "❌" if event.is_error else "✅",
-                                f"Step {outcome.steps_used}/{self.max_turns} · 终端返回: {tail}",
+                                f"Turn {llm_turns + 1}/{self.max_turns} · 终端返回: {tail}",
                             )
+                    elif isinstance(event, TurnComplete):
+                        llm_turns += 1
+                        # Inject countdown reminder into last user/tool message 4 turns before ceiling
+                        if (
+                            not budget_warned
+                            and self.max_turns >= 6
+                            and llm_turns >= warn_threshold
+                            and conv.messages
+                            and conv.messages[-1].role == "user"
+                        ):
+                            budget_warned = True
+                            rem = max(1, self.max_turns - llm_turns)
+                            reminder_txt = (
+                                f"<system-reminder>⚠️ STEP BUDGET COUNTDOWN: Only {rem} turn(s) remain out of {self.max_turns}! "
+                                "Stop exploratory reading immediately, run target verification test if needed, "
+                                "and invoke `finish_task` (with `repro_test_target`) or `finish_noop` right now.</system-reminder>"
+                            )
+                            last_msg = conv.messages[-1]
+                            if last_msg.tool_results:
+                                last_msg.tool_results[-1].content += f"\n\n{reminder_txt}"
+                            else:
+                                last_msg.content = f"{last_msg.content}\n\n{reminder_txt}".strip()
+                        if llm_turns >= self.max_turns or outcome.steps_used >= self.max_turns * 3:
+                            hit_turn_ceiling = True
+                            break
                     elif isinstance(event, CompactNotification):
                         outcome.trace_log.append(
                             f"[Context Compaction] {event.message} (before={event.before_tokens} tokens)"
                         )
                         _emit_live(
-                            outcome.steps_used,
+                            llm_turns + 1,
                             "compact",
                             "🗜️",
                             f"上下文自动压缩 ({event.before_tokens} tokens)",
@@ -927,16 +958,24 @@ class NativeKernelRuntime:
                         )
                         return outcome
 
-                    if outcome.steps_used >= self.max_turns:
-                        outcome.trace_log.append(
-                            f"[Step Limit] Reached {self.max_turns} tool steps without finish_task."
+                if hit_turn_ceiling:
+                    # Give ONE final 1-turn grace opportunity to call finish_task if work was done
+                    if not grace_finalize_nudged:
+                        grace_finalize_nudged = True
+                        conv.add_user_message(
+                            "⚠️ Turn budget reached! Do NOT call ReadFile/EditFile/Bash anymore — "
+                            "immediately invoke `finish_task` (with `repro_test_target`) or `finish_noop` to submit your current work."
                         )
-                        return outcome
+                        continue
+                    outcome.trace_log.append(
+                        f"[Step Limit] Reached {llm_turns} LLM turns ({outcome.steps_used} tool calls) without finish_task."
+                    )
+                    return outcome
 
                 turn_count += 1
                 # Model stopped without calling finish_task / finish_noop / request_clarification:
                 # nudge once or twice so autonomous runs always produce an explicit contract outcome.
-                if turn_count >= 3 or outcome.steps_used >= self.max_turns:
+                if turn_count >= 3 or llm_turns >= self.max_turns:
                     break
                 conv.add_user_message(
                     "You ended your turn without invoking `finish_task`, `finish_noop`, or `request_clarification`. "

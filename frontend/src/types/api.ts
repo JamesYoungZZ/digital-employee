@@ -108,6 +108,7 @@ export interface TaskContract {
   base_commit_sha: string;
   reproduction_evidence: string;
   target_repro_test: string;
+  verification_mode?: "fail_to_pass" | "regression_and_build";
   acceptance_criteria: string[];
   permitted_scopes: string[];
   out_of_scope: string[];
@@ -144,6 +145,7 @@ export interface ReviewerReport {
   merge_recommendation?: "MERGE_READY" | "MERGE_WITH_CAUTION" | "DO_NOT_MERGE" | null;
   merge_recommendation_label?: string;
   reviewer_model?: string;
+  reviewer_fallback_note?: string;
   skill_used?: string;
   ac_covered: boolean;
   ac_assessment: string[];
@@ -162,6 +164,7 @@ export interface ReviewerReport {
 export interface VerificationEvidence {
   verified_commit_sha: string;
   repro_test_target: string;
+  verification_mode_used?: string;
   repro_test_failed_on_base: boolean;
   repro_test_passed_on_head: boolean;
   existing_test_suite_passed: boolean;

@@ -84,6 +84,7 @@ class Settings(BaseModel):
 
     web_host: str = "127.0.0.1"
     web_port: int = 8020
+    public_web_url: str = ""
 
     @property
     def db_path(self) -> Path:
@@ -290,6 +291,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         not in ("0", "false", "no"),
         web_host=get_val("DE_WEB_HOST", "127.0.0.1"),
         web_port=int(get_val("DE_WEB_PORT", "8020")),
+        public_web_url=get_val("DE_PUBLIC_WEB_URL", "").rstrip("/"),
     )
     settings.ensure_dirs()
     return settings

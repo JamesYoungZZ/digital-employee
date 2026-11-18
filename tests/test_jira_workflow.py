@@ -345,3 +345,176 @@ def test_pm_and_qa_jira_skills_loaded_and_sanitize_tech_jargon(tmp_path: Path) -
     )
     assert cleaned_ac == ["高密度持续弹幕场景下服务内存保持平稳，不发生异常重启"]
 
+
+def test_all_seven_v31_workflow_fixes(tmp_path: Path) -> None:
+    from digital_employee.agents.reviewer import FocusedReviewer, render_pr_review_agent_comment
+    from digital_employee.context.repo_router import infer_target_repository
+    from digital_employee.integrations.feishu_cards import extract_feishu_message_id
+    from digital_employee.llm.client import LLMCallMetrics
+    from digital_employee.models.contract import RepositoryProfile
+    from digital_employee.sandbox.worktree_runner import WorktreeSandbox
+    from digital_employee.verification.evidence_gate import EvidenceGate
+
+    orch, repo_dir = _make_orchestrator(tmp_path)
+
+    # --- Fix 2: Smart Semantic Repository Router without `[repo]` ---
+    profiles = {
+        "modular-rag": RepositoryProfile(
+            repo_id="modular-rag",
+            github_repo="acme/modular-rag-mcp",
+            local_path=str(tmp_path / "nonexistent_rag"),
+        ),
+        "livestream-copilot": RepositoryProfile(
+            repo_id="livestream-copilot",
+            github_repo="acme/livestream-copilot",
+            local_path=str(tmp_path / "nonexistent_live"),
+        ),
+    }
+    assert (
+        infer_target_repository("直播间公屏弹幕高频涌入导致助播卡顿", profiles)
+        == "livestream-copilot"
+    )
+    assert (
+        infer_target_repository("知识库混合检索连字符分词漏召回", profiles)
+        == "modular-rag"
+    )
+
+    # --- Fix 3 & Fix 4: In-Place Feishu Card Patch + Conversational Draft Refine + Zero Checkpoint Spam ---
+    assert extract_feishu_message_id("openapi_chat:oc_439dfc5df:om_abc123456") == "om_abc123456"
+    orch.feishu.send_card = MagicMock(return_value="openapi_chat:oc_439dfc5df:om_card001")  # type: ignore[method-assign]
+    orch.feishu.update_card = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+    st = orch.submit_task(
+        raw_request="修复 subtract 计算错误",
+        target_repo="",
+        auto_execute=False,
+        source_channel="feishu_ws",
+    )
+    assert st.lifecycle_status == "WAITING_JIRA_APPROVAL"
+
+    # Streaming 10 live events must NOT spam blank `state_update` rows into checkpoints!
+    before_cp = len(orch.store.list_checkpoints(st.task_id))
+    for i in range(10):
+        orch.append_live_event(st, step=i + 1, title=f"step {i + 1}")
+    after_cp = len(orch.store.list_checkpoints(st.task_id))
+    assert after_cp == before_cp
+
+    # Conversational Feishu reply ("把优先级改成 Low") refines draft & patches card in-place!
+    orch.llm.complete_json.return_value = (  # type: ignore[attr-defined]
+        {
+            "issue_type": "Bug",
+            "priority": "Low",
+            "summary": "【结算计算】减法计算结果异常（低优）",
+            "description": "已按反馈调整优先级为 Low。",
+            "acceptance_criteria": ["计算结果准确无误"],
+        },
+        LLMCallMetrics(estimated_cost_usd=0.0005),
+    )
+    refined = orch.handle_feishu_text_message(
+        raw_text="把优先级改成 Low",
+        chat_id="",
+        source_channel="feishu_ws",
+        auto_execute=False,
+    )
+    assert refined is not None
+    assert refined.task_id == st.task_id
+    assert refined.jira_draft is not None and refined.jira_draft.priority == "Low"
+    assert orch.feishu.update_card.call_count >= 1
+
+    # Approve Jira -> patches original card in-place instead of sending duplicate receipt card!
+    send_calls_before = orch.feishu.send_card.call_count
+    created_jira = JiraIssueData(
+        key="KAN-501",
+        url="https://acme.atlassian.net/browse/KAN-501",
+        project_key="KAN",
+        issue_type="Bug",
+        summary="【结算计算】减法计算结果异常（低优）",
+        description="已按反馈调整优先级为 Low。",
+        status="In Progress",
+        priority="Low",
+        raw_comments=[],
+    )
+    orch.jira.create_issue = MagicMock(return_value=created_jira)  # type: ignore[method-assign]
+    orch.jira.transition_issue_by_keywords = MagicMock(return_value="In Progress")  # type: ignore[method-assign]
+    orch.jira.add_comment = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+    bound = orch.approve_and_create_jira_ticket(st.task_id, auto_execute=False)
+    assert bound.jira_issue_key == "KAN-501"
+    assert orch.feishu.send_card.call_count == send_calls_before  # Patched in-place, zero spam!
+
+    # --- Fix 1: Active Bound Jira Watcher detects remote Jira comment without public IP ---
+    orch.jira.search_issues = MagicMock(return_value=[])  # type: ignore[method-assign]
+    updated_remote = JiraIssueData(
+        key="KAN-501",
+        url="https://acme.atlassian.net/browse/KAN-501",
+        project_key="KAN",
+        issue_type="Bug",
+        summary="【结算计算】减法计算结果异常（支持大额边界）",
+        description="新增大额边界说明。",
+        status="In Review",
+        raw_comments=[
+            {"id": "c-9001", "author": "PM Alice", "body": "请补充支持 0 金额边界", "created": "now"}
+        ],
+    )
+    orch.jira.get_issue = MagicMock(return_value=updated_remote)  # type: ignore[method-assign]
+    orch.notify_review_fix_needed = MagicMock(return_value="ok")  # type: ignore[method-assign]
+
+    poller = JiraIssuePoller(orch)
+    assert poller.poll_once() == 1
+    reloaded = orch.store.get_task(st.task_id)
+    assert reloaded is not None
+    assert "大额边界" in reloaded.contract.objective
+    assert orch.notify_review_fix_needed.call_count == 1
+    # Second poll on identical state must be idempotent (0 actions)
+    assert poller.poll_once() == 0
+
+    # --- Fix 5 & Fix 7: Reviewer fallback note & Loopback 127.0.0.1 link suppression ---
+    fb_llm = MagicMock()
+    fb_llm.default_model = "gemini-3.8-flash"
+    fb_llm.complete_json.return_value = (
+        {
+            "verdict": "APPROVE",
+            "ac_covered": True,
+            "decision_ledger_compliant": True,
+            "concise_summary": "改动干净合规。",
+            "blocking_issues": [],
+        },
+        LLMCallMetrics(
+            estimated_cost_usd=0.001,
+            actual_model="deepseek-flash",
+            fallback_from="gemini-3.8-flash-high",
+            fallback_reason="Location restricted",
+        ),
+    )
+    sb = WorktreeSandbox(orch.settings.resolve_repository("demo"), orch.settings.worktrees_dir, "t-ui-1")
+    sb.provision(bound.contract.base_commit_sha)
+    (sb.worktree_path / "README.md").write_text("# Updated Docs\n", encoding="utf-8")
+    ui_contract = bound.contract.model_copy(
+        update={"permitted_scopes": ["README.md", "src", "tests"], "verification_mode": "regression_and_build"}
+    )
+    head_sha = sb.commit_all("docs: update readme", ui_contract.base_commit_sha)
+
+    # --- Fix 6: Adaptive EvidenceGate passes pure doc/UI commit in `regression_and_build` mode ---
+    gate_res = EvidenceGate(sb, ui_contract).evaluate(head_sha, "")
+    assert gate_res.evidence.verification_mode_used == "regression_and_build"
+    assert gate_res.evidence.passed_all_hard_gates is True
+
+    rev_agent = FocusedReviewer(fb_llm)
+    rep, _ = rev_agent.review(
+        contract=ui_contract,
+        sandbox=sb,
+        evidence=gate_res.evidence,
+        full_report_url="http://127.0.0.1:8020/reports/t-ui-1/review",
+    )
+    assert "gemini-3.8-flash-high" in rep.reviewer_fallback_note
+    comment_md = render_pr_review_agent_comment(
+        rep,
+        verified_commit_sha=head_sha,
+        repro_test_target=gate_res.evidence.repro_test_target,
+        full_report_url="http://127.0.0.1:8020/reports/t-ui-1/review",
+        verification_mode=gate_res.evidence.verification_mode_used,
+    )
+    assert "http://127.0.0.1:8020" not in comment_md
+    assert "跨模型审查降级提示" in comment_md
+
+

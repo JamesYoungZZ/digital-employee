@@ -37,14 +37,20 @@ def load_pr_review_skill(skill_path: Path | None = None) -> str:
     return FALLBACK_SKILL_PROMPT
 
 
+def is_loopback_report_url(url: str) -> bool:
+    u = (url or "").strip().lower()
+    return not u or any(h in u for h in ("127.0.0.1", "localhost", "0.0.0.0"))
+
+
 def render_pr_review_agent_comment(
     report: ReviewerReport,
     *,
     verified_commit_sha: str,
     repro_test_target: str,
     full_report_url: str = "",
+    verification_mode: str = "fail_to_pass",
 ) -> str:
-    """Render a crystal-clear, structured PR Review comment with full report link & expandable checklist."""
+    """Render a crystal-clear, structured PR Review comment with portable embedded 5-dim report."""
     effective_url = full_report_url or report.full_report_url
     is_approve = report.verdict == "APPROVE"
     score = report.quality_score if report.quality_score is not None else (95 if is_approve else 45)
@@ -67,6 +73,9 @@ def render_pr_review_agent_comment(
         f"**📊 综合质量评分**：`{score} / 100` · **合入建议**：{rec_icon} **{rec_label}**",
         "",
     ]
+    if report.reviewer_fallback_note:
+        lines.append(f"> ⚠️ **跨模型审查降级提示**：{report.reviewer_fallback_note}")
+        lines.append("")
 
     # 1. Plain-Chinese overview of what actually happened in this PR
     if report.change_overview:
@@ -98,16 +107,21 @@ def render_pr_review_agent_comment(
             lines.append(f"- {loc}{obs.note}")
         lines.append("")
 
-    # 5. Full Review Report Link + Expandable Full 5-Dimension Audit Matrix
-    if effective_url:
+    # 5. Portable Full Review Report (only emit external link if non-loopback public URL!)
+    if effective_url and not is_loopback_report_url(effective_url):
         lines.append(f"📄 **[点击打开独立全量 Code Review 报告页面（含完整核查表与逐行 Diff）]({effective_url})**")
         lines.append("")
 
+    gate_label = (
+        "构建与存量回归验证 (`Regression + Build`)"
+        if verification_mode == "regression_and_build"
+        else "确定性回归单测 (`Fail → Pass`)"
+    )
     lines.append("<details>")
     lines.append("<summary>📋 <b>在此直接展开全量审查报告明细（5 维核查矩阵 · 回归验证 · 边界风险）</b></summary>")
     lines.append("")
     lines.append(f"- **审查提交 SHA**：`{verified_commit_sha[:10]}`")
-    lines.append(f"- **确定性回归单测 (`Fail → Pass`)**：`{repro_test_target}` ✅")
+    lines.append(f"- **{gate_label}**：`{repro_test_target}` ✅")
     lines.append(f"- **审查技能规范**：`{report.skill_used}`")
     lines.append("")
     if report.audit_checklist:
@@ -309,6 +323,12 @@ class FocusedReviewer:
             model=chosen_model,
         )
         effective_model = metrics.actual_model or chosen_model
+        fallback_note = ""
+        if metrics.fallback_from and metrics.fallback_from != effective_model:
+            fallback_note = (
+                f"原配置独立审查模型 `{metrics.fallback_from}` 因当前网络区域或鉴权受限未生效，"
+                f"已自动降级为 `{effective_model}` 完成审查（可在控制台配置 GEMINI_API_KEY 或切换代理节点恢复异构互审）。"
+            )
 
         raw_blocking = data.get("blocking_issues") or []
         blocking_issues: list[BlockingReviewIssue] = []
@@ -383,6 +403,7 @@ class FocusedReviewer:
             verdict=verdict,
             quality_score=parsed_score,
             reviewer_model=effective_model,
+            reviewer_fallback_note=fallback_note,
             skill_used="pr-code-review",
             ac_covered=ac_covered,
             ac_assessment=[str(x) for x in (data.get("ac_assessment") or [])],

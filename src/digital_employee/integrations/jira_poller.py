@@ -1,4 +1,7 @@
-"""Background Jira Poller: automatically picks up existing Jira tickets matching JQL (`ai-delegate`)."""
+"""Background Jira Poller:
+1. Auto-dispatches newly labeled `ai-delegate` Jira tickets (`To Do`).
+2. Watches bound active Jira tickets for description/summary edits & new human comments (zero public IP needed!).
+"""
 
 from __future__ import annotations
 
@@ -13,7 +16,7 @@ logger = logging.getLogger("digital_employee.jira_poller")
 
 
 class JiraIssuePoller:
-    """Periodically polls Jira for newly ready/labeled tickets and delegates them directly."""
+    """Periodically polls Jira for newly delegated tickets AND active bound ticket updates."""
 
     def __init__(self, orchestrator: DelegationOrchestrator, interval_seconds: float = 30.0) -> None:
         self.orch = orchestrator
@@ -50,19 +53,42 @@ class JiraIssuePoller:
     def poll_once(self) -> int:
         if not (self.orch.jira.is_configured and self.orch.settings.jira_poller_enabled):
             return 0
+
+        acted = 0
+
+        # 1. Reconcile active bound Jira tickets for human description edits or new comments
+        active_tasks = [
+            t
+            for t in self.orch.store.list_tasks(limit=80)
+            if t.jira_issue_key
+            and t.lifecycle_status
+            not in ("ACCEPTED_AND_CLOSED", "ABANDONED_OR_REVERTED", "WAITING_JIRA_APPROVAL")
+        ]
+        for task in active_tasks:
+            try:
+                if self.orch.reconcile_bound_jira_issue(task.task_id):
+                    acted += 1
+            except Exception as exc:
+                logger.warning(
+                    "Failed to reconcile active Jira issue %s (%s): %s",
+                    task.jira_issue_key,
+                    task.task_id,
+                    exc,
+                )
+
+        # 2. Discover & dispatch newly labeled `ai-delegate` To-Do tickets
         jql = self.orch.settings.jira_poll_jql.strip()
         if not jql:
-            return 0
+            return acted
 
         keys = self.orch.jira.search_issues(jql, max_results=5)
         existing_jira_keys = {
-            t.jira_issue_key
+            (t.jira_issue_key or "").upper()
             for t in self.orch.store.list_tasks(limit=200)
             if t.jira_issue_key
         }
-        dispatched = 0
         for key in keys:
-            if key in existing_jira_keys:
+            if key.upper() in existing_jira_keys:
                 continue
             try:
                 self.orch.submit_task(
@@ -72,7 +98,7 @@ class JiraIssuePoller:
                     publish_pr=self.orch.github.is_configured,
                     source_channel="jira_poller",
                 )
-                dispatched += 1
+                acted += 1
             except Exception as exc:
                 logger.warning("Failed to dispatch polled Jira issue %s: %s", key, exc)
-        return dispatched
+        return acted

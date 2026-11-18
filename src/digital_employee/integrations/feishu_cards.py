@@ -60,7 +60,10 @@ def _jira_link_md(state: DurableTaskState) -> str:
 
 
 def build_jira_approval_card(
-    state: DurableTaskState, web_base_url: str = "http://127.0.0.1:8020"
+    state: DurableTaskState,
+    web_base_url: str = "http://127.0.0.1:8020",
+    *,
+    candidate_repos: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build interactive PM/QA Business Jira Ticket Draft review card (`WAITING_JIRA_APPROVAL`)."""
     c = state.contract
@@ -83,6 +86,46 @@ def build_jira_approval_card(
         else "• 核心业务场景与异常边界表现符合预期"
     )
 
+    actions: list[dict[str, Any]] = [
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "✅ 批准创建 Jira 并开工"},
+            "type": "primary",
+            "value": {"action": "approve_jira", "task_id": state.task_id},
+        },
+    ]
+    alt_repos = [r for r in (candidate_repos or []) if r != c.target_repo]
+    if alt_repos:
+        next_repo = alt_repos[0]
+        actions.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"🔀 改派 {next_repo}"},
+                "type": "default",
+                "value": {
+                    "action": "switch_jira_repo",
+                    "task_id": state.task_id,
+                    "target_repo": next_repo,
+                },
+            }
+        )
+    actions.append(
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "✏️ 控制台改稿"},
+            "type": "default",
+            "url": f"{web_base_url}/#task={state.task_id}",
+        }
+    )
+    actions.append(
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "放弃"},
+            "type": "default",
+            "value": {"action": "reject_jira", "task_id": state.task_id},
+        }
+    )
+
     return {
         "msg_type": "interactive",
         "card": {
@@ -97,7 +140,7 @@ def build_jira_approval_card(
                 _meta_fields(
                     "Jira 看板 / 优先级",
                     f"{proj} · {role_tag} ({prio})",
-                    "关联服务仓库",
+                    "智能路由目标仓",
                     f"{c.target_repo} ({c.base_branch})",
                 ),
                 {"tag": "hr"},
@@ -107,32 +150,10 @@ def build_jira_approval_card(
                         f"**工单标题**：{summary}\n"
                         f"**{desc_label}**：{desc}\n"
                         f"**产品/QA 验收标准**：\n{ac_md}\n"
-                        f"<font color='grey'>批准后将在 Jira 正式建卡并作为唯一权威业务源交付研发执行（可回复『建单』或进控制台修改）。</font>"
+                        f"<font color='grey'>直接回复修改意见（如『改稿：把优先级改为Medium』）可在线重拟；确认无误点批准或回『建单』。</font>"
                     ),
                 },
-                {
-                    "tag": "action",
-                    "actions": [
-                        {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": "✅ 批准创建 Jira 并开工"},
-                            "type": "primary",
-                            "value": {"action": "approve_jira", "task_id": state.task_id},
-                        },
-                        {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": "✏️ 控制台修改草稿"},
-                            "type": "default",
-                            "url": f"{web_base_url}/#task={state.task_id}",
-                        },
-                        {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": "放弃"},
-                            "type": "default",
-                            "value": {"action": "reject_jira", "task_id": state.task_id},
-                        },
-                    ],
-                },
+                {"tag": "action", "actions": actions[:4]},
             ],
         },
     }
@@ -478,7 +499,17 @@ def build_review_fix_card(
     pr_num = state.deliverable_pr_number or 0
     pr_url = state.pr_review_comment_url or state.deliverable_pr_url or web_base_url
 
-    if trigger_source == "github_comment" and human_comment:
+    if trigger_source == "jira_update":
+        jira_md = _jira_link_md(state) or (state.jira_issue_key or "Jira")
+        header_title = f"🔄 权威工单 {state.jira_issue_key} 有新变更 · 待你确认追改"
+        left_k, left_v = "变更来源", f"{jira_md} ({comment_author or 'Jira 更新'})"
+        right_k, right_v = "关联仓库", f"**{state.contract.target_repo}**"
+        body_md = (
+            f"**最新工单标题**：{_clip(state.contract.objective, 68)}\n"
+            f"**变更 / 评论摘要**：{_clip(human_comment, 130)}\n"
+            f"<font color='grey'>契约已同步最新 Jira；点下方「🔧 一键自动修复」将唤醒沙箱按新 Jira 追改代码。</font>"
+        )
+    elif trigger_source == "github_comment" and human_comment:
         header_title = f"💬 PR #{pr_num} 收到新 Review 评论 · 待你指令"
         left_k, left_v = "评论人", f"@{comment_author or 'reviewer'}"
         right_k, right_v = "关联仓库", f"**{state.contract.target_repo}**"
@@ -640,6 +671,88 @@ def build_noop_verified_card(
     }
 
 
+def build_merged_closed_card(
+    state: DurableTaskState, web_base_url: str = "http://127.0.0.1:8020"
+) -> dict[str, Any]:
+    """In-place patched completion card replacing Merge Approval Card once merged."""
+    pr_num = state.deliverable_pr_number or 0
+    jira_md = _jira_link_md(state)
+    jira_line = f"**权威工单**：{jira_md}（已自动流转为 **Done**）\n" if jira_md else ""
+    actions: list[dict[str, Any]] = []
+    if state.deliverable_pr_url:
+        actions.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"查看已合入 PR #{pr_num}"},
+                "type": "primary",
+                "url": state.deliverable_pr_url,
+            }
+        )
+    if state.jira_issue_url:
+        actions.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"Jira {state.jira_issue_key}"},
+                "type": "default",
+                "url": state.jira_issue_url,
+            }
+        )
+    actions.append(
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "控制台归档"},
+            "type": "default",
+            "url": f"{web_base_url}/#task={state.task_id}",
+        }
+    )
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "header": {
+                "title": {
+                    "tag": "plain_text",
+                    "content": f"🎉 已合入主干闭环 · PR #{pr_num}"
+                    + (f" ({state.jira_issue_key})" if state.jira_issue_key else ""),
+                },
+                "template": "green",
+            },
+            "elements": [
+                _meta_fields(
+                    "合入分支",
+                    f"{state.contract.target_repo} → {state.contract.base_branch}",
+                    "合入 Commit",
+                    (state.merged_commit_sha or state.head_commit_sha or "")[:10],
+                ),
+                {"tag": "hr"},
+                {
+                    "tag": "markdown",
+                    "content": f"{jira_line}**交付内容**：{_clip(state.contract.objective, 80)}",
+                },
+                {"tag": "action", "actions": actions[:3]},
+            ],
+        },
+    }
+
+
+def build_abandoned_card(state: DurableTaskState, reason: str = "已由人工放弃") -> dict[str, Any]:
+    """In-place patched card replacing a rejected Jira draft or rejected Merge card."""
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "header": {
+                "title": {"tag": "plain_text", "content": f"⚪ 任务已终止 · {state.task_id}"},
+                "template": "grey",
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"**原诉求**：{_clip(state.contract.objective, 75)}\n**状态**：{_clip(reason, 90)}",
+                }
+            ],
+        },
+    }
+
+
 def build_test_connection_card(web_base_url: str = "http://127.0.0.1:8020") -> dict[str, Any]:
     """Crisp welcome & quick-command card sent on `连接` / `链接` / `帮助`."""
     return {
@@ -653,10 +766,10 @@ def build_test_connection_card(web_base_url: str = "http://127.0.0.1:8020") -> d
                 {
                     "tag": "markdown",
                     "content": (
-                        "已绑定当前会话，你可以直接这样使唤我：\n"
-                        "• **按已有 Jira 派活**：`[modular-rag] KAN-12`（直接按 Jira 开工）\n"
-                        "• **新需求审卡派活**：`[modular-rag] 修复某某报错`（先推 Jira 草稿供你审核建卡）\n"
-                        "• **审批指令**：回 `建单` 建 Jira 开工 · 回 `批准` 合入 PR · 回 `修复` 自动修评论"
+                        "已绑定当前会话，无需手敲仓库名，直接说人话即可：\n"
+                        "• **新需求审卡派活**：直接发 `修复直播间弹幕内存泄漏`（自动识别仓库并起草 PM/QA 工单）\n"
+                        "• **在线改工单草稿**：审卡时直接回 `改稿：把优先级改成Medium` 或回 `建单` 批准\n"
+                        "• **按已有 Jira 派活**：直接发 `SCRUM-5`（零重复审卡直接开工）"
                     ),
                 },
                 {
@@ -748,27 +861,54 @@ def parse_feishu_command(
             return {"intent": "task_approve_merge", "task_id": tid}
         if rest in {"默认", "继续", "default"}:
             return {"intent": "task_clarify_default", "task_id": tid}
+        if rest_low.startswith(("改稿", "改卡", "修改草稿", "修改工单")):
+            instr = re.sub(r"^(?:改稿|改卡|修改草稿|修改工单)\s*[:：,，]?\s*", "", rest).strip()
+            if instr:
+                return {"intent": "task_refine_jira", "task_id": tid, "instruction": instr}
         if rest:
             return {"intent": "followup", "task_id": tid, "comment": rest}
 
-    # 3. New task delegation (check `[repo] ...` prefix or repo substring)
+    # 2b. Quick conversational Jira draft revision ("改稿：...", "改卡：...", "修改草稿：...")
+    if lowered.startswith(("改稿", "改卡", "修改草稿", "修改工单")):
+        instr = re.sub(r"^(?:改稿|改卡|修改草稿|修改工单)\s*[:：,，]?\s*", "", cleaned).strip()
+        if instr:
+            return {"intent": "quick_refine_jira", "instruction": instr}
+
+    # 3. New task delegation (check `[repo] ...` prefix or explicit repo substring)
     chosen_repo = registered_repos[0] if registered_repos else "modular-rag"
+    explicit_repo = "false"
     req_body = cleaned
     bracket = REPO_BRACKET_RE.match(cleaned)
     if bracket and bracket.group(1) in registered_repos:
         chosen_repo = bracket.group(1)
+        explicit_repo = "true"
         req_body = bracket.group(2).strip()
     else:
         for r in registered_repos:
             if r.lower() in lowered:
                 chosen_repo = r
+                explicit_repo = "true"
                 break
 
-    out = {"intent": "delegate", "target_repo": chosen_repo, "raw_request": req_body}
+    out = {
+        "intent": "delegate",
+        "target_repo": chosen_repo,
+        "explicit_repo": explicit_repo,
+        "raw_request": req_body,
+    }
     detected_jira = extract_jira_issue_key(req_body)
     if detected_jira:
         out["jira_issue_key"] = detected_jira
     return out
+
+
+def extract_feishu_message_id(recorded_delivery: str) -> str:
+    """Extract Feishu `om_...` message_id from `openapi_chat:<chat>:<message_id>`."""
+    for seg in (recorded_delivery or "").split(","):
+        parts = seg.strip().split(":")
+        if len(parts) >= 3 and parts[0] == "openapi_chat" and parts[2].startswith("om_"):
+            return parts[2]
+    return ""
 
 
 class FeishuNotifier:
@@ -852,7 +992,9 @@ class FeishuNotifier:
                     body = resp.json()
                     if isinstance(body, dict) and body.get("code", 0) not in (0, None):
                         raise RuntimeError(f"Feishu OpenAPI send error: {body}")
-                    results.append(f"openapi_chat:{target_chat_id[:12]}")
+                    msg_id = str(((body.get("data") or {}) if isinstance(body, dict) else {}).get("message_id") or "")
+                    suffix = f":{msg_id}" if msg_id else ""
+                    results.append(f"openapi_chat:{target_chat_id[:12]}{suffix}")
 
             if self.webhook_url:
                 resp = client.post(self.webhook_url, json=card_payload)
@@ -863,3 +1005,23 @@ class FeishuNotifier:
                 results.append(f"webhook:{resp.status_code}")
 
         return ",".join(results) if results else "local_artifact_only"
+
+    def update_card(self, message_id: str, card_payload: dict[str, Any]) -> bool:
+        """Patch an existing interactive Feishu card in-place (`PATCH /im/v1/messages/{id}`)."""
+        mid = (message_id or "").strip()
+        if not (mid and self.app_id and self.app_secret):
+            return False
+        try:
+            with httpx.Client(timeout=12.0) as client:
+                token = self._fetch_tenant_token(client)
+                resp = client.patch(
+                    f"https://open.feishu.cn/open-apis/im/v1/messages/{mid}",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"content": json.dumps(card_payload["card"], ensure_ascii=False)},
+                )
+                if resp.status_code >= 400:
+                    return False
+                body = resp.json()
+                return isinstance(body, dict) and body.get("code", 0) in (0, None)
+        except Exception:
+            return False

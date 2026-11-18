@@ -83,12 +83,14 @@ function matchesFilter(t: TaskItem, filter: string): boolean {
 }
 
 interface EditableJiraDraftState {
+  target_repo: string;
   project_key: string;
   issue_type: string;
   priority: string;
   summary: string;
   description: string;
   ac_text: string;
+  refine_instruction: string;
 }
 
 export function WorkbenchView({
@@ -132,18 +134,56 @@ export function WorkbenchView({
         if (!next[t.task_id]) {
           const d = t.jira_draft;
           next[t.task_id] = {
+            target_repo: t.contract.target_repo,
             project_key: d?.project_key || health?.jira_default_project || "PROJ",
             issue_type: d?.issue_type || "Task",
             priority: d?.priority || "Medium",
             summary: d?.summary || t.contract.objective,
             description: d?.description || t.contract.reproduction_evidence || t.raw_request,
             ac_text: (d?.acceptance_criteria || t.contract.acceptance_criteria || []).join("\n"),
+            refine_instruction: "",
           };
         }
       }
       return next;
     });
   }, [pendingJiraTasks, health?.jira_default_project]);
+
+  const handleRefineJiraDraft = async (taskId: string) => {
+    const edit = draftEdits[taskId];
+    if (!edit?.refine_instruction.trim()) return;
+    setMergingId(taskId);
+    try {
+      const updated = await apiFetch<TaskItem>(
+        `/api/tasks/${encodeURIComponent(taskId)}/refine-jira`,
+        {
+          method: "POST",
+          body: JSON.stringify({ instruction: edit.refine_instruction.trim() }),
+        }
+      );
+      if (updated.jira_draft) {
+        setDraftEdits((prev) => ({
+          ...prev,
+          [taskId]: {
+            target_repo: updated.contract.target_repo,
+            project_key: updated.jira_draft?.project_key || edit.project_key,
+            issue_type: updated.jira_draft?.issue_type || edit.issue_type,
+            priority: updated.jira_draft?.priority || edit.priority,
+            summary: updated.jira_draft?.summary || edit.summary,
+            description: updated.jira_draft?.description || edit.description,
+            ac_text: (updated.jira_draft?.acceptance_criteria || []).join("\n"),
+            refine_instruction: "",
+          },
+        }));
+      }
+      toast.success("✏️ AI 已按你的意见更新 Jira 工单草稿（飞书卡片已原地同步）！");
+      await onMutated();
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setMergingId(null);
+    }
+  };
 
   const handleApproveJiraDraft = async (taskId: string) => {
     const edit = draftEdits[taskId];
@@ -154,6 +194,7 @@ export function WorkbenchView({
         {
           method: "POST",
           body: JSON.stringify({
+            target_repo: edit?.target_repo || "",
             project_key: edit?.project_key || "",
             issue_type: edit?.issue_type || "Task",
             priority: edit?.priority || "Medium",
@@ -248,15 +289,8 @@ export function WorkbenchView({
     [tasks]
   );
 
-  React.useEffect(() => {
-    if (!targetRepo && repos.length > 0) {
-      setTargetRepo(repos[0].repo_id);
-    }
-  }, [repos, targetRepo]);
-
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (!targetRepo) return;
     if (delegateMode === "existing_jira" && !existingJiraKey.trim()) return;
     if (delegateMode === "raw" && !prompt.trim()) return;
 
@@ -380,12 +414,14 @@ export function WorkbenchView({
           <div className="grid gap-3">
             {pendingJiraTasks.map((t) => {
               const edit = draftEdits[t.task_id] || {
+                target_repo: t.contract.target_repo,
                 project_key: t.jira_draft?.project_key || "PROJ",
                 issue_type: t.jira_draft?.issue_type || "Task",
                 priority: t.jira_draft?.priority || "Medium",
                 summary: t.jira_draft?.summary || t.contract.objective,
                 description: t.jira_draft?.description || t.raw_request,
                 ac_text: (t.jira_draft?.acceptance_criteria || t.contract.acceptance_criteria).join("\n"),
+                refine_instruction: "",
               };
               const busy = mergingId === t.task_id;
               const updateField = (patch: Partial<EditableJiraDraftState>) =>
@@ -472,11 +508,38 @@ export function WorkbenchView({
                         <option value="Low">Low</option>
                       </select>
                     </div>
-                    <div className="flex items-end">
-                      <span className="text-[11px] text-zinc-500">
-                        提示：飞书也已同步收到此草稿卡片，可直接回复 <code className="font-mono">建单</code>
-                      </span>
+                    <div>
+                      <label className="text-[11px] text-zinc-500 block mb-1">智能路由目标仓 (可切换)</label>
+                      <select
+                        value={edit.target_repo}
+                        onChange={(e) => updateField({ target_repo: e.target.value })}
+                        className="h-8 w-full rounded-lg border border-zinc-200 bg-white px-2 font-mono text-xs dark:border-zinc-800 dark:bg-zinc-950"
+                      >
+                        {repos.map((r) => (
+                          <option key={r.repo_id} value={r.repo_id}>
+                            {r.repo_id} ({r.default_base_branch})
+                          </option>
+                        ))}
+                      </select>
                     </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 text-xs">
+                    <input
+                      type="text"
+                      value={edit.refine_instruction}
+                      onChange={(e) => updateField({ refine_instruction: e.target.value })}
+                      placeholder="💬 懒得手改？输入一句修改意见（如：把优先级改成 Medium，加上保留最近 200 条）让 AI 重拟草稿…"
+                      className="h-8 flex-1 rounded-lg border border-amber-500/35 bg-white px-3 text-xs dark:bg-zinc-950"
+                    />
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={busy || !edit.refine_instruction.trim()}
+                      onClick={() => handleRefineJiraDraft(t.task_id)}
+                    >
+                      ✨ AI 重拟草稿
+                    </Button>
                   </div>
 
                   <div className="space-y-2 text-xs">
@@ -834,6 +897,7 @@ export function WorkbenchView({
                   onChange={(e) => setTargetRepo(e.target.value)}
                   className="h-8 rounded-lg border border-zinc-200 bg-white px-2.5 font-mono text-xs text-zinc-800 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-200"
                 >
+                  <option value="">✨ 智能自动路由仓库</option>
                   {repos.map((r) => (
                     <option key={r.repo_id} value={r.repo_id}>
                       {r.repo_id} ({r.default_base_branch})
@@ -1037,6 +1101,11 @@ export function WorkbenchView({
                           <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400 font-medium">
                             <CheckCircle2 className="h-3.5 w-3.5" />
                             No-Op · 全绿无需改
+                          </span>
+                        ) : ev.verification_mode_used === "regression_and_build" && ev.repro_test_passed_on_head ? (
+                          <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400 font-medium">
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                            构建 + 回归通过
                           </span>
                         ) : f2pPassed ? (
                           <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400 font-medium">

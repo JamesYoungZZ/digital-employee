@@ -42,6 +42,7 @@ from digital_employee.web.schemas import (
     JiraConfigPayload,
     OnboardRepoPayload,
     PromoteDecisionPayload,
+    RefineJiraPayload,
     ReviewerConfigPayload,
     UpsertPolicyPayload,
     VerifyPolicyPayload,
@@ -286,7 +287,11 @@ def build_api_router(
             and state.verification_evidence.reviewer_report.verdict == "BLOCK"
         )
         if state.lifecycle_status == "WAITING_JIRA_APPROVAL":
-            active_card = build_jira_approval_card(state, orch.web_base_url)
+            active_card = build_jira_approval_card(
+                state,
+                orch.web_base_url,
+                candidate_repos=list(cfg.load_repositories().keys()),
+            )
         elif state.lifecycle_status == "WAITING_CLARIFICATION":
             active_card = build_clarification_card(state, orch.web_base_url)
         elif state.lifecycle_status == "WAITING_MERGE_APPROVAL":
@@ -348,6 +353,7 @@ def build_api_router(
         background_tasks: BackgroundTasks,
     ) -> dict[str, Any]:
         overrides: dict[str, Any] = {
+            "target_repo": payload.target_repo,
             "project_key": payload.project_key,
             "issue_type": payload.issue_type,
             "summary": payload.summary,
@@ -373,6 +379,14 @@ def build_api_router(
                 publish_pr=state.auto_publish_pr or orch.github.is_configured,
             )
         return state.model_dump()
+
+    @router.post("/tasks/{task_id}/refine-jira")
+    def api_refine_jira_task(task_id: str, payload: RefineJiraPayload) -> dict[str, Any]:
+        try:
+            state = orch.refine_jira_draft(task_id, payload.instruction)
+            return state.model_dump()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @router.post("/tasks/{task_id}/sync-jira")
     def api_sync_jira_task(task_id: str) -> dict[str, Any]:

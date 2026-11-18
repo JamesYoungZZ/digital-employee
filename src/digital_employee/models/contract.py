@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -44,6 +46,10 @@ class TaskContract(BaseModel):
     target_repro_test: str = Field(
         default="",
         description="Pytest node id or test file path proving Fail-to-Pass regression.",
+    )
+    verification_mode: Literal["fail_to_pass", "regression_and_build"] = Field(
+        default="fail_to_pass",
+        description="`fail_to_pass` for bugs/logic features; `regression_and_build` for pure UI/refactor/docs/config.",
     )
     acceptance_criteria: list[str] = Field(default_factory=list)
     permitted_scopes: list[str] = Field(

@@ -21,16 +21,20 @@ from digital_employee.context.decision_ledger import (
     build_fallback_title,
     infer_policy_category,
 )
+from digital_employee.context.repo_router import infer_target_repository
 from digital_employee.integrations.feishu_cards import (
     FeishuNotifier,
+    build_abandoned_card,
     build_accepted_receipt_card,
     build_clarification_card,
     build_evidence_report_card,
     build_handoff_card,
     build_jira_approval_card,
     build_merge_approval_card,
+    build_merged_closed_card,
     build_noop_verified_card,
     build_review_fix_card,
+    extract_feishu_message_id,
     parse_feishu_command,
 )
 from digital_employee.integrations.github_client import (
@@ -233,10 +237,26 @@ class DelegationOrchestrator:
 
     @property
     def web_base_url(self) -> str:
-        return f"http://{self.settings.web_host}:{self.settings.web_port}"
+        return self.settings.public_web_url or f"http://{self.settings.web_host}:{self.settings.web_port}"
+
+    @property
+    def external_report_url_base(self) -> str:
+        """Publicly reachable report base URL (empty when running on 127.0.0.1 without tunnel)."""
+        return self.settings.public_web_url
+
+    def _seed_jira_sync_baseline(self, state: DurableTaskState, issue: JiraIssueData) -> None:
+        state.recorded_operations["jira_spec_fingerprint"] = issue.spec_fingerprint
+        for c in issue.raw_comments:
+            cid = c.get("id", "")
+            if cid:
+                state.recorded_operations[f"jira_comment_{cid}"] = "seen"
 
     def _resolve_target_repo_with_jira(
-        self, target_repo: str, authoritative_jira: JiraIssueData | None
+        self,
+        target_repo: str,
+        authoritative_jira: JiraIssueData | None,
+        *,
+        raw_request: str = "",
     ) -> str:
         if target_repo.strip():
             return target_repo.strip()
@@ -244,12 +264,9 @@ class DelegationOrchestrator:
         if not repos:
             raise ValueError("No target repositories configured.")
         if authoritative_jira is not None:
-            lowered_labels = {lbl.lower() for lbl in authoritative_jira.labels}
-            haystack = f"{authoritative_jira.summary} {authoritative_jira.description}".lower()
-            for r_id in repos:
-                if r_id.lower() in lowered_labels or r_id.lower() in haystack:
-                    return r_id
-        return next(iter(repos.keys()))
+            haystack = f"{authoritative_jira.summary}\n{authoritative_jira.description}\n{raw_request}"
+            return infer_target_repository(haystack, repos, labels=authoritative_jira.labels)
+        return infer_target_repository(raw_request, repos)
 
     def submit_task(
         self,
@@ -284,7 +301,9 @@ class DelegationOrchestrator:
         if effective_jira_key:
             authoritative_jira = self.jira.get_issue(effective_jira_key)
 
-        resolved_repo = self._resolve_target_repo_with_jira(target_repo, authoritative_jira)
+        resolved_repo = self._resolve_target_repo_with_jira(
+            target_repo, authoritative_jira, raw_request=raw_request
+        )
         profile = self.settings.resolve_repository(resolved_repo)
         task_id = generate_task_id()
         trace_id = uuid.uuid4().hex
@@ -329,6 +348,7 @@ class DelegationOrchestrator:
 
         # Path 2: Existing Jira ticket -> immediately transition Jira to In Progress & run per Jira!
         if authoritative_jira is not None:
+            self._seed_jira_sync_baseline(state, authoritative_jira)
             try:
                 new_st = self.jira.transition_issue_by_keywords(
                     authoritative_jira.key,
@@ -365,7 +385,10 @@ class DelegationOrchestrator:
             )
             if should_gate_jira:
                 state.lifecycle_status = "WAITING_JIRA_APPROVAL"
-                jira_card = build_jira_approval_card(state, self.web_base_url)
+                all_repos = list(self.settings.load_repositories().keys())
+                jira_card = build_jira_approval_card(
+                    state, self.web_base_url, candidate_repos=all_repos
+                )
                 self.store.write_artifact(task_id, "feishu_jira_approval_card.json", jira_card)
                 try:
                     self.store.run_idempotent(
@@ -447,6 +470,7 @@ class DelegationOrchestrator:
         draft_overrides: dict[str, Any] | None = None,
         approved_by: str = "human",
         auto_execute: bool = True,
+        trigger_message_id: str = "",
     ) -> DurableTaskState:
         """Create a real Jira ticket after human review & lock TaskContract to the Jira issue."""
         state = self._require_task(task_id)
@@ -461,6 +485,12 @@ class DelegationOrchestrator:
                 )
             return state
 
+        overrides = draft_overrides or {}
+        if overrides.get("target_repo"):
+            new_repo = str(overrides["target_repo"]).strip()
+            if new_repo and new_repo != state.contract.target_repo:
+                state = self.switch_jira_draft_repo(task_id, new_repo)
+
         draft = state.jira_draft or JiraTicketDraft(
             project_key=self.settings.jira_default_project or "PROJ",
             issue_type="Task",
@@ -468,7 +498,6 @@ class DelegationOrchestrator:
             description=state.contract.reproduction_evidence or state.raw_request,
             acceptance_criteria=list(state.contract.acceptance_criteria),
         )
-        overrides = draft_overrides or {}
         if overrides.get("project_key"):
             draft.project_key = str(overrides["project_key"]).strip().upper()
         if overrides.get("issue_type"):
@@ -494,6 +523,7 @@ class DelegationOrchestrator:
         state.jira_issue_key = created.key
         state.jira_issue_url = created.url
         state.jira_status = created.status
+        self._seed_jira_sync_baseline(state, created)
 
         # Lock TaskContract strictly to the approved & created Jira ticket ("后续都以 Jira 任务为准"),
         # while retaining repository DecisionLedger engineering guardrails (e.g. DEC-001 scripts) underneath.
@@ -566,11 +596,19 @@ class DelegationOrchestrator:
         receipt_card = build_accepted_receipt_card(state, self.web_base_url)
         self.store.write_artifact(task_id, "feishu_receipt_card.json", receipt_card)
         try:
-            self.store.run_idempotent(
-                state,
-                "notify_receipt",
-                lambda: self.feishu.send_card(receipt_card, chat_id=state.feishu_chat_id),
+            # Patch the original Jira Approval Card in-place so Feishu stays clean without duplicate cards!
+            orig_mid = trigger_message_id or extract_feishu_message_id(
+                state.recorded_operations.get("notify_jira_approval", "")
             )
+            patched = self.feishu.update_card(orig_mid, receipt_card) if orig_mid else False
+            if patched:
+                state.recorded_operations["notify_receipt"] = f"patched:{orig_mid}"
+            else:
+                self.store.run_idempotent(
+                    state,
+                    "notify_receipt",
+                    lambda: self.feishu.send_card(receipt_card, chat_id=state.feishu_chat_id),
+                )
         except Exception:
             pass
         self.store.save_task(
@@ -583,6 +621,166 @@ class DelegationOrchestrator:
                 task_id, publish_pr=state.auto_publish_pr or self.github.is_configured
             )
         return state
+
+    def refine_jira_draft(self, task_id: str, instruction: str) -> DurableTaskState:
+        """Update a pending `WAITING_JIRA_APPROVAL` draft via natural-language feedback & patch Feishu card."""
+        state = self._require_task(task_id)
+        if state.lifecycle_status != "WAITING_JIRA_APPROVAL" or state.jira_draft is None:
+            raise ValueError(f"Task '{task_id}' is not waiting for Jira draft approval.")
+        updated_draft, cost = self.drafter.refine_jira_draft(
+            current_draft=state.jira_draft, instruction=instruction
+        )
+        state.jira_draft = updated_draft
+        state.total_cost_usd = round(state.total_cost_usd + cost, 6)
+        state.human_interaction_seconds += 6
+
+        all_repos = list(self.settings.load_repositories().keys())
+        jira_card = build_jira_approval_card(
+            state, self.web_base_url, candidate_repos=all_repos
+        )
+        self.store.write_artifact(task_id, "feishu_jira_approval_card.json", jira_card)
+        try:
+            orig_mid = extract_feishu_message_id(
+                state.recorded_operations.get("notify_jira_approval", "")
+            )
+            if not (orig_mid and self.feishu.update_card(orig_mid, jira_card)):
+                new_deliv = self.feishu.send_card(jira_card, chat_id=state.feishu_chat_id)
+                state.recorded_operations["notify_jira_approval"] = new_deliv
+        except Exception:
+            pass
+
+        self.append_live_event(
+            state,
+            attempt=0,
+            step=0,
+            max_steps=self.settings.max_coding_steps,
+            kind="jira_refined",
+            icon="✏️",
+            title=f"已按反馈更新 Jira 工单草稿：{updated_draft.summary}",
+            detail=instruction[:200],
+        )
+        return self.store.save_task(
+            state,
+            step_name="jira_draft_refined",
+            note=f"Refined Jira draft: {updated_draft.summary[:120]}",
+        )
+
+    def switch_jira_draft_repo(
+        self, task_id: str, new_target_repo: str, *, trigger_message_id: str = ""
+    ) -> DurableTaskState:
+        """Re-scope a `WAITING_JIRA_APPROVAL` task onto another target repository & update card in-place."""
+        state = self._require_task(task_id)
+        profile = self.settings.resolve_repository(new_target_repo)
+        sandbox = WorktreeSandbox(profile, self.settings.worktrees_dir, state.task_id)
+        prior_draft = state.jira_draft
+        contract, fresh_draft, cost = self.drafter.draft(
+            raw_request=state.raw_request,
+            profile=profile,
+            sandbox=sandbox,
+            owner_id=state.contract.owner_id,
+            max_budget_usd=state.contract.max_budget_usd,
+            default_jira_project=self.settings.jira_default_project,
+        )
+        if prior_draft is not None:
+            fresh_draft.summary = prior_draft.summary
+            fresh_draft.description = prior_draft.description
+            fresh_draft.acceptance_criteria = list(prior_draft.acceptance_criteria)
+            fresh_draft.priority = prior_draft.priority
+            fresh_draft.issue_type = prior_draft.issue_type
+            fresh_draft.labels = ["ai-delegated", profile.repo_id]
+
+        state.contract = contract
+        state.jira_draft = fresh_draft
+        state.worktree_path = str(sandbox.worktree_path)
+        state.baseline_human_minutes = profile.baseline_human_minutes
+        state.total_cost_usd = round(state.total_cost_usd + cost, 6)
+
+        all_repos = list(self.settings.load_repositories().keys())
+        jira_card = build_jira_approval_card(
+            state, self.web_base_url, candidate_repos=all_repos
+        )
+        self.store.write_artifact(task_id, "feishu_jira_approval_card.json", jira_card)
+        try:
+            orig_mid = trigger_message_id or extract_feishu_message_id(
+                state.recorded_operations.get("notify_jira_approval", "")
+            )
+            if not (orig_mid and self.feishu.update_card(orig_mid, jira_card)):
+                new_deliv = self.feishu.send_card(jira_card, chat_id=state.feishu_chat_id)
+                state.recorded_operations["notify_jira_approval"] = new_deliv
+        except Exception:
+            pass
+        return self.store.save_task(
+            state,
+            step_name="jira_repo_switched",
+            note=f"Switched target repository to {profile.repo_id}",
+        )
+
+    def reconcile_bound_jira_issue(self, task_id: str) -> bool:
+        """Poll a bound active Jira issue for remote description edits or new human comments."""
+        state = self._require_task(task_id)
+        if not (state.jira_issue_key and self.jira.is_configured):
+            return False
+
+        issue = self.jira.get_issue(state.jira_issue_key)
+        state.jira_status = issue.status
+        prev_fp = state.recorded_operations.get("jira_spec_fingerprint", "")
+        if not prev_fp:
+            # Seed baseline fingerprint on legacy tasks created before v3.1
+            self._seed_jira_sync_baseline(state, issue)
+            self.store.save_task(state)
+            return False
+
+        spec_changed = prev_fp != issue.spec_fingerprint
+        new_comments = [
+            c
+            for c in issue.raw_comments
+            if c.get("id") and f"jira_comment_{c['id']}" not in state.recorded_operations
+        ]
+        if not spec_changed and not new_comments:
+            return False
+
+        self._seed_jira_sync_baseline(state, issue)
+        state.contract.jira_issue_key = issue.key
+        state.contract.jira_issue_url = issue.url
+        state.contract.objective = issue.summary
+        state.contract.reproduction_evidence = issue.render_authoritative_spec()
+        state.contract.contract_version += 1
+
+        if new_comments:
+            latest_c = new_comments[-1]
+            change_summary = f"{latest_c.get('author', 'Jira')}: {latest_c.get('body', '')}"
+            author = latest_c.get("author", "Jira")
+        else:
+            change_summary = f"工单标题/描述已更新：{issue.summary}"
+            author = "Jira Spec"
+
+        state.recorded_operations["latest_human_pr_comment"] = (
+            f"[Authoritative Jira {issue.key} Update]\n{change_summary}\n\n"
+            f"Latest Jira Spec:\n{issue.render_authoritative_spec()}"
+        )
+        self.append_live_event(
+            state,
+            attempt=state.sandbox_attempt_count,
+            step=0,
+            max_steps=self.settings.max_coding_steps,
+            kind="jira_remote_update",
+            icon="🔄",
+            title=f"检测到 Jira `{issue.key}` 远端变更/新评论，已自动同步契约 (v{state.contract.contract_version})",
+            detail=change_summary[:260],
+        )
+        self.store.save_task(
+            state,
+            step_name="jira_remote_change_synced",
+            note=f"Auto-synced remote Jira update on {issue.key}: {change_summary[:160]}",
+        )
+        if not self.is_task_actively_running(task_id):
+            self.notify_review_fix_needed(
+                state,
+                trigger_source="jira_update",
+                human_comment=change_summary,
+                comment_author=author,
+            )
+        return True
 
     def sync_contract_from_jira(self, task_id: str) -> DurableTaskState:
         """Re-fetch authoritative Jira ticket so edits/comments on Jira supersede local state."""
@@ -959,8 +1157,12 @@ class DelegationOrchestrator:
             )
 
             # Only invoke Focused Single Reviewer if deterministic hard checks passed
+            base_gate_ok = (
+                evidence.verification_mode_used == "regression_and_build"
+                or evidence.repro_test_failed_on_base
+            )
             if (
-                evidence.repro_test_failed_on_base
+                base_gate_ok
                 and evidence.repro_test_passed_on_head
                 and evidence.existing_test_suite_passed
                 and evidence.tests_weakened_check
@@ -975,12 +1177,16 @@ class DelegationOrchestrator:
                     title=f"单测门禁通过！正在调用独立 AI Reviewer (`{self.settings.reviewer_model}`) 审查代码…",
                 )
                 rev_t0 = time.monotonic()
-                report_url = f"{self.web_base_url}/reports/{state.task_id}/review"
+                ext_report_url = (
+                    f"{self.external_report_url_base}/reports/{state.task_id}/review"
+                    if self.external_report_url_base
+                    else ""
+                )
                 reviewer_report, rev_cost = self.reviewer.review(
                     contract=state.contract,
                     sandbox=sandbox,
                     evidence=evidence,
-                    full_report_url=report_url,
+                    full_report_url=ext_report_url,
                 )
                 state.total_cost_usd = round(state.total_cost_usd + rev_cost, 6)
                 state.agent_elapsed_seconds = round(
@@ -989,6 +1195,14 @@ class DelegationOrchestrator:
                 evidence.reviewer_report = reviewer_report
                 evidence.unverified_risks = list(reviewer_report.unverified_risks)
                 state.verification_evidence = evidence
+                if reviewer_report.reviewer_fallback_note:
+                    self.append_live_event(
+                        state,
+                        attempt=attempt,
+                        kind="review_fallback",
+                        icon="⚠️",
+                        title=reviewer_report.reviewer_fallback_note,
+                    )
                 self.append_live_event(
                     state,
                     attempt=attempt,
@@ -1083,6 +1297,7 @@ class DelegationOrchestrator:
         action: str,
         permitted_scopes: list[str] | None = None,
         note: str = "",
+        trigger_message_id: str = "",
     ) -> DurableTaskState:
         """Allow delegator to cancel/handoff or adjust permitted_scopes from Web Queue / CLI."""
         state = self._require_task(task_id)
@@ -1114,6 +1329,19 @@ class DelegationOrchestrator:
             return self.store.save_task(state, step_name="accepted_by_human", note=note)
         if action == "abandon":
             state.lifecycle_status = "ABANDONED_OR_REVERTED"
+            abandoned_card = build_abandoned_card(state, note or "已由人工放弃")
+            try:
+                mid = trigger_message_id
+                if not mid:
+                    for k, v in reversed(list(state.recorded_operations.items())):
+                        if k.startswith(("notify_jira_approval", "notify_merge_approval")):
+                            mid = extract_feishu_message_id(v)
+                            if mid:
+                                break
+                if mid:
+                    self.feishu.update_card(mid, abandoned_card)
+            except Exception:
+                pass
             return self.store.save_task(state, step_name="abandoned_by_human", note=note)
         if action == "publish_pr":
             if not (state.verification_evidence and state.verification_evidence.passed_all_hard_gates):
@@ -1329,12 +1557,17 @@ class DelegationOrchestrator:
 
             ev = state.verification_evidence
             if ev and ev.reviewer_report and state.head_commit_sha:
-                report_url = f"{self.web_base_url}/reports/{state.task_id}/review"
+                ext_report_url = (
+                    f"{self.external_report_url_base}/reports/{state.task_id}/review"
+                    if self.external_report_url_base
+                    else ""
+                )
                 review_md = render_pr_review_agent_comment(
                     ev.reviewer_report,
                     verified_commit_sha=state.head_commit_sha,
                     repro_test_target=ev.repro_test_target,
-                    full_report_url=report_url,
+                    full_report_url=ext_report_url,
+                    verification_mode=ev.verification_mode_used,
                 )
                 rev_url, _ = self.store.run_idempotent(
                     state,
@@ -1398,15 +1631,20 @@ class DelegationOrchestrator:
                     state.deliverable_pr_number = int(pr_info["number"])
                     state.lifecycle_status = "PR_OPEN_FOLLOWING_UP"
 
-                    # Post structured PR Review report with full report link
+                    # Post structured PR Review report (portable, zero loopback 127.0.0.1 dead links!)
                     ev = state.verification_evidence
                     if ev and ev.reviewer_report and state.head_commit_sha:
-                        report_url = f"{self.web_base_url}/reports/{state.task_id}/review"
+                        ext_report_url = (
+                            f"{self.external_report_url_base}/reports/{state.task_id}/review"
+                            if self.external_report_url_base
+                            else ""
+                        )
                         review_md = render_pr_review_agent_comment(
                             ev.reviewer_report,
                             verified_commit_sha=state.head_commit_sha,
                             repro_test_target=ev.repro_test_target,
-                            full_report_url=report_url,
+                            full_report_url=ext_report_url,
+                            verification_mode=ev.verification_mode_used,
                         )
                         rev_url, _ = self.store.run_idempotent(
                             state,
@@ -1425,7 +1663,7 @@ class DelegationOrchestrator:
                         reply = (
                             f"Updated branch `{state.branch_name}` at `{(state.head_commit_sha or '')[:8]}` "
                             f"in response to review feedback.\n\n"
-                            f"- Fail-to-Pass (`{state.verification_evidence.repro_test_target if state.verification_evidence else ''}`): ✅\n"
+                            f"- Sandbox Verification (`{state.verification_evidence.repro_test_target if state.verification_evidence else ''}`): ✅\n"
                             f"- Independent PR Review (`{state.verification_evidence.reviewer_report.verdict if (state.verification_evidence and state.verification_evidence.reviewer_report) else 'APPROVE'}`): ✅"
                         )
                         self.github.post_pr_comment(
@@ -1434,20 +1672,31 @@ class DelegationOrchestrator:
                             body=reply,
                         )
 
-                    # Sync PR URL + Review Report back onto authoritative Jira ticket
+                    # Sync PR URL + portable GitHub Review anchor + summary back onto authoritative Jira ticket!
                     if state.jira_issue_key and self.jira.is_configured:
                         try:
-                            report_link = f"{self.web_base_url}/reports/{state.task_id}/review"
+                            portable_rev_link = (
+                                f"{self.external_report_url_base}/reports/{state.task_id}/review"
+                                if self.external_report_url_base
+                                else (state.pr_review_comment_url or state.deliverable_pr_url or "")
+                            )
+                            rev_rep = ev.reviewer_report if ev else None
+                            rev_digest = (
+                                f"`{rev_rep.quality_score or 95}/100` ({rev_rep.reviewer_model}) — {rev_rep.summary}"
+                                if rev_rep
+                                else "APPROVE"
+                            )
                             self.store.run_idempotent(
                                 state,
                                 f"jira_pr_opened_{(state.head_commit_sha or '')[:8]}",
                                 lambda: str(
                                     self.jira.add_comment(
-                                        state.jira_issue_key,
+                                        state.jira_issue_key or "",
                                         (
-                                            f"🔎 GitHub PR #{state.deliverable_pr_number} 已提审并通过本地门禁与 AI Code Review\n"
+                                            f"🔎 GitHub PR #{state.deliverable_pr_number} 已提审并通过沙箱门禁与 AI Code Review\n"
                                             f"- Pull Request: {state.deliverable_pr_url}\n"
-                                            f"- 全量审查报告: {report_link}"
+                                            f"- 审查评分与结论: {rev_digest}\n"
+                                            f"- 在线全量审查报告: {portable_rev_link}"
                                         ),
                                     )
                                 ),
@@ -1681,6 +1930,19 @@ class DelegationOrchestrator:
                 parsed["task_id"], approved_by="feishu_reply", auto_execute=auto_execute
             )
 
+        if intent == "quick_refine_jira":
+            waiting_jira = self.store.list_tasks(status="WAITING_JIRA_APPROVAL", limit=10)
+            target_j = next(
+                (t for t in waiting_jira if not chat_id or t.feishu_chat_id == chat_id),
+                waiting_jira[0] if waiting_jira else None,
+            )
+            if target_j is None:
+                return None
+            return self.refine_jira_draft(target_j.task_id, parsed["instruction"])
+
+        if intent == "task_refine_jira":
+            return self.refine_jira_draft(parsed["task_id"], parsed["instruction"])
+
         if intent == "quick_approve_merge":
             waiting_merge = self.store.list_tasks(status="WAITING_MERGE_APPROVAL", limit=10)
             target_m = next(
@@ -1750,17 +2012,36 @@ class DelegationOrchestrator:
             )
 
         if intent == "followup":
+            existing_target = self.store.get_task(parsed["task_id"])
+            if existing_target and existing_target.lifecycle_status == "WAITING_JIRA_APPROVAL":
+                return self.refine_jira_draft(parsed["task_id"], parsed["comment"])
             if not auto_execute:
-                return self.store.get_task(parsed["task_id"])
+                return existing_target
             return self.handle_pr_review_comment(
                 parsed["task_id"],
                 comment_body=parsed["comment"],
                 publish_pr=self.github.is_configured,
             )
 
+        # Conversational draft edit heuristic: if a pending Jira draft is waiting in this chat
+        # and the user replies with an edit phrase ("把优先级改成...", "加上...", "改成..."),
+        # refine the pending Jira draft instead of creating a duplicate task!
+        req_text = parsed["raw_request"].strip()
+        if not parsed.get("jira_issue_key") and parsed.get("explicit_repo") != "true":
+            waiting_jira = self.store.list_tasks(status="WAITING_JIRA_APPROVAL", limit=5)
+            pending_in_chat = next(
+                (t for t in waiting_jira if not chat_id or t.feishu_chat_id == chat_id),
+                waiting_jira[0] if waiting_jira else None,
+            )
+            if pending_in_chat is not None and req_text.startswith(
+                ("把", "改成", "改为", "加上", "补充", "删掉", "去掉", "标题", "优先级", "验收")
+            ):
+                return self.refine_jira_draft(pending_in_chat.task_id, req_text)
+
+        effective_repo = parsed["target_repo"] if parsed.get("explicit_repo") == "true" else ""
         return self.submit_task(
             raw_request=parsed["raw_request"],
-            target_repo=parsed["target_repo"],
+            target_repo=effective_repo,
             jira_issue_key=parsed.get("jira_issue_key", ""),
             auto_execute=auto_execute,
             publish_pr=self.github.is_configured,
@@ -1775,8 +2056,8 @@ class DelegationOrchestrator:
         if not ev.tests_weakened_check:
             issues.append(f"- Anti-tampering violations (do NOT remove asserts or add skips): {ev.anti_tampering_violations}")
         if not ev.repro_test_passed_on_head:
-            issues.append(f"- Target regression test `{ev.repro_test_target}` FAILED on your HEAD commit.")
-        if not ev.repro_test_failed_on_base:
+            issues.append(f"- Target regression/build check `{ev.repro_test_target}` FAILED on your HEAD commit.")
+        if ev.verification_mode_used != "regression_and_build" and not ev.repro_test_failed_on_base:
             issues.append(
                 f"- Target regression test `{ev.repro_test_target}` did NOT fail on baseline `{ev.verified_commit_sha[:8]}`! "
                 "Provide or write a unit test in `tests/` that reproduces the bug on baseline (FAIL) and passes with your fix (PASS)."
@@ -1881,7 +2162,11 @@ class DelegationOrchestrator:
         return {"ready": True, "merged": False, "reason": "waiting_human_approval"}
 
     def approve_and_merge(
-        self, task_id: str, *, approved_by: str = "console_user"
+        self,
+        task_id: str,
+        *,
+        approved_by: str = "console_user",
+        trigger_message_id: str = "",
     ) -> dict[str, str | bool]:
         """Execute atomic SHA-locked Squash Merge after human approval on Console or Feishu Card."""
         state = self._require_task(task_id)
@@ -1964,6 +2249,18 @@ class DelegationOrchestrator:
                     state.jira_status = done_st
             except Exception:
                 pass
+        # Patch Merge Approval Card in-place on Feishu so old buttons vanish cleanly!
+        try:
+            closed_card = build_merged_closed_card(state, self.web_base_url)
+            self.store.write_artifact(task_id, "feishu_merged_closed_card.json", closed_card)
+            mid = trigger_message_id or extract_feishu_message_id(
+                state.recorded_operations.get(f"notify_merge_approval_{ev.verified_commit_sha[:8]}", "")
+            )
+            if mid:
+                self.feishu.update_card(mid, closed_card)
+        except Exception:
+            pass
+
         self.store.save_task(
             state,
             step_name="approved_and_merged_pr",
