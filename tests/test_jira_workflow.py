@@ -315,3 +315,33 @@ def test_jira_poller_and_web_api_endpoints(tmp_path: Path) -> None:
     preview = client.get("/api/integrations/jira/issue/KAN-305")
     assert preview.status_code == 200
     assert preview.json()["summary"] == "Poller 自动发现的待办工单"
+
+
+def test_pm_and_qa_jira_skills_loaded_and_sanitize_tech_jargon(tmp_path: Path) -> None:
+    from digital_employee.agents.contract_drafter import (
+        _clean_jira_summary,
+        _filter_business_ac,
+        load_jira_authoring_skills,
+    )
+
+    skills_text = load_jira_authoring_skills()
+    assert 'name="pm-jira-story-writer"' in skills_text
+    assert 'name="qa-jira-bug-writer"' in skills_text
+    assert "User Story" in skills_text
+
+    # Parenthetical code hint in title must be stripped cleanly
+    assert (
+        _clean_jira_summary("【直播间互动】长时直播弹幕累积导致内存飙升（live_context 有界缓存）", "")
+        == "【直播间互动】长时直播弹幕累积导致内存飙升"
+    )
+    # Technical pytest / .py / DEC-001 items must never leak into Jira black-box AC
+    cleaned_ac = _filter_business_ac(
+        [
+            "高密度持续弹幕场景下服务内存保持平稳，不发生异常重启",
+            "新增单元测试：运行 pytest tests/test_live_context.py 通过",
+            "按 COPILOT-DEC-001 运行 scripts/update_project_stats.py",
+        ],
+        [],
+    )
+    assert cleaned_ac == ["高密度持续弹幕场景下服务内存保持平稳，不发生异常重启"]
+

@@ -5,9 +5,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from digital_employee.models.contract import JiraTicketDraft, TaskContract
+
+MergeRecommendation = Literal["MERGE_READY", "MERGE_WITH_CAUTION", "DO_NOT_MERGE"]
 
 FailureClass = Literal[
     "NONE",
@@ -71,6 +73,9 @@ class ReviewerReport(BaseModel):
     """Independent Cross-Model PR Review Agent output (Structured overview + full audit matrix)."""
 
     verdict: Literal["APPROVE", "BLOCK"] = "APPROVE"
+    quality_score: int | None = None
+    merge_recommendation: MergeRecommendation | None = None
+    merge_recommendation_label: str = ""
     reviewer_model: str = ""
     skill_used: str = "pr-code-review"
     ac_covered: bool = True
@@ -85,6 +90,86 @@ class ReviewerReport(BaseModel):
     unverified_risks: list[str] = Field(default_factory=list)
     summary: str = ""
     full_report_url: str = ""
+
+    @model_validator(mode="after")
+    def _calibrate_score_and_recommendation(self) -> ReviewerReport:
+        warn_dims = [item for item in self.audit_checklist if item.status == "WARN"]
+        fail_dims = [item for item in self.audit_checklist if item.status == "FAIL"]
+        obs_cnt = len(self.notable_observations)
+
+        is_blocked = (
+            self.verdict == "BLOCK"
+            or len(self.blocking_issues) > 0
+            or not self.ac_covered
+            or not self.decision_ledger_compliant
+        )
+        if is_blocked:
+            p0_cnt = sum(1 for b in self.blocking_issues if b.severity == "P0")
+            p1_cnt = sum(1 for b in self.blocking_issues if b.severity != "P0")
+            penalty = (
+                35 * p0_cnt
+                + 22 * p1_cnt
+                + (25 if not self.ac_covered else 0)
+                + (25 if not self.decision_ledger_compliant else 0)
+                + 12 * len(fail_dims)
+                + 4 * len(warn_dims)
+            )
+            det_score = max(10, min(58, 100 - max(42, penalty)))
+            self.quality_score = (
+                max(10, min(59, int(self.quality_score)))
+                if self.quality_score is not None
+                else det_score
+            )
+            self.merge_recommendation = "DO_NOT_MERGE"
+            self.merge_recommendation_label = (
+                f"禁止合入（{len(self.blocking_issues)} 项阻断需返修）"
+                if self.blocking_issues
+                else "禁止合入（未达准入门禁）"
+            )
+            return self
+
+        has_dim_caution = len(warn_dims) > 0 or len(fail_dims) > 0
+        if has_dim_caution:
+            det_score = max(
+                75,
+                min(
+                    89,
+                    100
+                    - 8 * len(warn_dims)
+                    - 12 * len(fail_dims)
+                    - 2 * min(obs_cnt, 3),
+                ),
+            )
+            self.quality_score = (
+                max(75, min(89, int(self.quality_score)))
+                if self.quality_score is not None
+                else det_score
+            )
+            self.merge_recommendation = "MERGE_WITH_CAUTION"
+            caution_cnt = len(warn_dims) + len(fail_dims)
+            self.merge_recommendation_label = f"可合入（{caution_cnt} 项边界留意）"
+            return self
+
+        det_score = max(
+            90,
+            min(
+                98,
+                96 - 2 * min(obs_cnt, 2) - (1 if self.unverified_risks else 0),
+            ),
+        )
+        score = (
+            max(75, min(100, int(self.quality_score)))
+            if self.quality_score is not None
+            else det_score
+        )
+        self.quality_score = score
+        if score >= 90:
+            self.merge_recommendation = "MERGE_READY"
+            self.merge_recommendation_label = "可直接合入"
+        else:
+            self.merge_recommendation = "MERGE_WITH_CAUTION"
+            self.merge_recommendation_label = "可合入（留意边界提示）"
+        return self
 
 
 class VerificationEvidence(BaseModel):
@@ -136,6 +221,9 @@ class MergeApprovalCard(BaseModel):
     pr_url: str
     verified_commit_sha: str
     ci_checks_count: int = 0
+    quality_score: int = 95
+    merge_recommendation: str = "MERGE_READY"
+    merge_recommendation_label: str = "可直接合入"
     reviewer_model: str = ""
     reviewer_verdict: str = "APPROVE"
     reviewer_summary: str = ""

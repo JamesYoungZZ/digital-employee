@@ -440,11 +440,16 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
           {t.lifecycle_status === "WAITING_MERGE_APPROVAL" && (
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-3.5 text-xs text-emerald-800 dark:text-emerald-200">
               <div>
-                <div className="font-semibold text-sm">
-                  🛎️ 全部 4 道前置门禁与线上 GitHub Actions CI 已通过，等待你的合入审批
+                <div className="flex flex-wrap items-center gap-2 font-semibold text-sm">
+                  <span>🛎️ 待你合入审批</span>
+                  {ev?.reviewer_report?.quality_score != null && (
+                    <span className="rounded-full bg-emerald-600 px-2.5 py-0.5 text-xs font-bold text-white">
+                      综合评分 {ev.reviewer_report.quality_score}/100 · {ev.reviewer_report.merge_recommendation_label || "可合入"}
+                    </span>
+                  )}
                 </div>
-                <div className="mt-0.5 opacity-85">
-                  点击右侧按钮（或在飞书审批卡上点批准）将立即执行 SHA 锁定的自动 Squash Merge。
+                <div className="mt-1 opacity-85">
+                  全部 4 道硬门禁与线上 GitHub Actions CI 已全绿；点击右侧按钮（或在飞书审批卡上点批准）将立即执行 SHA 锁定的自动 Squash Merge。
                 </div>
               </div>
               <Button
@@ -798,6 +803,20 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                               {ev.reviewer_report.reviewer_model}
                             </code>
                           )}
+                          {ev.reviewer_report.quality_score != null && (
+                            <span
+                              className={cn(
+                                "rounded-full px-2.5 py-0.5 text-[11px] font-bold",
+                                ev.reviewer_report.merge_recommendation === "DO_NOT_MERGE"
+                                  ? "bg-red-600 text-white"
+                                  : ev.reviewer_report.merge_recommendation === "MERGE_WITH_CAUTION"
+                                    ? "bg-amber-500/20 text-amber-700 dark:text-amber-300"
+                                    : "bg-emerald-600 text-white"
+                              )}
+                            >
+                              {ev.reviewer_report.quality_score}/100 · {ev.reviewer_report.merge_recommendation_label || "可合入"}
+                            </span>
+                          )}
                           <span
                             className={cn(
                               "rounded-full px-2 py-0.5 text-[11px] font-semibold",
@@ -1005,7 +1024,7 @@ export function TaskInspectorSheet({ detail, onClose, onMutated }: Props) {
                 type="text"
                 value={ruleText}
                 onChange={(e) => setRuleText(e.target.value)}
-                placeholder="输入需长期遵守的工程/业务约束（独立存入治理中心，零侵入业务仓）..."
+                placeholder="输入长期研发工程红线（如 import 禁令、构建必跑脚本；请勿填写单次产品需求）..."
                 className="h-8 flex-1 w-full rounded-lg border border-zinc-200 bg-white px-2.5 text-xs dark:border-zinc-800 dark:bg-zinc-950"
               />
               <Button type="submit" variant="emerald" size="sm" disabled={busyAction === "rule"}>

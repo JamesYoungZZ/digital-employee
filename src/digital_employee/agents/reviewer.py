@@ -47,13 +47,26 @@ def render_pr_review_agent_comment(
     """Render a crystal-clear, structured PR Review comment with full report link & expandable checklist."""
     effective_url = full_report_url or report.full_report_url
     is_approve = report.verdict == "APPROVE"
+    score = report.quality_score if report.quality_score is not None else (95 if is_approve else 45)
+    rec_icon = (
+        "🟢"
+        if report.merge_recommendation == "MERGE_READY"
+        else ("🟡" if report.merge_recommendation == "MERGE_WITH_CAUTION" else "🔴")
+    )
+    rec_label = report.merge_recommendation_label or ("可直接合入" if is_approve else "禁止合入")
     header = (
-        f"### ✅ AI 独立代码审查通过 (`APPROVE` · 模型 `{report.reviewer_model}`)"
+        f"### ✅ AI 独立代码审查通过 · `{score}/100` 分 (`APPROVE` · 模型 `{report.reviewer_model}`)"
         if is_approve
-        else f"### 🛑 AI 独立代码审查拦截 · 需修复后合入 (`BLOCK` · 共 `{len(report.blocking_issues)}` 项阻断问题 · 模型 `{report.reviewer_model}`)"
+        else f"### 🛑 AI 独立代码审查拦截 · `{score}/100` 分 (`BLOCK` · 共 `{len(report.blocking_issues)}` 项阻断问题 · 模型 `{report.reviewer_model}`)"
     )
 
-    lines: list[str] = ["<!-- ai-pr-review-agent -->", header, ""]
+    lines: list[str] = [
+        "<!-- ai-pr-review-agent -->",
+        header,
+        "",
+        f"**📊 综合质量评分**：`{score} / 100` · **合入建议**：{rec_icon} **{rec_label}**",
+        "",
+    ]
 
     # 1. Plain-Chinese overview of what actually happened in this PR
     if report.change_overview:
@@ -118,10 +131,25 @@ def render_full_review_report_html(state: DurableTaskState, diff_text: str) -> s
     esc = html.escape
 
     verdict = rep.verdict if rep else "PENDING"
-    verdict_bg = "#059669" if verdict == "APPROVE" else ("#dc2626" if verdict == "BLOCK" else "#52525b")
-    verdict_label = "✅ 审查通过 (APPROVE)" if verdict == "APPROVE" else (
-        f"🛑 审查拦截 (BLOCK · {len(rep.blocking_issues) if rep else 0} 项阻断)" if verdict == "BLOCK" else "⏳ 待审查"
+    score_val = rep.quality_score if (rep and rep.quality_score is not None) else None
+    rec_label = rep.merge_recommendation_label if rep else ""
+    verdict_bg = (
+        "#059669"
+        if (rep and rep.merge_recommendation == "MERGE_READY")
+        else ("#d97706" if verdict == "APPROVE" else ("#dc2626" if verdict == "BLOCK" else "#52525b"))
     )
+    if verdict == "APPROVE":
+        verdict_label = (
+            f"⭐️ {score_val} / 100 · {rec_label}" if score_val is not None else "✅ 审查通过 (APPROVE)"
+        )
+    elif verdict == "BLOCK":
+        verdict_label = (
+            f"🛑 {score_val} / 100 · {rec_label}"
+            if score_val is not None
+            else f"🛑 审查拦截 (BLOCK · {len(rep.blocking_issues) if rep else 0} 项阻断)"
+        )
+    else:
+        verdict_label = "⏳ 待审查"
 
     overview_html = "".join(
         f"<li>{esc(item)}</li>" for item in ((rep.change_overview if rep else []) or [state.contract.objective])
@@ -346,8 +374,14 @@ class FocusedReviewer:
             str(x) for x in (data.get("unverified_risks") or []) if str(x).strip()
         ]
 
+        raw_score = data.get("quality_score")
+        parsed_score: int | None = None
+        if isinstance(raw_score, (int, float)) and not isinstance(raw_score, bool):
+            parsed_score = int(raw_score)
+
         report = ReviewerReport(
             verdict=verdict,
+            quality_score=parsed_score,
             reviewer_model=effective_model,
             skill_used="pr-code-review",
             ac_covered=ac_covered,

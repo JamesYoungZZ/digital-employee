@@ -48,10 +48,22 @@ const FILTERS = [
 ] as const;
 
 const SAMPLE_PROMPTS = [
-  "在 livestream-copilot 的 reply_safety.py 中补齐公屏索要微信号/VX/WhatsApp/身份证号的隐私拦截，以及『已为您补发/已改价/已免单』虚假后台承诺拦截",
-  "为 livestream-copilot 的 reply_safety.py 新增直播广告违禁极限词（如『全网最低价』『100%根治』『国家级』）实时告警检测",
-  "修复 livestream-copilot 的 RoomCommentCoalescer._question_counts 随直播间弹幕无限增长的内存泄漏问题，增加容量上限淘汰",
-  "为 modular-rag 的 search_commerce_documents 工具新增可选 category 过滤参数并保持向后兼容",
+  {
+    repo: "livestream-copilot",
+    text: "直播间常有观众在公屏诱导私加微信/VX/WhatsApp或套话让助播承诺『给您免单/已补发』，极易触发平台违规处罚，需拦截此类回复并引导走官方客服",
+  },
+  {
+    repo: "livestream-copilot",
+    text: "大促连续开播数小时、公屏弹幕持续高频涌入时，助播服务内存随开播时长不断上涨存在卡顿崩溃风险，需控制历史弹幕保留范围保障长稳运行",
+  },
+  {
+    repo: "modular-rag",
+    text: "导购客服检索商品知识库时经常把不同品类的尺码/售后规则混在一起，希望支持按商品类目筛选检索结果提升回答准确度",
+  },
+  {
+    repo: "modular-rag",
+    text: "买家搜索带连字符的户外商品科技词（如 Gore-Tex、 Dri-FIT）时经常搜不到明明在售的商品，请排查修复漏召回问题",
+  },
 ];
 
 function matchesFilter(t: TaskItem, filter: string): boolean {
@@ -794,19 +806,18 @@ export function WorkbenchView({
 
               {/* Quick-fill Chips */}
               <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-[11px] text-zinc-400 mr-1">真实业务需求 / 线上隐患示例：</span>
+                <span className="text-[11px] text-zinc-400 mr-1">产品 / 运营 / QA 业务诉求示例：</span>
                 {SAMPLE_PROMPTS.map((sp) => (
                   <button
-                    key={sp}
+                    key={sp.text}
                     type="button"
                     onClick={() => {
-                      setPrompt(sp);
-                      if (sp.includes("livestream-copilot")) setTargetRepo("livestream-copilot");
-                      else if (sp.includes("modular-rag")) setTargetRepo("modular-rag");
+                      setPrompt(sp.text);
+                      setTargetRepo(sp.repo);
                     }}
                     className="rounded-md border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11.5px] text-zinc-600 hover:border-zinc-300 hover:text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:border-zinc-700 dark:hover:text-zinc-200 cursor-pointer transition-colors"
                   >
-                    {sp.slice(0, 44)}…
+                    {sp.text.slice(0, 42)}…
                   </button>
                 ))}
               </div>

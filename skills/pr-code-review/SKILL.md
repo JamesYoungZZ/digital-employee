@@ -37,6 +37,10 @@ Emit an item in `blocking_issues` **ONLY** when you can point to a concrete file
 
 - **`verdict = "APPROVE"`**: 当 `blocking_issues` 为空 (`[]`) 时必须为 `"APPROVE"`。
 - **`verdict = "BLOCK"`**: 当存在至少 1 个 `P0`/`P1` 阻断缺陷时必须为 `"BLOCK"`。
+- **`quality_score`** (`0`～`100` 整数) 与 **`merge_recommendation`** (`"MERGE_READY"` | `"MERGE_WITH_CAUTION"` | `"DO_NOT_MERGE"`):
+  - `90`～`100` (`"MERGE_READY"`): 0 阻断、验收全覆盖、5 维核查全 `PASS`，可直接合入；
+  - `75`～`89` (`"MERGE_WITH_CAUTION"`): 0 阻断且符合契约，但存在 `WARN` 维度或值得留意的线上边界，建议关注边界后合入；
+  - `< 60` (`"DO_NOT_MERGE"`): 存在 `P0`/`P1` 阻断缺陷、验收未覆盖或违反治理账本，禁止合入。
 - **`change_overview`**: 用 **2～3 条直白中文短句**说明「这个 PR 改了哪个文件、干了什么具体业务改动」，让没看源码的人 5 秒看懂发生了什么（例如 `"app/reply_safety.py: 新增微信号/WhatsApp/身份证公屏索要拦截正则"`）。
 - **`audit_checklist`**: 固定输出 **5 个审查维度**的核查结论（`PASS` / `WARN` / `FAIL` + 1 句具体核查依据）：
   1. `"需求与验收覆盖"`
@@ -53,6 +57,8 @@ Return **strict JSON only** (NOTE: inside JSON string values, NEVER use unescape
 ```json
 {
   "verdict": "APPROVE",
+  "quality_score": 95,
+  "merge_recommendation": "MERGE_READY",
   "ac_covered": true,
   "decision_ledger_compliant": true,
   "change_overview": [

@@ -295,6 +295,14 @@ class DurableStore:
             ).fetchone()
         return row is not None
 
+    def get_policy_sync_note(self, repo_id: str) -> str:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT source_note FROM repository_policy_sync WHERE repo_id = ?",
+                (repo_id,),
+            ).fetchone()
+        return str(row["source_note"]) if row is not None else ""
+
     def mark_policies_initialized(self, repo_id: str, source_note: str = "") -> None:
         now = utc_now_iso()
         with self._connect() as conn:

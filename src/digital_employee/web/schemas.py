@@ -59,7 +59,7 @@ class PromoteDecisionPayload(BaseModel):
 
 class UpsertPolicyPayload(BaseModel):
     title: str = ""
-    category: PolicyCategory = "GENERAL"
+    category: PolicyCategory = "CODE_QUALITY"
     scope: str = "*"
     rule: str
     reason: str = ""

@@ -10,13 +10,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 if TYPE_CHECKING:
     from digital_employee.models.contract import RepositoryProfile
     from digital_employee.storage.durable_store import DurableStore
 
-PolicyCategory = Literal["SECURITY", "ARCHITECTURE", "TESTING", "BUSINESS", "GENERAL"]
+PolicyCategory = Literal["ARCHITECTURE", "SECURITY", "TESTING", "CODE_QUALITY"]
 PolicyStatus = Literal["APPROVED_POLICY", "PAUSED", "ONE_OFF_WORKAROUND", "DEPRECATED"]
 PolicySourceType = Literal["CONSOLE_MANUAL", "TASK_PROMOTED", "REPO_SYNC"]
 PolicyHealthStatus = Literal[
@@ -26,43 +26,37 @@ PolicyHealthStatus = Literal[
     "INVALID_SCOPE",
 ]
 
-# Known initial English demo rules -> clear Chinese structured upgrades on first import
+# Product/PRD pseudo-rules from legacy YAML files that do not belong in an engineering ledger
+_EXCLUDED_PRODUCT_PRD_RULE_IDS: set[str] = {
+    "RAG-DEC-003",
+    "COPILOT-DEC-003",
+}
+
+# Pure code, build & CI engineering rules upgraded from initial repo YAML files
 _LEGACY_RULE_UPGRADES: dict[str, dict[str, str]] = {
     "RAG-DEC-001": {
-        "title": "多租户安全隔离：严禁从工具参数读取租户与语料路径",
+        "title": "接口签名红线：敏感租户上下文严禁暴露为工具入参",
         "category": "SECURITY",
-        "rule": "Commerce MCP 入口必须仅从服务端环境变量绑定 tenant_id 与 corpus_root，严禁从大模型工具调用参数中接收。",
-        "reason": "防止提示词注入（Prompt Injection）导致跨租户数据泄露或任意目录穿越读取。",
+        "rule": "MCP Tool 函数签名严禁声明 tenant_id 或 corpus_root 参数；租户与语料根目录只允许在服务端初始化时从环境变量读取。",
+        "reason": "防止外部调用参数覆盖服务端租户上下文或触发目录穿越读取。",
     },
     "RAG-DEC-002": {
-        "title": "测试语料同步：修改语料文档须重建哈希清单与向量索引",
+        "title": "本地构建必跑：修改测试语料后须重建 SHA-256 与索引",
         "category": "TESTING",
-        "rule": "修改 fixtures/commerce/documents/*.md 后，必须同步更新 manifest.json 中的 SHA-256 摘要，并运行 scripts/index_commerce.py --dense 重建 vectors.json。",
-        "reason": "CommerceCorpus 启动时强制校验文件 SHA-256 摘要与 corpus_version 一致性，漏更会导致启动失败。",
-    },
-    "RAG-DEC-003": {
-        "title": "检索原文保真：MCP 层严禁对召回段落做大模型摘要或改写",
-        "category": "ARCHITECTURE",
-        "rule": "检索接口必须原样返回带元数据的 Markdown 原始段落，严禁在 MCP 内部增加 LLM 摘要或改写中间步骤。",
-        "reason": "保留精确限定词与例外条款，确保下游 livestream-copilot 程序化事实核查（Grounding Check）不失真。",
+        "rule": "修改 fixtures/commerce/documents/*.md 后，提交代码前必须执行 scripts/index_commerce.py --dense 同步更新 manifest.json 哈希与 vectors.json。",
+        "reason": "单测启动器强制校验夹具文件 SHA-256 哈希，漏跑构建脚本会导致 pytest 收集阶段报错。",
     },
     "COPILOT-DEC-001": {
-        "title": "CI 门禁同步：增删测试用例后须更新 README 回归统计数",
+        "title": "CI 门禁必跑：增删 pytest 用例后须执行统计同步脚本",
         "category": "TESTING",
-        "rule": "在 tests/ 下新增、删除或参数化 pytest 用例后，提交前必须运行 .venv/bin/python scripts/update_project_stats.py 同步 README.md 中的回归测试计数。",
-        "reason": "线上 CI（evaluation.yml）会执行 scripts/update_project_stats.py --check，统计数过期会直接阻断 PR。",
+        "rule": "在 tests/ 下新增、删除或参数化测试用例后，提交代码前必须运行 .venv/bin/python scripts/update_project_stats.py 更新 README.md 用例计数。",
+        "reason": "GitHub Actions (evaluation.yml) 会运行 scripts/update_project_stats.py --check，未同步会直接导致线上 CI 失败。",
     },
     "COPILOT-DEC-002": {
-        "title": "架构分层红线：在线运行时模块严禁导入 legacy 历史代码",
+        "title": "模块依赖禁令：app/ 在线代码严禁 import legacy 目录",
         "category": "ARCHITECTURE",
-        "rule": "app/ 下的在线运行时模块严禁从 app/legacy/ 导入任何代码。",
-        "reason": "app/legacy/ 仅保留用于离线历史复现，线上单元测试会静态拦截任何 legacy 引用。",
-    },
-    "COPILOT-DEC-003": {
-        "title": "主播话术口径：无事实依据的库存与促销严禁编造为“0/无货”",
-        "category": "BUSINESS",
-        "rule": "仅有价格证据时不得推导包邮或促销说明；未知库存或配送范围必须标记为“待确认（unconfirmed）”，严禁播报为 0 或无货。",
-        "reason": "直播电商主播回复强事实溯源契约，防止虚假促销承诺或误报缺货。",
+        "rule": "app/ 目录下的所有在线运行时模块，严禁出现任何指向 app/legacy/ 的 import 语句。",
+        "reason": "app/legacy/ 为已冻结的历史离线复现代码，架构单测会静态扫描并拦截该依赖。",
     },
 }
 
@@ -88,24 +82,22 @@ _IGNORED_PATH_PREFIXES = (".venv/", "venv/", "node_modules/", ".git/", "http/", 
 
 
 def infer_policy_category(scope: str, rule: str) -> PolicyCategory:
-    """Infer a sensible category when importing legacy rules without explicit category."""
+    """Infer an engineering category when importing rules without an explicit category."""
     text = f"{scope} {rule}".lower()
-    if any(k in text for k in ("tenant", "injection", "secret", "auth", "token", "leak", "安全", "越权", "脱敏", "隔离")):
+    if any(k in text for k in ("tenant", "injection", "secret", "auth", "token", "leak", "env", "安全", "越权", "脱敏", "隔离", "密钥")):
         return "SECURITY"
-    if any(k in text for k in ("pytest", "test", "fixture", "ci ", "manifest.json", "测试", "用例", "门禁")):
+    if any(k in text for k in ("pytest", "test", "fixture", "ci ", "manifest.json", "测试", "用例", "门禁", "脚本")):
         return "TESTING"
-    if any(k in text for k in ("import", "legacy", "layer", "mcp", "module", "架构", "分层", "依赖", "接口")):
+    if any(k in text for k in ("import", "legacy", "layer", "mcp", "module", "depend", "架构", "分层", "依赖", "调用")):
         return "ARCHITECTURE"
-    if any(k in text for k in ("price", "shipping", "inventory", "refund", "order", "业务", "库存", "价格", "订单", "话术")):
-        return "BUSINESS"
-    return "GENERAL"
+    return "CODE_QUALITY"
 
 
 def build_fallback_title(rule: str, scope: str = "*") -> str:
     """Create a concise readable title when legacy entries omit `title`."""
     cleaned = " ".join(rule.strip().split())
     if not cleaned:
-        return f"目录 {scope} 工程约束"
+        return f"目录 {scope} 研发规范"
     first_clause = re.split(r"[。；;.\n]", cleaned, maxsplit=1)[0].strip()
     if len(first_clause) <= 38:
         return first_clause
@@ -122,11 +114,11 @@ class PolicyHealth(BaseModel):
 
 
 class DecisionEntry(BaseModel):
-    """Single engineering/business governance rule managed for a target repository."""
+    """Single software engineering guardrail managed for a target repository."""
 
     id: str
     title: str = ""
-    category: PolicyCategory = "GENERAL"
+    category: PolicyCategory = "CODE_QUALITY"
     scope: str = "*"
     rule: str
     reason: str = ""
@@ -138,13 +130,18 @@ class DecisionEntry(BaseModel):
     updated_at: str = Field(default_factory=lambda: date.today().isoformat())
     visibility_rbac: str = "default"
 
+    @field_validator("category", mode="before")
+    @classmethod
+    def _coerce_legacy_category(cls, v: Any) -> PolicyCategory:
+        if v in ("ARCHITECTURE", "SECURITY", "TESTING", "CODE_QUALITY"):
+            return v
+        return "CODE_QUALITY"
+
     def normalized(self) -> DecisionEntry:
         """Ensure title and category are always populated for display."""
         updates: dict[str, Any] = {}
         if not self.title.strip():
             updates["title"] = build_fallback_title(self.rule, self.scope)
-        if not self.category:
-            updates["category"] = infer_policy_category(self.scope, self.rule)
         if not self.updated_at:
             updates["updated_at"] = self.verified_at or date.today().isoformat()
         return self.model_copy(update=updates) if updates else self
@@ -320,12 +317,44 @@ class DecisionLedger:
         store: DurableStore,
         profile: RepositoryProfile,
     ) -> DecisionLedger:
-        """Load managed policies from `DurableStore` (zero repo intrusion), seeding once if needed."""
+        """Load managed engineering policies from `DurableStore` (zero repo intrusion)."""
         repo_root = Path(profile.local_path)
         if not store.has_initialized_policies(profile.repo_id):
             cls._seed_from_repo_file_once(store, profile)
+        elif not store.get_policy_sync_note(profile.repo_id).startswith("engineering_v2:"):
+            cls._migrate_to_pure_engineering_v2(store, profile)
         entries = store.list_repository_policies(profile.repo_id)
         return cls(entries, repo_root=repo_root)
+
+    @classmethod
+    def _migrate_to_pure_engineering_v2(
+        cls,
+        store: DurableStore,
+        profile: RepositoryProfile,
+    ) -> None:
+        """Purge legacy PRD pseudo-rules once and refresh synced engineering guardrails."""
+        for bad_id in _EXCLUDED_PRODUCT_PRD_RULE_IDS:
+            existing_bad = store.get_repository_policy(profile.repo_id, bad_id)
+            if existing_bad is not None and existing_bad.source_type == "REPO_SYNC":
+                store.delete_repository_policy(profile.repo_id, bad_id)
+
+        for entry in store.list_repository_policies(profile.repo_id):
+            upgrade = _LEGACY_RULE_UPGRADES.get(entry.id)
+            if upgrade and entry.source_type == "REPO_SYNC":
+                refreshed = entry.model_copy(
+                    update={
+                        "title": upgrade["title"],
+                        "category": upgrade["category"],
+                        "rule": upgrade["rule"],
+                        "reason": upgrade["reason"],
+                    }
+                ).normalized()
+                store.upsert_repository_policy(profile.repo_id, refreshed)
+
+        store.mark_policies_initialized(
+            profile.repo_id,
+            source_note="engineering_v2:purged_prd_rules",
+        )
 
     @classmethod
     def _seed_from_repo_file_once(
@@ -333,11 +362,13 @@ class DecisionLedger:
         store: DurableStore,
         profile: RepositoryProfile,
     ) -> int:
-        """One-time non-intrusive import from `<repo>/.ai/DECISIONS.yaml` into `DurableStore`."""
+        """One-time non-intrusive import of engineering rules from `<repo>/.ai/DECISIONS.yaml`."""
         repo_root = Path(profile.local_path)
         file_ledger = cls.from_repo(repo_root, profile.decision_ledger_path)
         imported = 0
-        for idx, entry in enumerate(file_ledger.entries):
+        for entry in file_ledger.entries:
+            if entry.id in _EXCLUDED_PRODUCT_PRD_RULE_IDS:
+                continue
             upgrade = _LEGACY_RULE_UPGRADES.get(entry.id)
             if upgrade:
                 entry = entry.model_copy(
@@ -352,11 +383,7 @@ class DecisionLedger:
                 entry = entry.model_copy(
                     update={
                         "title": entry.title or build_fallback_title(entry.rule, entry.scope),
-                        "category": (
-                            entry.category
-                            if entry.category != "GENERAL"
-                            else infer_policy_category(entry.scope, entry.rule)
-                        ),
+                        "category": infer_policy_category(entry.scope, entry.rule),
                     }
                 )
             entry = entry.model_copy(
@@ -366,11 +393,11 @@ class DecisionLedger:
                     "owner": entry.owner or "jamesyang",
                 }
             ).normalized()
-            store.upsert_repository_policy(profile.repo_id, entry, sort_order=idx)
+            store.upsert_repository_policy(profile.repo_id, entry, sort_order=imported)
             imported += 1
         store.mark_policies_initialized(
             profile.repo_id,
-            source_note=f"seeded {imported} entries from {profile.decision_ledger_path}",
+            source_note=f"engineering_v2:seeded {imported} from {profile.decision_ledger_path}",
         )
         return imported
 
@@ -380,14 +407,14 @@ class DecisionLedger:
         store: DurableStore,
         profile: RepositoryProfile,
     ) -> int:
-        """Import only new policy IDs from `<repo>/.ai/DECISIONS.yaml` without overwriting console edits."""
+        """Import only new engineering policy IDs from `<repo>/.ai/DECISIONS.yaml`."""
         repo_root = Path(profile.local_path)
         file_ledger = cls.from_repo(repo_root, profile.decision_ledger_path)
         existing_ids = {e.id for e in store.list_repository_policies(profile.repo_id)}
         added = 0
         base_order = len(existing_ids)
         for entry in file_ledger.entries:
-            if entry.id in existing_ids:
+            if entry.id in existing_ids or entry.id in _EXCLUDED_PRODUCT_PRD_RULE_IDS:
                 continue
             upgrade = _LEGACY_RULE_UPGRADES.get(entry.id)
             if upgrade:
@@ -405,7 +432,7 @@ class DecisionLedger:
             added += 1
         store.mark_policies_initialized(
             profile.repo_id,
-            source_note=f"incremental sync +{added} from {profile.decision_ledger_path}",
+            source_note=f"engineering_v2:incremental +{added} from {profile.decision_ledger_path}",
         )
         return added
 

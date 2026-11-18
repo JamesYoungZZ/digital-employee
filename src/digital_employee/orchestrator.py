@@ -495,13 +495,27 @@ class DelegationOrchestrator:
         state.jira_issue_url = created.url
         state.jira_status = created.status
 
-        # Lock TaskContract strictly to the approved & created Jira ticket ("后续都以 Jira 任务为准")
+        # Lock TaskContract strictly to the approved & created Jira ticket ("后续都以 Jira 任务为准"),
+        # while retaining repository DecisionLedger engineering guardrails (e.g. DEC-001 scripts) underneath.
+        prior_eng_guardrails = [
+            ac
+            for ac in state.contract.acceptance_criteria
+            if "-DEC-" in ac or "scripts/" in ac
+        ]
+        prior_code_clues = state.contract.reproduction_evidence
         state.contract.jira_issue_key = created.key
         state.contract.jira_issue_url = created.url
         state.contract.objective = created.summary
         if draft.acceptance_criteria:
-            state.contract.acceptance_criteria = list(draft.acceptance_criteria)
-        state.contract.reproduction_evidence = created.render_authoritative_spec()
+            merged_ac = list(draft.acceptance_criteria)
+            for g in prior_eng_guardrails:
+                if g not in merged_ac:
+                    merged_ac.append(g)
+            state.contract.acceptance_criteria = merged_ac
+        state.contract.reproduction_evidence = (
+            created.render_authoritative_spec()
+            + (f"\n\n### Engineering Codebase Clues\n{prior_code_clues}" if prior_code_clues else "")
+        )
         state.contract.contract_version += 1
         state.human_interaction_seconds += 8
 
@@ -1837,6 +1851,9 @@ class DelegationOrchestrator:
             pr_url=state.deliverable_pr_url or pr_data.get("html_url", ""),
             verified_commit_sha=ev.verified_commit_sha,
             ci_checks_count=int(ci_info["total"]),
+            quality_score=int(ev.reviewer_report.quality_score or 95),
+            merge_recommendation=str(ev.reviewer_report.merge_recommendation or "MERGE_READY"),
+            merge_recommendation_label=ev.reviewer_report.merge_recommendation_label or "可直接合入",
             reviewer_model=ev.reviewer_report.reviewer_model,
             reviewer_verdict=ev.reviewer_report.verdict,
             reviewer_summary=ev.reviewer_report.summary,

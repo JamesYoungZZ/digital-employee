@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from digital_employee.models.contract import RepositoryProfile, TaskContract
@@ -521,5 +522,208 @@ def test_noop_clean_exit_verified_vs_rejected_when_tests_fail(tmp_path: Path) ->
     )
     rejected = orch.execute_task("t-noop-bad")
     assert rejected.lifecycle_status == "HANDED_OFF_INCOMPLETE"
+
+
+def test_github_ci_status_fine_grained_pat_actions_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify `inspect_commit_ci_status` falls back to `/actions/runs` + `/jobs` when `/check-runs` returns 403."""
+    import httpx
+
+    from digital_employee.integrations.github_client import GitHubIntegration
+
+    def _mock_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/check-runs"):
+            return httpx.Response(
+                403,
+                headers={"x-accepted-github-permissions": "checks=read"},
+                json={"message": "Resource not accessible by personal access token"},
+            )
+        if path.endswith("/actions/runs"):
+            sha = request.url.params.get("head_sha")
+            if sha == "sha_green":
+                return httpx.Response(
+                    200,
+                    json={
+                        "workflow_runs": [
+                            {
+                                "id": 102,
+                                "workflow_id": 1,
+                                "name": "CI",
+                                "event": "pull_request",
+                                "run_number": 5,
+                                "run_attempt": 2,
+                                "status": "completed",
+                                "conclusion": "success",
+                            },
+                            {
+                                "id": 101,
+                                "workflow_id": 1,
+                                "name": "CI",
+                                "event": "pull_request",
+                                "run_number": 5,
+                                "run_attempt": 1,
+                                "status": "completed",
+                                "conclusion": "failure",
+                            },
+                        ]
+                    },
+                )
+            if sha == "sha_failed":
+                return httpx.Response(
+                    200,
+                    json={
+                        "workflow_runs": [
+                            {
+                                "id": 201,
+                                "workflow_id": 1,
+                                "name": "CI",
+                                "event": "pull_request",
+                                "run_number": 6,
+                                "run_attempt": 1,
+                                "status": "completed",
+                                "conclusion": "failure",
+                            }
+                        ]
+                    },
+                )
+            return httpx.Response(200, json={"workflow_runs": []})
+        if path.endswith("/actions/runs/102/jobs"):
+            return httpx.Response(
+                200,
+                json={
+                    "jobs": [
+                        {"name": "offline-integrity", "status": "completed", "conclusion": "success"},
+                        {"name": "backing-services", "status": "completed", "conclusion": "success"},
+                    ]
+                },
+            )
+        if path.endswith("/actions/runs/201/jobs"):
+            return httpx.Response(
+                200,
+                json={
+                    "jobs": [
+                        {"name": "offline-integrity", "status": "completed", "conclusion": "failure"},
+                        {"name": "backing-services", "status": "completed", "conclusion": "success"},
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(_mock_handler)
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda *args, **kwargs: real_client(*args, transport=transport, **kwargs),
+    )
+
+    gh = GitHubIntegration("github_pat_test")
+    green = gh.inspect_commit_ci_status(github_repo="acme/demo", commit_sha="sha_green")
+    assert green == {"state": "passed", "failed_checks": [], "total": 2}
+
+    red = gh.inspect_commit_ci_status(github_repo="acme/demo", commit_sha="sha_failed")
+    assert red == {"state": "failed", "failed_checks": ["offline-integrity"], "total": 2}
+
+    empty_expect = gh.inspect_commit_ci_status(
+        github_repo="acme/demo", commit_sha="sha_none", expect_workflows=True
+    )
+    assert empty_expect["state"] == "pending"
+
+
+def test_reviewer_score_and_feishu_merge_card_formatting() -> None:
+    """Verify 3-tier review score calibration and zero-backtick Feishu merge approval card."""
+    import json
+
+    from digital_employee.integrations.feishu_cards import build_merge_approval_card
+    from digital_employee.models.state import (
+        BlockingReviewIssue,
+        DurableTaskState,
+        MergeApprovalCard,
+        ReviewAuditItem,
+        ReviewerReport,
+        ReviewObservation,
+        VerificationEvidence,
+    )
+
+    clean_rep = ReviewerReport(
+        verdict="APPROVE",
+        reviewer_model="gemini-3.8-flash",
+        audit_checklist=[ReviewAuditItem(dimension="需求与验收覆盖", status="PASS", detail="ok")],
+        summary="Clean fix.",
+    )
+    assert clean_rep.quality_score is not None and clean_rep.quality_score >= 90
+    assert clean_rep.merge_recommendation == "MERGE_READY"
+    assert clean_rep.merge_recommendation_label == "可直接合入"
+
+    caution_rep = ReviewerReport(
+        verdict="APPROVE",
+        reviewer_model="deepseek-flash",
+        change_overview=["app/reply_safety.py: 新增 `prohibited_advertising_claim` 极限词告警"],
+        audit_checklist=[
+            ReviewAuditItem(dimension="需求与验收覆盖", status="PASS", detail="ok"),
+            ReviewAuditItem(dimension="业务逻辑与边界条件", status="WARN", detail="否定词可能软误报"),
+        ],
+        notable_observations=[
+            ReviewObservation(path="app/reply_safety.py", line=48, note="裸词误报"),
+            ReviewObservation(path="app/reply_safety.py", line=92, note="break 提前退出"),
+        ],
+        unverified_risks=["单测未覆盖 `无法根治` 否定话术"],
+        summary="可合入。",
+    )
+    assert caution_rep.quality_score == 88
+    assert caution_rep.merge_recommendation == "MERGE_WITH_CAUTION"
+
+    block_rep = ReviewerReport(
+        verdict="BLOCK",
+        quality_score=95,  # Hallucinated high score must be clamped down when BLOCKed!
+        blocking_issues=[BlockingReviewIssue(severity="P0", message="Crash on empty input")],
+    )
+    assert block_rep.quality_score is not None and block_rep.quality_score < 60
+    assert block_rep.merge_recommendation == "DO_NOT_MERGE"
+
+    state = DurableTaskState(
+        task_id="t-card-1",
+        trace_id="tr-c1",
+        raw_request="test",
+        contract=TaskContract(
+            objective="为 `reply_safety` 新增广告极限词告警",
+            target_repo="livestream-copilot",
+            base_branch="main",
+            base_commit_sha="12345678",
+            reproduction_evidence="none",
+            permitted_scopes=["app"],
+        ),
+        deliverable_pr_number=1,
+        deliverable_pr_url="https://github.com/acme/demo/pull/1",
+        verification_evidence=VerificationEvidence(
+            verified_commit_sha="7f4726be",
+            repro_test_target="tests/test_reply_safety.py",
+            repro_test_failed_on_base=True,
+            repro_test_passed_on_head=True,
+            existing_test_suite_passed=True,
+            tests_weakened_check=True,
+            unverified_risks=caution_rep.unverified_risks,
+            reviewer_report=caution_rep,
+        ),
+        merge_approval_card=MergeApprovalCard(
+            pr_number=1,
+            pr_url="https://github.com/acme/demo/pull/1",
+            verified_commit_sha="7f4726be",
+            ci_checks_count=2,
+            quality_score=caution_rep.quality_score or 88,
+            merge_recommendation=caution_rep.merge_recommendation or "MERGE_WITH_CAUTION",
+            merge_recommendation_label=caution_rep.merge_recommendation_label,
+            reviewer_model="deepseek-flash",
+            reviewer_verdict="APPROVE",
+            reviewer_summary=caution_rep.summary,
+        ),
+    )
+    card = build_merge_approval_card(state)
+    card_json = json.dumps(card, ensure_ascii=False)
+    assert "88 / 100" in card_json
+    assert "可合入（1 项边界留意）" in card_json
+    assert "`" not in card_json
+
+
 
 

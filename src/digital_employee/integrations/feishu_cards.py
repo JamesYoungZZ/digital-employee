@@ -16,9 +16,14 @@ TASK_TAG_RE = re.compile(r"#?(t-\d{8}-[a-f0-9]{6})\b", re.IGNORECASE)
 REPO_BRACKET_RE = re.compile(r"^\[([A-Za-z0-9_.\-]+)\]\s*(.+)$", re.DOTALL)
 
 
+def _clean_feishu_text(text: str) -> str:
+    """Strip inline backticks unsupported by Feishu Card Schema 1.0 `lark_md`."""
+    return (text or "").replace("`", "")
+
+
 def _clip(text: str, limit: int = 80) -> str:
     """Collapse newlines and cap length so Feishu cards stay crisp and mobile-friendly."""
-    compact = " ".join((text or "").split()).strip()
+    compact = " ".join(_clean_feishu_text(text).split()).strip()
     if len(compact) <= limit:
         return compact
     return compact[: limit - 1].rstrip() + "…"
@@ -28,8 +33,20 @@ def _meta_fields(left_label: str, left_val: str, right_label: str, right_val: st
     return {
         "tag": "div",
         "fields": [
-            {"is_short": True, "text": {"tag": "lark_md", "content": f"**{left_label}**\n{left_val}"}},
-            {"is_short": True, "text": {"tag": "lark_md", "content": f"**{right_label}**\n{right_val}"}},
+            {
+                "is_short": True,
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**{_clean_feishu_text(left_label)}**\n{_clean_feishu_text(left_val)}",
+                },
+            },
+            {
+                "is_short": True,
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**{_clean_feishu_text(right_label)}**\n{_clean_feishu_text(right_val)}",
+                },
+            },
         ],
     }
 
@@ -39,45 +56,58 @@ def _jira_link_md(state: DurableTaskState) -> str:
         return ""
     if state.jira_issue_url:
         return f"[{state.jira_issue_key}]({state.jira_issue_url})"
-    return f"`{state.jira_issue_key}`"
+    return f"**{state.jira_issue_key}**"
 
 
 def build_jira_approval_card(
     state: DurableTaskState, web_base_url: str = "http://127.0.0.1:8020"
 ) -> dict[str, Any]:
-    """Build interactive Jira Ticket Draft review card (`WAITING_JIRA_APPROVAL`)."""
+    """Build interactive PM/QA Business Jira Ticket Draft review card (`WAITING_JIRA_APPROVAL`)."""
     c = state.contract
     d = state.jira_draft
     proj = (d.project_key if d else "") or "PROJ"
-    itype = (d.issue_type if d else "") or "Task"
+    itype = (d.issue_type if d else "") or "Story"
     prio = (d.priority if d else "") or "Medium"
+    role_tag = (
+        "QA 缺陷单 Bug"
+        if itype == "Bug"
+        else ("产品故事 Story" if itype == "Story" else "业务需求 Task")
+    )
+    desc_label = "故障与影响" if itype == "Bug" else "业务背景与诉求"
     summary = _clip((d.summary if d else c.objective), 90)
-    desc = _clip((d.description if d else c.reproduction_evidence) or c.objective, 120)
+    desc = _clip((d.description if d else c.reproduction_evidence) or c.objective, 160)
     ac_items = (d.acceptance_criteria if (d and d.acceptance_criteria) else c.acceptance_criteria)[:3]
-    ac_md = "\n".join(f"• {_clip(ac, 72)}" for ac in ac_items) if ac_items else "• 回归单测与门禁通过"
+    ac_md = (
+        "\n".join(f"• {_clip(ac, 85)}" for ac in ac_items)
+        if ac_items
+        else "• 核心业务场景与异常边界表现符合预期"
+    )
 
     return {
         "msg_type": "interactive",
         "card": {
             "header": {
-                "title": {"tag": "plain_text", "content": f"📋 待你审核 Jira 工单 · {state.task_id}"},
+                "title": {
+                    "tag": "plain_text",
+                    "content": f"📋 待你审核 Jira 工单 ({role_tag}) · {state.task_id}",
+                },
                 "template": "orange",
             },
             "elements": [
                 _meta_fields(
-                    "Jira 项目 / 类型",
-                    f"`{proj}` · `{itype}` (`{prio}`)",
-                    "目标仓库",
-                    f"`{c.target_repo}` (`{c.base_branch}`)",
+                    "Jira 看板 / 优先级",
+                    f"{proj} · {role_tag} ({prio})",
+                    "关联服务仓库",
+                    f"{c.target_repo} ({c.base_branch})",
                 ),
                 {"tag": "hr"},
                 {
                     "tag": "markdown",
                     "content": (
                         f"**工单标题**：{summary}\n"
-                        f"**需求说明**：{desc}\n"
-                        f"**验收标准**：\n{ac_md}\n"
-                        f"<font color='grey'>确认后将在 Jira 正式建卡并锁定为唯一权威需求源（也可回复『建单』或进控制台改草稿）。</font>"
+                        f"**{desc_label}**：{desc}\n"
+                        f"**产品/QA 验收标准**：\n{ac_md}\n"
+                        f"<font color='grey'>批准后将在 Jira 正式建卡并作为唯一权威业务源交付研发执行（可回复『建单』或进控制台修改）。</font>"
                     ),
                 },
                 {
@@ -232,8 +262,17 @@ def build_evidence_report_card(
 ) -> dict[str, Any]:
     """Build concise PR opened & verified card (while GitHub CI is running)."""
     ev = state.verification_evidence
-    rev_verdict = ev.reviewer_report.verdict if (ev and ev.reviewer_report) else "APPROVE"
-    pr_label = f"PR #{state.deliverable_pr_number}" if state.deliverable_pr_number else f"`{(state.head_commit_sha or '')[:8]}`"
+    rep = ev.reviewer_report if ev else None
+    rev_verdict = rep.verdict if rep else "APPROVE"
+    score = rep.quality_score if (rep and rep.quality_score is not None) else (95 if rev_verdict == "APPROVE" else 45)
+    rec_label = (rep.merge_recommendation_label if rep else "") or (
+        "可直接合入" if score >= 90 else ("可合入（留意边界）" if rev_verdict == "APPROVE" else "禁止合入")
+    )
+    pr_label = (
+        f"PR #{state.deliverable_pr_number}"
+        if state.deliverable_pr_number
+        else (state.head_commit_sha or "")[:8]
+    )
 
     actions: list[dict[str, Any]] = []
     if state.deliverable_pr_url:
@@ -258,18 +297,26 @@ def build_evidence_report_card(
         "msg_type": "interactive",
         "card": {
             "header": {
-                "title": {"tag": "plain_text", "content": f"🧪 本地验证已过 · 等待线上 CI ({pr_label})"},
+                "title": {
+                    "tag": "plain_text",
+                    "content": f"🧪 本地验证已过 ({score}分) · 等待线上 CI ({pr_label})",
+                },
                 "template": "turquoise",
             },
             "elements": [
-                _meta_fields("仓库", f"`{state.contract.target_repo}`", "花费", f"`${state.total_cost_usd:.3f}`"),
+                _meta_fields(
+                    "仓库 / 分支",
+                    f"**{state.contract.target_repo}** → **{state.contract.base_branch}**",
+                    "Review 预评",
+                    f"{'🟢' if score >= 90 else ('🟡' if rev_verdict == 'APPROVE' else '🔴')} **{score}/100** · {rec_label}",
+                ),
                 {"tag": "hr"},
                 {
                     "tag": "markdown",
                     "content": (
                         f"**改动**：{_clip(state.contract.objective, 75)}\n"
-                        f"**门禁**：✅ 单测 `Fail→Pass` · {'✅' if rev_verdict == 'APPROVE' else '🛑'} AI Review `{rev_verdict}`\n"
-                        f"<font color='grey'>线上 GitHub Actions CI 全绿后将推送「批准合入」按钮。</font>"
+                        f"**门禁**：✅ 单测 Fail→Pass · {'✅' if rev_verdict == 'APPROVE' else '🛑'} AI Review {rev_verdict}（花费 ${state.total_cost_usd:.3f}）\n"
+                        f"<font color='grey'>线上 GitHub Actions CI 全绿后将推送「批准合入」审批卡。</font>"
                     ),
                 },
                 {"tag": "action", "actions": actions},
@@ -281,57 +328,105 @@ def build_evidence_report_card(
 def build_merge_approval_card(
     state: DurableTaskState, web_base_url: str = "http://127.0.0.1:8020"
 ) -> dict[str, Any]:
-    """Build crisp, executive-friendly Merge Approval Card once Review + CI both pass."""
+    """Build crisp, executive-friendly Merge Approval Card with 0-100 score & merge verdict."""
     mc = state.merge_approval_card
     ev = state.verification_evidence
+    rep = ev.reviewer_report if ev else None
+
     pr_num = mc.pr_number if mc else (state.deliverable_pr_number or 0)
     pr_url = state.pr_review_comment_url or (mc.pr_url if mc else state.deliverable_pr_url) or web_base_url
     rev_model = (
         (mc.reviewer_model if mc else "")
-        or (ev.reviewer_report.reviewer_model if (ev and ev.reviewer_report) else "")
+        or (rep.reviewer_model if rep else "")
         or "AI Reviewer"
     )
     rev_verdict = (
         (mc.reviewer_verdict if mc else "")
-        or (ev.reviewer_report.verdict if (ev and ev.reviewer_report) else "APPROVE")
+        or (rep.verdict if rep else "APPROVE")
     )
+
+    score = (
+        rep.quality_score
+        if (rep and rep.quality_score is not None)
+        else (mc.quality_score if mc else 95)
+    )
+    rec_code = (
+        rep.merge_recommendation
+        if (rep and rep.merge_recommendation)
+        else (mc.merge_recommendation if mc else ("MERGE_READY" if score >= 90 else "MERGE_WITH_CAUTION"))
+    )
+    rec_label = (
+        (rep.merge_recommendation_label if rep else "")
+        or (mc.merge_recommendation_label if mc else "")
+        or ("可直接合入" if score >= 90 else "可合入（留意边界）")
+    )
+    rec_icon = "🟢" if rec_code == "MERGE_READY" else ("🟡" if rec_code == "MERGE_WITH_CAUTION" else "🔴")
+    header_prefix = "✅ 可直接合入" if rec_code == "MERGE_READY" else "✅ 建议合入"
+
+    checklist = rep.audit_checklist if rep else []
+    if checklist:
+        pass_cnt = sum(1 for item in checklist if item.status == "PASS")
+        warn_items = [item for item in checklist if item.status != "PASS"]
+        if warn_items:
+            warn_names = "、".join(
+                _clip(w.dimension.replace("业务逻辑与边界条件", "边界条件").replace("需求与验收覆盖", "验收覆盖"), 8)
+                for w in warn_items[:2]
+            )
+            audit_summary = f"✅ {pass_cnt}/{len(checklist)} 通过 · ⚠️ {len(warn_items)} 留意（{warn_names}）"
+        else:
+            audit_summary = f"✅ {pass_cnt}/{len(checklist)} 维度全通过"
+    else:
+        audit_summary = f"✅ {rev_verdict}（无阻断项）"
+
     rev_summary = _clip(
-        (mc.reviewer_summary if mc else (ev.reviewer_report.summary if (ev and ev.reviewer_report) else ""))
+        (mc.reviewer_summary if mc else (rep.summary if rep else ""))
         or "代码改动克制，无阻断级风险。",
-        90,
+        95,
     )
     risk_note = _clip(
         (mc.residual_risk if mc else "")
         or (ev.unverified_risks[0] if (ev and ev.unverified_risks) else ""),
-        75,
+        82,
     )
     ci_cnt = mc.ci_checks_count if mc else 2
     jira_md = _jira_link_md(state)
-    review_lines = []
+
+    review_lines: list[str] = []
     if jira_md:
         review_lines.append(f"**关联工单**：{jira_md}")
-    review_lines.extend(
-        [
-            f"**交付内容**：{_clip(state.contract.objective, 75)}",
-            f"**Code Review (`{rev_model}` · `{rev_verdict}`)**：{rev_summary}",
-        ]
-    )
+
+    if rep and rep.change_overview:
+        overview_bullets = "\n".join(f"• {_clip(item, 68)}" for item in rep.change_overview[:3])
+        review_lines.append(f"**改动概览**：{_clip(state.contract.objective, 65)}\n{overview_bullets}")
+    else:
+        review_lines.append(f"**交付内容**：{_clip(state.contract.objective, 75)}")
+
+    review_lines.append(f"**审查结论**：{rev_summary}")
     if risk_note:
-        review_lines.append(f"**边界提示**：{risk_note}")
+        review_lines.append(f"**⚠️ 边界留意**：{risk_note}")
 
     return {
         "msg_type": "interactive",
         "card": {
             "header": {
-                "title": {"tag": "plain_text", "content": f"🛎️ Review 通过 · 待你合入 PR #{pr_num}"},
+                "title": {
+                    "tag": "plain_text",
+                    "content": f"{header_prefix} ({score}分) · 待你审批 PR #{pr_num}",
+                },
                 "template": "green",
             },
             "elements": [
                 _meta_fields(
+                    "综合评分 / 合入建议",
+                    f"{rec_icon} **{score} / 100** · **{rec_label}**",
+                    "四道硬门禁",
+                    f"✅ 单测回归 · ✅ CI {ci_cnt}/{ci_cnt} · ✅ 0 阻断",
+                ),
+                _meta_fields(
                     "目标分支",
-                    f"`{state.contract.target_repo}` → `{state.contract.base_branch}`",
-                    "验证门禁",
-                    f"✅ Review `0` 阻断 · ✅ CI `{ci_cnt}/{ci_cnt}`",
+                    f"**{state.contract.target_repo}** → **{state.contract.base_branch}**",
+                    f"五维代码审查 ({rev_model})",
+                    audit_summary,
                 ),
                 {"tag": "hr"},
                 {"tag": "markdown", "content": "\n".join(review_lines)},
@@ -385,8 +480,8 @@ def build_review_fix_card(
 
     if trigger_source == "github_comment" and human_comment:
         header_title = f"💬 PR #{pr_num} 收到新 Review 评论 · 待你指令"
-        left_k, left_v = "评论人", f"`@{comment_author or 'reviewer'}`"
-        right_k, right_v = "关联仓库", f"`{state.contract.target_repo}`"
+        left_k, left_v = "评论人", f"@{comment_author or 'reviewer'}"
+        right_k, right_v = "关联仓库", f"**{state.contract.target_repo}**"
         body_md = (
             f"**任务**：{_clip(state.contract.objective, 65)}\n"
             f"**评论内容**：{_clip(human_comment, 120)}\n"
@@ -394,13 +489,21 @@ def build_review_fix_card(
         )
     else:
         issues = rep.blocking_issues if rep else []
-        header_title = f"🛑 Code Review 发现 {len(issues)} 项问题 · PR #{pr_num}" if pr_num else f"🛑 Code Review 拦截 · {state.task_id}"
-        left_k, left_v = "审查模型", f"`{rep.reviewer_model if rep else 'AI Reviewer'}`"
-        right_k, right_v = "目标仓库", f"`{state.contract.target_repo}`"
+        score = rep.quality_score if (rep and rep.quality_score is not None) else 45
+        header_title = (
+            f"🛑 禁止合入 ({score}分 · {len(issues)} 项阻断) · PR #{pr_num}"
+            if pr_num
+            else f"🛑 禁止合入 ({score}分) · {state.task_id}"
+        )
+        left_k, left_v = "综合评分 / 判定", f"🔴 **{score} / 100** · **禁止合入**"
+        right_k, right_v = (
+            f"审查模型 ({rep.reviewer_model if rep else 'AI Reviewer'})",
+            f"**{state.contract.target_repo}** · {len(issues)} 项阻断",
+        )
         issue_bullets = []
         for idx, b in enumerate(issues[:3], start=1):
-            loc = f"`{b.path}:{b.line}` " if (b.path and b.line) else (f"`{b.path}` " if b.path else "")
-            issue_bullets.append(f"`{idx}` **[{b.severity}]** {loc}{_clip(b.message, 68)}")
+            loc = f"{b.path}:{b.line} " if (b.path and b.line) else (f"{b.path} " if b.path else "")
+            issue_bullets.append(f"{idx}. **[{b.severity}]** {loc}{_clip(b.message, 68)}")
         if len(issues) > 3:
             issue_bullets.append(f"<font color='grey'>…其余 {len(issues) - 3} 项见全量报告</font>")
         body_md = (

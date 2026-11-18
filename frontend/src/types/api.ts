@@ -32,7 +32,7 @@ export interface MetricsInfo {
   estimated_net_human_minutes_saved: number;
 }
 
-export type PolicyCategory = "SECURITY" | "ARCHITECTURE" | "TESTING" | "BUSINESS" | "GENERAL";
+export type PolicyCategory = "ARCHITECTURE" | "SECURITY" | "TESTING" | "CODE_QUALITY";
 export type PolicySourceType = "CONSOLE_MANUAL" | "TASK_PROMOTED" | "REPO_SYNC";
 export type PolicyHealthStatus =
   | "HEALTHY"
@@ -140,6 +140,9 @@ export interface ReviewObservation {
 
 export interface ReviewerReport {
   verdict?: "APPROVE" | "BLOCK";
+  quality_score?: number | null;
+  merge_recommendation?: "MERGE_READY" | "MERGE_WITH_CAUTION" | "DO_NOT_MERGE" | null;
+  merge_recommendation_label?: string;
   reviewer_model?: string;
   skill_used?: string;
   ac_covered: boolean;
@@ -178,6 +181,9 @@ export interface MergeApprovalCardInfo {
   pr_url: string;
   verified_commit_sha: string;
   ci_checks_count: number;
+  quality_score?: number;
+  merge_recommendation?: string;
+  merge_recommendation_label?: string;
   reviewer_model: string;
   reviewer_verdict: string;
   reviewer_summary: string;

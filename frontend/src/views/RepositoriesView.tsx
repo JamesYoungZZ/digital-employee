@@ -41,30 +41,25 @@ const CATEGORY_META: Record<
   PolicyCategory,
   { label: string; badgeClass: string }
 > = {
-  SECURITY: {
-    label: "安全边界",
-    badgeClass:
-      "bg-rose-500/10 text-rose-700 ring-rose-500/25 dark:bg-rose-500/15 dark:text-rose-300 dark:ring-rose-400/30",
-  },
   ARCHITECTURE: {
-    label: "架构分层",
+    label: "架构与依赖禁令",
     badgeClass:
       "bg-purple-500/10 text-purple-700 ring-purple-500/25 dark:bg-purple-500/15 dark:text-purple-300 dark:ring-purple-400/30",
   },
+  SECURITY: {
+    label: "安全与鉴权规范",
+    badgeClass:
+      "bg-rose-500/10 text-rose-700 ring-rose-500/25 dark:bg-rose-500/15 dark:text-rose-300 dark:ring-rose-400/30",
+  },
   TESTING: {
-    label: "测试门禁",
+    label: "测试与 CI 必跑步骤",
     badgeClass:
       "bg-blue-500/10 text-blue-700 ring-blue-500/25 dark:bg-blue-500/15 dark:text-blue-300 dark:ring-blue-400/30",
   },
-  BUSINESS: {
-    label: "业务口径",
+  CODE_QUALITY: {
+    label: "代码质量与异常处理",
     badgeClass:
-      "bg-amber-500/10 text-amber-700 ring-amber-500/25 dark:bg-amber-500/15 dark:text-amber-300 dark:ring-amber-400/30",
-  },
-  GENERAL: {
-    label: "通用规范",
-    badgeClass:
-      "bg-zinc-500/10 text-zinc-700 ring-zinc-500/20 dark:bg-zinc-500/15 dark:text-zinc-300 dark:ring-zinc-400/25",
+      "bg-teal-500/10 text-teal-700 ring-teal-500/25 dark:bg-teal-500/15 dark:text-teal-300 dark:ring-teal-400/30",
   },
 };
 
@@ -146,7 +141,7 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
 
   const openEditPolicy = (targetRepoId: string, p: DecisionPolicy) => {
     const cat = (
-      p.category in CATEGORY_META ? p.category : "GENERAL"
+      p.category in CATEGORY_META ? p.category : "CODE_QUALITY"
     ) as PolicyCategory;
     setEditor({
       repoId: targetRepoId,
@@ -292,10 +287,10 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
-            受管业务代码仓库与治理规则中心
+            受管代码仓库与研发工程红线
           </h2>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-            规则独立托管于数字员工数据库（零侵入业务仓库） · 支持全生命周期增删改停与仓库路径自动防错巡检
+            仅托管代码架构禁令、安全规范、构建/CI 必跑命令与代码质量要求（产品功能需求归工单与单测管理） · 独立存库零侵入业务代码
           </p>
         </div>
 
@@ -459,7 +454,7 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="flex items-center gap-1.5 text-xs font-semibold text-zinc-800 dark:text-zinc-200">
                       <BookMarked className="h-3.5 w-3.5 text-teal-500" />
-                      仓库工程红线与业务规则
+                      研发工程红线与构建避坑规范
                     </span>
                     <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
                       <ShieldCheck className="h-3 w-3" />
@@ -519,14 +514,14 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
                       onClick={() => openCreatePolicy(r.repo_id)}
                     >
                       <Plus className="h-3.5 w-3.5" />
-                      添加第一条架构/业务红线
+                      添加第一条研发工程红线
                     </Button>
                   </div>
                 ) : (
                   <div className="space-y-2.5">
                     {allPolicies.map((p) => {
                       const catKey = (
-                        p.category in CATEGORY_META ? p.category : "GENERAL"
+                        p.category in CATEGORY_META ? p.category : "CODE_QUALITY"
                       ) as PolicyCategory;
                       const catMeta = CATEGORY_META[catKey];
                       const isActive = p.status === "APPROVED_POLICY";
@@ -759,11 +754,10 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
                       }
                       className="h-9 w-full rounded-lg border border-zinc-200 bg-white px-2.5 text-xs dark:border-zinc-800 dark:bg-zinc-950"
                     >
-                      <option value="SECURITY">安全边界</option>
-                      <option value="ARCHITECTURE">架构分层</option>
-                      <option value="TESTING">测试门禁</option>
-                      <option value="BUSINESS">业务口径</option>
-                      <option value="GENERAL">通用规范</option>
+                      <option value="ARCHITECTURE">架构与依赖禁令</option>
+                      <option value="SECURITY">安全与鉴权规范</option>
+                      <option value="TESTING">测试与 CI 必跑步骤</option>
+                      <option value="CODE_QUALITY">代码质量与异常处理</option>
                     </select>
                   </div>
                 </div>

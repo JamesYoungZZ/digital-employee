@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,8 @@ import httpx
 
 from digital_employee.models.state import BlockingReviewIssue, DurableTaskState
 from digital_employee.security.dlp import PolicyViolationError, validate_branch_target
+
+logger = logging.getLogger("digital_employee.github")
 
 
 def render_evidence_pr_body(state: DurableTaskState) -> str:
@@ -293,7 +296,7 @@ class GitHubIntegration:
         commit_sha: str,
         expect_workflows: bool = True,
     ) -> dict[str, Any]:
-        """Inspect GitHub Actions check-runs on `commit_sha`.
+        """Inspect GitHub Actions check-runs on `commit_sha`, with `/actions/runs` fallback for Fine-grained PATs.
 
         Returns `{"state": "pending" | "passed" | "failed", "failed_checks": [...], "total": int}`.
         """
@@ -305,7 +308,13 @@ class GitHubIntegration:
                 f"{self.api_base}/repos/{owner}/{repo}/commits/{commit_sha}/check-runs"
             )
             if resp.status_code >= 400:
-                return {"state": "pending", "failed_checks": [], "total": 0}
+                return self._inspect_actions_runs(
+                    client,
+                    owner=owner,
+                    repo=repo,
+                    commit_sha=commit_sha,
+                    expect_workflows=expect_workflows,
+                )
             runs = resp.json().get("check_runs") or []
             if not runs:
                 return {
@@ -326,6 +335,104 @@ class GitHubIntegration:
                 "failed_checks": failed,
                 "total": len(runs),
             }
+
+    def _inspect_actions_runs(
+        self,
+        client: httpx.Client,
+        *,
+        owner: str,
+        repo: str,
+        commit_sha: str,
+        expect_workflows: bool,
+    ) -> dict[str, Any]:
+        """Fallback CI check via `/actions/runs?head_sha=...` for Fine-grained PATs (`Actions: Read-only`)."""
+        runs_resp = client.get(
+            f"{self.api_base}/repos/{owner}/{repo}/actions/runs",
+            params={"head_sha": commit_sha, "per_page": 50},
+        )
+        if runs_resp.status_code >= 400:
+            needed = runs_resp.headers.get("x-accepted-github-permissions", "")
+            logger.warning(
+                "GitHub CI status check returned HTTP %s for %s/%s@%s (accepted permissions: %s)",
+                runs_resp.status_code,
+                owner,
+                repo,
+                commit_sha[:8],
+                needed or "actions=read",
+            )
+            return {"state": "pending", "failed_checks": [], "total": 0}
+
+        raw_runs = runs_resp.json().get("workflow_runs") or []
+        if not raw_runs:
+            return {
+                "state": "pending" if expect_workflows else "passed",
+                "failed_checks": [],
+                "total": 0,
+            }
+
+        latest_by_wf: dict[tuple[str, str], dict[str, Any]] = {}
+        for wr in raw_runs:
+            key = (
+                str(wr.get("workflow_id") or wr.get("name") or wr.get("id")),
+                str(wr.get("event") or ""),
+            )
+            prev = latest_by_wf.get(key)
+            if prev is None:
+                latest_by_wf[key] = wr
+            else:
+                cur_rank = (
+                    int(wr.get("run_number") or 0),
+                    int(wr.get("run_attempt") or 0),
+                    str(wr.get("created_at") or ""),
+                )
+                prev_rank = (
+                    int(prev.get("run_number") or 0),
+                    int(prev.get("run_attempt") or 0),
+                    str(prev.get("created_at") or ""),
+                )
+                if cur_rank > prev_rank:
+                    latest_by_wf[key] = wr
+
+        runs = list(latest_by_wf.values())
+        if any(r.get("status") != "completed" for r in runs):
+            return {"state": "pending", "failed_checks": [], "total": len(runs)}
+
+        total_checks = 0
+        failed: list[str] = []
+        for r in runs:
+            wf_name = str(r.get("name") or "workflow")
+            wf_ok = r.get("conclusion") in ("success", "skipped", "neutral")
+            run_id = r.get("id")
+            jobs: list[dict[str, Any]] = []
+            if run_id:
+                jobs_resp = client.get(
+                    f"{self.api_base}/repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
+                    params={"per_page": 100},
+                )
+                if jobs_resp.status_code < 400:
+                    jobs = jobs_resp.json().get("jobs") or []
+
+            if jobs:
+                total_checks += len(jobs)
+                job_failures = [
+                    str(j.get("name") or wf_name)
+                    for j in jobs
+                    if j.get("conclusion") not in ("success", "skipped", "neutral")
+                ]
+                if job_failures:
+                    failed.extend(job_failures)
+                elif not wf_ok:
+                    failed.append(wf_name)
+            else:
+                total_checks += 1
+                if not wf_ok:
+                    failed.append(wf_name)
+
+        return {
+            "state": "failed" if failed else "passed",
+            "failed_checks": failed,
+            "total": total_checks,
+        }
 
     def fetch_failed_blocking_checks(self, *, github_repo: str, commit_sha: str) -> list[str]:
         info = self.inspect_commit_ci_status(github_repo=github_repo, commit_sha=commit_sha)
