@@ -328,8 +328,20 @@ class JiraIntegration:
         for t in itypes:
             if str(t.get("name", "")).lower() in synonyms:
                 return {"id": str(t["id"])} if t.get("id") else {"name": str(t["name"])}
-        first = itypes[0]
-        return {"id": str(first["id"])} if first.get("id") else {"name": str(first["name"])}
+
+        # Fallback: prefer standard Task/Story over Epic when project lacks `Bug`
+        for t in itypes:
+            if str(t.get("name", "")).lower() in {"task", "任务", "研发任务", "story", "故事"}:
+                return {"id": str(t["id"])} if t.get("id") else {"name": str(t["name"])}
+        non_epics = [
+            t for t in itypes if str(t.get("name", "")).lower() not in {"epic", "史诗"}
+        ]
+        chosen_fallback = non_epics[0] if non_epics else itypes[0]
+        return (
+            {"id": str(chosen_fallback["id"])}
+            if chosen_fallback.get("id")
+            else {"name": str(chosen_fallback["name"])}
+        )
 
     def create_issue(self, draft: JiraTicketDraft) -> JiraIssueData:
         """Create a real Jira ticket after human approval of `JiraTicketDraft`."""
@@ -403,13 +415,22 @@ class JiraIntegration:
             transitions = resp.json().get("transitions") or []
             lowered_kw = {k.lower() for k in target_keywords}
             chosen = None
+            # Pass 1: exact transition/status name match (e.g. "In Progress" vs "In Review")
             for tr in transitions:
                 t_name = str(tr.get("name") or "").lower()
                 to_name = str((tr.get("to") or {}).get("name") or "").lower()
-                cat_key = str(((tr.get("to") or {}).get("statusCategory") or {}).get("key") or "").lower()
-                if t_name in lowered_kw or to_name in lowered_kw or cat_key in lowered_kw:
+                if t_name in lowered_kw or to_name in lowered_kw:
                     chosen = tr
                     break
+            # Pass 2: fallback to statusCategory key ("indeterminate" / "done")
+            if chosen is None:
+                for tr in transitions:
+                    cat_key = str(
+                        ((tr.get("to") or {}).get("statusCategory") or {}).get("key") or ""
+                    ).lower()
+                    if cat_key in lowered_kw:
+                        chosen = tr
+                        break
             if not chosen:
                 return None
             post_resp = client.post(
