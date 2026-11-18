@@ -174,15 +174,27 @@ def start_feishu_long_connection_if_configured(orchestrator: DelegationOrchestra
                 resp.toast = toast
                 return resp
 
-            if tid and act == "reject_merge":
+            if tid and act == "autofix_caution":
+                threading.Thread(
+                    target=orchestrator.autofix_review_issues,
+                    args=(tid,),
+                    kwargs={"include_cautions": True, "triggered_by": "feishu_ws_card"},
+                    daemon=True,
+                ).start()
+                toast.type = "success"
+                toast.content = f"🔧 已唤醒数字员工！正在优化 {tid} 的边界留意项并重新提审…"
+                resp.toast = toast
+                return resp
+
+            if tid and act in ("hold_merge", "reject_merge"):
                 threading.Thread(
                     target=orchestrator.update_scope_or_cancel,
                     args=(tid,),
-                    kwargs={"action": "abandon", "note": "Rejected via Feishu WS card"},
+                    kwargs={"action": "hold_merge", "note": "Held on Feishu merge approval card"},
                     daemon=True,
                 ).start()
                 toast.type = "info"
-                toast.content = f"已暂缓/拒绝合入任务 {tid}。"
+                toast.content = "⏸️ 已暂缓合入，PR 保持开启；可回『追改：修改意见』微调，或稍后回『批准』合入。"
                 resp.toast = toast
                 return resp
 

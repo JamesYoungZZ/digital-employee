@@ -77,6 +77,8 @@ class ReviewerReport(BaseModel):
     merge_recommendation: MergeRecommendation | None = None
     merge_recommendation_label: str = ""
     reviewer_model: str = ""
+    degraded_from_model: str = ""
+    fallback_reason: str = ""
     skill_used: str = "pr-code-review"
     ac_covered: bool = True
     ac_assessment: list[str] = Field(default_factory=list)

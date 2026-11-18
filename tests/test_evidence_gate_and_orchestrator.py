@@ -722,7 +722,211 @@ def test_reviewer_score_and_feishu_merge_card_formatting() -> None:
     card_json = json.dumps(card, ensure_ascii=False)
     assert "88 / 100" in card_json
     assert "可合入（1 项边界留意）" in card_json
+    assert "autofix_caution" in card_json
+    assert "hold_merge" in card_json
     assert "`" not in card_json
+
+
+def test_review_flow_five_fixes_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify the 5 PR Review flow fixes: strong fallback, loopback dead-link, inspect loop, hold/caution & PR sync."""
+    import json
+    from unittest.mock import MagicMock
+
+    import httpx
+
+    from digital_employee.agents.reviewer import FocusedReviewer, render_pr_review_agent_comment
+    from digital_employee.integrations.feishu_cards import (
+        build_merge_approval_card,
+        parse_feishu_command,
+    )
+    from digital_employee.integrations.github_client import (
+        GitHubIntegration,
+        infer_conventional_commit_prefix,
+    )
+    from digital_employee.llm.client import LLMCallMetrics, LLMClient
+    from digital_employee.models.state import (
+        DurableTaskState,
+        ReviewAuditItem,
+        ReviewerReport,
+        VerificationEvidence,
+    )
+    from digital_employee.orchestrator import DelegationOrchestrator
+
+    # 1. Conventional commit prefix inference (no longer hardcoded `fix:` for features/refactors)
+    assert infer_conventional_commit_prefix("为 reply_safety 新增广告违禁极限词告警") == "feat"
+    assert infer_conventional_commit_prefix("重构 reply_safety 正则匹配模块") == "refactor"
+    assert infer_conventional_commit_prefix("修复空指针崩溃异常") == "fix"
+
+    # 2. Loopback dead-link suppression on GitHub & mobile Feishu card fallback to GitHub PR comment URL
+    rep_fb = ReviewerReport(
+        verdict="APPROVE",
+        reviewer_model="deepseek-v4-pro",
+        degraded_from_model="gemini-3.8-flash-high",
+        fallback_reason="Eligibility check failed",
+        audit_checklist=[ReviewAuditItem(dimension="业务逻辑与边界条件", status="WARN", detail="裸词边界")],
+        summary="逻辑通过。",
+    )
+    gh_md_local = render_pr_review_agent_comment(
+        rep_fb,
+        verified_commit_sha="7f4726be44",
+        repro_test_target="tests/test_reply.py",
+        full_report_url="http://127.0.0.1:8020/reports/t-1/review",
+    )
+    assert "127.0.0.1" not in gh_md_local
+    assert "兜底自 `gemini-3.8-flash-high`" in gh_md_local
+
+    gh_md_public = render_pr_review_agent_comment(
+        rep_fb,
+        verified_commit_sha="7f4726be44",
+        repro_test_target="tests/test_reply.py",
+        full_report_url="https://de.example.com/reports/t-1/review",
+    )
+    assert "https://de.example.com/reports/t-1/review" in gh_md_public
+
+    # 3. FocusedReviewer multi-round read-only `inspect_requests` + prioritized prod diff
+    repo_dir = tmp_path / "rev_repo"
+    base_sha = _init_mini_buggy_repo(repo_dir)
+    profile = RepositoryProfile(
+        repo_id="rev_repo",
+        github_repo="acme/rev_repo",
+        local_path=str(repo_dir),
+        default_base_branch="main",
+        python_bin=sys.executable,
+        pytest_cmd=[sys.executable, "-m", "pytest"],
+    )
+    sandbox = WorktreeSandbox(profile, tmp_path / "wt", "t-rev-ctx", permitted_scopes=["src", "tests"])
+    sandbox.provision(base_sha)
+    sandbox.write_or_edit_file(
+        "src/pricing.py",
+        new_content="def apply_discount(price: float, discount: float) -> float:\n    return round(price - discount, 2)\n",
+    )
+    head_sha = sandbox.commit_all("fix discount", base_sha)
+
+    fake_rev_llm = MagicMock(spec=LLMClient)
+    fake_rev_llm.default_model = "gemini-3.8-flash"
+    fake_rev_llm.complete_json.side_effect = [
+        (
+            {"inspect_requests": [{"type": "read_file", "path": "tests/test_pricing.py", "start_line": 1, "end_line": 30}]},
+            LLMCallMetrics(estimated_cost_usd=0.001, actual_model="deepseek-v4-pro", degraded_from="gemini-3.8-flash-high"),
+        ),
+        (
+            {
+                "verdict": "APPROVE",
+                "quality_score": 94,
+                "ac_covered": True,
+                "decision_ledger_compliant": True,
+                "change_overview": ["src/pricing.py: 修正减法折扣计算"],
+                "audit_checklist": [{"dimension": "需求与验收覆盖", "status": "PASS", "detail": "已核对 test_pricing.py 调用方"}],
+                "concise_summary": "上下文核对无误。",
+            },
+            LLMCallMetrics(estimated_cost_usd=0.002, actual_model="deepseek-v4-pro"),
+        ),
+    ]
+    contract = TaskContract(
+        objective="新增折扣安全计算",
+        target_repo="rev_repo",
+        base_branch="main",
+        base_commit_sha=base_sha,
+        reproduction_evidence="err",
+        permitted_scopes=["src", "tests"],
+    )
+    ev = VerificationEvidence(
+        verified_commit_sha=head_sha,
+        repro_test_target="tests/test_pricing.py",
+        repro_test_failed_on_base=True,
+        repro_test_passed_on_head=True,
+        existing_test_suite_passed=True,
+        tests_weakened_check=True,
+    )
+    reviewer = FocusedReviewer(fake_rev_llm)
+    final_rep, cost = reviewer.review(contract=contract, sandbox=sandbox, evidence=ev)
+    assert fake_rev_llm.complete_json.call_count == 2
+    assert final_rep.quality_score == 94
+    assert final_rep.reviewer_model == "deepseek-v4-pro"
+    assert final_rep.degraded_from_model == "gemini-3.8-flash-high"
+    assert cost == 0.003
+
+    # 4. Existing PR reconciliation PATCHes updated body & title
+    patched_bodies: list[dict[str, object]] = []
+
+    def _gh_mock(req: httpx.Request) -> httpx.Response:
+        if req.method == "GET" and req.url.path.endswith("/pulls"):
+            return httpx.Response(200, json=[{"number": 7, "html_url": "https://github.com/acme/rev_repo/pull/7", "draft": False}])
+        if req.method == "PATCH" and req.url.path.endswith("/pulls/7"):
+            patched_bodies.append(json.loads(req.content.decode("utf-8")))
+            return httpx.Response(200, json={"number": 7})
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(_gh_mock)
+    real_client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda *a, **kw: real_client(*a, transport=transport, **kw))
+
+    ev.reviewer_report = final_rep
+    st_pr = DurableTaskState(
+        task_id="t-rev-ctx",
+        trace_id="tr-ctx",
+        raw_request="test",
+        contract=contract,
+        branch_name="ai-agent/t-rev-ctx",
+        head_commit_sha=head_sha,
+        deliverable_pr_number=7,
+        deliverable_pr_url="https://github.com/acme/rev_repo/pull/7",
+        pr_review_comment_url="https://github.com/acme/rev_repo/pull/7#pullrequestreview-99",
+        verification_evidence=ev,
+    )
+    gh = GitHubIntegration("ghp_test")
+    rec = gh.reconcile_or_create_pr(github_repo="acme/rev_repo", state=st_pr, protected_branches=["main"])
+    assert rec["reconciled"] is True
+    assert len(patched_bodies) == 1
+    assert "94/100" in str(patched_bodies[0].get("body", ""))
+
+    # Mobile Feishu card uses GitHub PR review permalink instead of 127.0.0.1!
+    m_card = build_merge_approval_card(st_pr, "http://127.0.0.1:8020")
+    m_card_str = json.dumps(m_card, ensure_ascii=False)
+    assert "pullrequestreview-99" in m_card_str
+    assert "127.0.0.1:8020/reports" not in m_card_str
+
+    # 5. `hold_merge` keeps task in WAITING_MERGE_APPROVAL & natural Feishu follow-up commands parse cleanly
+    assert parse_feishu_command("修边界", ["rev_repo"]) == {"intent": "quick_autofix_caution"}
+    assert parse_feishu_command("追改：把无法根治排除掉", ["rev_repo"]) == {
+        "intent": "quick_followup_pr",
+        "comment": "把无法根治排除掉",
+    }
+
+    repo_cfg = tmp_path / "repos.yaml"
+    repo_cfg.write_text(
+        f"repositories:\n  rev_repo:\n    repo_id: rev_repo\n    github_repo: acme/rev_repo\n    local_path: {repo_dir}\n",
+        encoding="utf-8",
+    )
+    cfg = Settings(
+        data_dir=tmp_path / "data",
+        repo_registry_path=repo_cfg,
+        llm_api_key="dummy",
+        github_token="ghp_test",
+        feishu_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/dummy",
+    )
+    cfg.ensure_dirs()
+    orch = DelegationOrchestrator(cfg)
+    st_pr.lifecycle_status = "WAITING_MERGE_APPROVAL"
+    orch.store.save_task(st_pr)
+
+    held = orch.update_scope_or_cancel("t-rev-ctx", action="hold_merge")
+    assert held.lifecycle_status == "WAITING_MERGE_APPROVAL"
+    assert "merge_held_by_human" in held.recorded_operations
+
+    # Feishu merge failure receipt is sent when GitHub Merge API fails
+    orch.feishu.send_card = MagicMock(return_value="sent")  # type: ignore[method-assign]
+    orch.github.fetch_pr_state = MagicMock(  # type: ignore[method-assign]
+        return_value={"state": "open", "draft": False, "merged": False, "mergeable": True, "head": {"sha": head_sha}}
+    )
+    orch.github.inspect_commit_ci_status = MagicMock(  # type: ignore[method-assign]
+        return_value={"state": "passed", "failed_checks": [], "total": 2}
+    )
+    orch.github.merge_pull_request = MagicMock(side_effect=RuntimeError("405 Protected branch"))  # type: ignore[method-assign]
+    fail_merge = orch.approve_and_merge("t-rev-ctx", approved_by="feishu_ws_card")
+    assert fail_merge["merged"] is False
+    assert orch.feishu.send_card.call_count == 1
+
 
 
 

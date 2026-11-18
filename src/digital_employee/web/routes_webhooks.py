@@ -117,17 +117,30 @@ def build_webhook_router(orch: DelegationOrchestrator) -> APIRouter:
                 }
             if tid and act == "ignore_review_comment":
                 return {"toast": {"type": "info", "content": "已暂缓修改，保留当前 PR。"}}
-            if tid and act == "reject_merge":
+            if tid and act == "autofix_caution":
+                background_tasks.add_task(
+                    orch.autofix_review_issues,
+                    tid,
+                    include_cautions=True,
+                    triggered_by="feishu_webhook_card",
+                )
+                return {
+                    "toast": {
+                        "type": "success",
+                        "content": f"🔧 已唤醒数字员工！正在优化 {tid} 的边界留意项…",
+                    }
+                }
+            if tid and act in ("hold_merge", "reject_merge"):
                 background_tasks.add_task(
                     orch.update_scope_or_cancel,
                     tid,
-                    action="abandon",
-                    note="Rejected via Feishu merge approval card",
+                    action="hold_merge",
+                    note="Held via Feishu merge approval card",
                 )
                 return {
                     "toast": {
                         "type": "info",
-                        "content": f"已拒绝合入任务 {tid}。",
+                        "content": "⏸️ 已暂缓合入，PR 保持开启；可回『追改：修改意见』微调或稍后回『批准』合入。",
                     }
                 }
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ import httpx
 
 from digital_employee.security.dlp import redact_sensitive_text
 from digital_employee.settings import Settings
+
+logger = logging.getLogger("digital_employee.llm")
 
 JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
@@ -30,6 +33,8 @@ class LLMCallMetrics:
     completion_tokens: int = 0
     estimated_cost_usd: float = 0.0
     actual_model: str = ""
+    degraded_from: str = ""
+    fallback_reason: str = ""
 
 
 def extract_json_object(raw_text: str) -> dict[str, Any]:
@@ -309,16 +314,59 @@ class LLMClient:
                     actual_model=agy_model,
                 )
             err_detail = (proc.stderr or proc.stdout or "").strip()
-            # Graceful fallback if current VPN region blocks agy CLI or not yet signed in
+            logger.warning(
+                "agy CLI (%s) unavailable (exit=%s: %s); attempting strong Reviewer fallback.",
+                agy_model,
+                proc.returncode,
+                err_detail[:200],
+            )
+            gemini_env_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or ""
+            anthropic_env_key = os.environ.get("ANTHROPIC_API_KEY") or ""
+            if gemini_env_key:
+                fallback_client = LLMClient(
+                    self.settings,
+                    provider="gemini",
+                    base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+                    api_key=gemini_env_key,
+                    default_model=chosen_model,
+                )
+                msg, fb_metrics = fallback_client.chat(
+                    messages, model=chosen_model, json_mode=True, max_tokens=8192
+                )
+                fb_metrics.degraded_from = agy_model
+                fb_metrics.fallback_reason = err_detail[:180]
+                return msg, fb_metrics
+            if anthropic_env_key:
+                fallback_client = LLMClient(
+                    self.settings,
+                    provider="anthropic",
+                    base_url="https://api.anthropic.com",
+                    api_key=anthropic_env_key,
+                    default_model="claude-sonnet-4-20250514",
+                )
+                msg, fb_metrics = fallback_client.chat(
+                    messages, model="claude-sonnet-4-20250514", json_mode=True, max_tokens=8192
+                )
+                fb_metrics.actual_model = fb_metrics.actual_model or "claude-sonnet-4-20250514"
+                fb_metrics.degraded_from = agy_model
+                fb_metrics.fallback_reason = err_detail[:180]
+                return msg, fb_metrics
             if self.settings.llm_api_key:
+                # Never degrade Reviewer to weak fast_model; use strong reasoning_model!
+                strong_model = self.settings.reasoning_model
                 fallback_client = LLMClient(
                     self.settings,
                     provider="openai_compatible",
                     base_url=self.settings.llm_base_url,
                     api_key=self.settings.llm_api_key,
-                    default_model=self.settings.fast_model,
+                    default_model=strong_model,
                 )
-                return fallback_client.chat(messages, model=self.settings.fast_model, json_mode=True, max_tokens=8192)
+                msg, fb_metrics = fallback_client.chat(
+                    messages, model=strong_model, json_mode=True, max_tokens=8192
+                )
+                fb_metrics.degraded_from = agy_model
+                fb_metrics.fallback_reason = err_detail[:180]
+                return msg, fb_metrics
             raise TransientLLMError(
                 f"agy CLI ({agy_model}) exited {proc.returncode}: {err_detail[:320]}"
             )
@@ -389,6 +437,8 @@ class LLMClient:
                     metrics.estimated_cost_usd + metrics2.estimated_cost_usd, 6
                 ),
                 actual_model=metrics2.actual_model or metrics.actual_model,
+                degraded_from=metrics2.degraded_from or metrics.degraded_from,
+                fallback_reason=metrics2.fallback_reason or metrics.fallback_reason,
             )
             content = (msg2.get("content") or "").strip()
             return extract_json_object(content), metrics

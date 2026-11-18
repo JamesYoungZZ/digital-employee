@@ -33,7 +33,20 @@ Emit an item in `blocking_issues` **ONLY** when you can point to a concrete file
 5. **`POLICY_OR_SCOPE_VIOLATION` (`P0`/`P1`)**:
    - Violates an `APPROVED_POLICY` in `.ai/DECISIONS.yaml` or modifies files outside `permitted_scopes` / inside `out_of_scope`.
 
-## 3. Verdict & Output Schema (清晰的中文审查报告)
+## 3. Read-Only Context Inspection (Optional Before Final Verdict)
+
+You are provided with the complete manifest of modified files, prioritized production diffs, surrounding source context, and caller call-sites. If you still need to inspect an unshown caller, imported helper, or config file in the repository to verify cross-file contracts before issuing a `BLOCK` or `APPROVE` verdict, you may first output ONLY a read-only inspection request JSON (up to 3 items):
+```json
+{
+  "inspect_requests": [
+    {"type": "read_file", "path": "app/service.py", "start_line": 1, "end_line": 120},
+    {"type": "search_code", "pattern": "reply_safety_findings"}
+  ]
+}
+```
+Once you have sufficient context, output the final review JSON below.
+
+## 4. Verdict & Output Schema (清晰的中文审查报告)
 
 - **`verdict = "APPROVE"`**: 当 `blocking_issues` 为空 (`[]`) 时必须为 `"APPROVE"`。
 - **`verdict = "BLOCK"`**: 当存在至少 1 个 `P0`/`P1` 阻断缺陷时必须为 `"BLOCK"`。

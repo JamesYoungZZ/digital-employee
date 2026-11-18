@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import html
+import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from digital_employee.context.decision_ledger import DecisionLedger
 
@@ -22,6 +24,129 @@ from digital_employee.models.state import (
 )
 from digital_employee.sandbox.worktree_runner import WorktreeSandbox
 from digital_employee.settings import PROJECT_ROOT
+from digital_employee.verification.evidence_gate import is_test_path
+
+CHANGED_SYMBOL_RE = re.compile(r"^[+-]\s*(?:async\s+def|def|class)\s+([A-Za-z_][A-Za-z0-9_]*)\b", re.MULTILINE)
+
+
+def is_loopback_url(url: str) -> bool:
+    """Return True if `url` points to a local loopback interface unreachable from mobile/remote devices."""
+    if not url:
+        return True
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return True
+    return host in ("", "127.0.0.1", "localhost", "0.0.0.0", "::1")
+
+
+def build_reviewer_code_context(
+    sandbox: WorktreeSandbox,
+    base_commit_sha: str,
+    changed_files: list[str],
+    *,
+    prod_diff_budget: int = 40000,
+    test_diff_budget: int = 18000,
+    source_context_budget: int = 12000,
+) -> str:
+    """Build prioritized, non-blind review context: manifest + prod diffs + test diffs + source & callers."""
+    prod_files = [f for f in changed_files if not is_test_path(f)]
+    test_files = [f for f in changed_files if is_test_path(f)]
+
+    sections: list[str] = [
+        f"## Modified File Manifest ({len(changed_files)} total: {len(prod_files)} production, {len(test_files)} test)\n"
+        + "\n".join(f"- `{f}` ({'test' if is_test_path(f) else 'production'})" for f in changed_files)
+    ]
+
+    prod_diff = sandbox.git_diff(base_commit_sha, paths=prod_files) if prod_files else ""
+    if prod_diff:
+        clipped_prod = prod_diff[:prod_diff_budget]
+        trunc_note = (
+            f"\n... [production diff truncated at {prod_diff_budget} chars; use `inspect_requests` `read_file` to view remaining lines]"
+            if len(prod_diff) > prod_diff_budget
+            else ""
+        )
+        sections.append(
+            f"## Production Source Diff ({len(prod_files)} files)\n```diff\n{clipped_prod}{trunc_note}\n```"
+        )
+
+    test_diff = sandbox.git_diff(base_commit_sha, paths=test_files) if test_files else ""
+    if test_diff:
+        clipped_test = test_diff[:test_diff_budget]
+        trunc_note = (
+            f"\n... [test diff truncated at {test_diff_budget} chars; use `inspect_requests` `read_file` to inspect specific tests]"
+            if len(test_diff) > test_diff_budget
+            else ""
+        )
+        sections.append(
+            f"## Test Suite Diff ({len(test_files)} files)\n```diff\n{clipped_test}{trunc_note}\n```"
+        )
+
+    # Attach surrounding/full content of modified production code files so Reviewer sees full signatures & invariants
+    src_snippets: list[str] = []
+    used_src_chars = 0
+    for pf in prod_files[:6]:
+        if pf.lower().endswith((".md", ".lock", ".json", ".svg", ".png")):
+            continue
+        try:
+            snippet = sandbox.read_file(pf, start_line=1, end_line=220)
+        except Exception:
+            continue
+        if used_src_chars + len(snippet) > source_context_budget:
+            remaining = source_context_budget - used_src_chars
+            if remaining > 600:
+                src_snippets.append(snippet[:remaining] + "\n... (use `read_file` for further lines)")
+            break
+        src_snippets.append(snippet)
+        used_src_chars += len(snippet)
+
+    if src_snippets:
+        sections.append("## Modified Production File Context (HEAD)\n" + "\n\n".join(src_snippets))
+
+    # Cross-reference callers of modified functions/classes across the repository
+    symbols: list[str] = []
+    for sym in CHANGED_SYMBOL_RE.findall(prod_diff):
+        if not sym.startswith("_") and sym not in symbols:
+            symbols.append(sym)
+    caller_blocks: list[str] = []
+    for sym in symbols[:5]:
+        try:
+            hits = sandbox.search_code(rf"\b{re.escape(sym)}\b", max_hits=12)
+        except Exception:
+            continue
+        if hits and hits != "(no matches)":
+            caller_blocks.append(f"### References to `{sym}`\n{hits}")
+    if caller_blocks:
+        sections.append("## Repository Caller Cross-References\n" + "\n\n".join(caller_blocks))
+
+    return "\n\n".join(sections)
+
+
+def execute_reviewer_inspect_requests(
+    sandbox: WorktreeSandbox, requests: list[Any], *, max_items: int = 4
+) -> str:
+    """Execute read-only `read_file` / `search_code` / `list_files` requests for FocusedReviewer."""
+    outputs: list[str] = []
+    for req in requests[:max_items]:
+        if not isinstance(req, dict):
+            continue
+        kind = str(req.get("type") or "").strip().lower()
+        try:
+            if kind == "read_file" and req.get("path"):
+                s_ln = int(req.get("start_line") or 1)
+                e_ln = int(req.get("end_line") or (s_ln + 180))
+                outputs.append(sandbox.read_file(str(req["path"]), start_line=s_ln, end_line=e_ln))
+            elif kind == "search_code" and req.get("pattern"):
+                prefix = str(req.get("path_prefix") or "")
+                hits = sandbox.search_code(str(req["pattern"]), path_prefix=prefix, max_hits=25)
+                outputs.append(f"# search_code({req['pattern']!r})\n{hits}")
+            elif kind == "list_files":
+                prefix = str(req.get("prefix") or "")
+                files = sandbox.list_files(prefix=prefix, max_entries=80)
+                outputs.append(f"# list_files({prefix!r})\n" + "\n".join(files))
+        except Exception as exc:
+            outputs.append(f"# inspect error ({kind}): {exc}")
+    return "\n\n".join(outputs) if outputs else "(no valid inspect_requests)"
 
 FALLBACK_SKILL_PROMPT = """You are an Independent Principal PR Review Agent.
 Strictly suppress style, formatting, naming, or speculative nitpicks.
@@ -54,10 +179,15 @@ def render_pr_review_agent_comment(
         else ("🟡" if report.merge_recommendation == "MERGE_WITH_CAUTION" else "🔴")
     )
     rec_label = report.merge_recommendation_label or ("可直接合入" if is_approve else "禁止合入")
+    model_badge = (
+        f"`{report.reviewer_model}` · 兜底自 `{report.degraded_from_model}`"
+        if report.degraded_from_model
+        else f"`{report.reviewer_model}`"
+    )
     header = (
-        f"### ✅ AI 独立代码审查通过 · `{score}/100` 分 (`APPROVE` · 模型 `{report.reviewer_model}`)"
+        f"### ✅ AI 独立代码审查通过 · `{score}/100` 分 (`APPROVE` · 模型 {model_badge})"
         if is_approve
-        else f"### 🛑 AI 独立代码审查拦截 · `{score}/100` 分 (`BLOCK` · 共 `{len(report.blocking_issues)}` 项阻断问题 · 模型 `{report.reviewer_model}`)"
+        else f"### 🛑 AI 独立代码审查拦截 · `{score}/100` 分 (`BLOCK` · 共 `{len(report.blocking_issues)}` 项阻断问题 · 模型 {model_badge})"
     )
 
     lines: list[str] = [
@@ -98,8 +228,8 @@ def render_pr_review_agent_comment(
             lines.append(f"- {loc}{obs.note}")
         lines.append("")
 
-    # 5. Full Review Report Link + Expandable Full 5-Dimension Audit Matrix
-    if effective_url:
+    # 5. Full Review Report Link (only when non-loopback!) + Expandable Full 5-Dimension Audit Matrix
+    if effective_url and not is_loopback_url(effective_url):
         lines.append(f"📄 **[点击打开独立全量 Code Review 报告页面（含完整核查表与逐行 Diff）]({effective_url})**")
         lines.append("")
 
@@ -282,7 +412,6 @@ class FocusedReviewer:
         full_report_url: str = "",
     ) -> tuple[ReviewerReport, float]:
         changed = sandbox.modified_files(contract.base_commit_sha)
-        diff_text = sandbox.git_diff(contract.base_commit_sha)
         ledger = (
             DecisionLedger.for_repository(self.store, sandbox.profile)
             if self.store is not None
@@ -291,24 +420,62 @@ class FocusedReviewer:
             )
         )
 
+        rich_code_context = build_reviewer_code_context(
+            sandbox, contract.base_commit_sha, changed
+        )
         prompt = "\n\n".join(
             [
                 "## Accountable TaskContract\n" + contract.model_dump_json(indent=2),
                 ledger.render_truth_hierarchy_block(changed),
                 "## Deterministic Sandbox Evidence Summary\n" + evidence.model_dump_json(indent=2),
-                f"## Unified Git Diff ({len(changed)} files)\n```diff\n{diff_text[:16000]}\n```",
+                rich_code_context,
             ]
         )
 
         chosen_model = self.llm.default_model
-        data, metrics = self.llm.complete_json(
-            [
-                {"role": "system", "content": self.skill_prompt},
-                {"role": "user", "content": prompt},
-            ],
-            model=chosen_model,
-        )
-        effective_model = metrics.actual_model or chosen_model
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self.skill_prompt},
+            {"role": "user", "content": prompt},
+        ]
+        total_cost = 0.0
+        effective_model = chosen_model
+        degraded_from = ""
+        fallback_reason = ""
+        data: dict[str, Any] = {}
+
+        for inspect_round in range(3):
+            data, metrics = self.llm.complete_json(messages, model=chosen_model)
+            total_cost = round(total_cost + metrics.estimated_cost_usd, 6)
+            if metrics.actual_model:
+                effective_model = metrics.actual_model
+            if metrics.degraded_from:
+                degraded_from = metrics.degraded_from
+            if metrics.fallback_reason:
+                fallback_reason = metrics.fallback_reason
+
+            inspect_reqs = data.get("inspect_requests")
+            if (
+                inspect_round < 2
+                and isinstance(inspect_reqs, list)
+                and inspect_reqs
+                and "verdict" not in data
+            ):
+                fetched = execute_reviewer_inspect_requests(sandbox, inspect_reqs)
+                messages.append(
+                    {"role": "assistant", "content": '{"inspect_requests": "executed"}'}
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "## Requested Read-Only Repository Context\n"
+                            + fetched
+                            + "\n\nNow output the final review JSON object (`verdict`, `quality_score`, `audit_checklist`, etc.)."
+                        ),
+                    }
+                )
+                continue
+            break
 
         raw_blocking = data.get("blocking_issues") or []
         blocking_issues: list[BlockingReviewIssue] = []
@@ -383,6 +550,8 @@ class FocusedReviewer:
             verdict=verdict,
             quality_score=parsed_score,
             reviewer_model=effective_model,
+            degraded_from_model=degraded_from,
+            fallback_reason=fallback_reason,
             skill_used="pr-code-review",
             ac_covered=ac_covered,
             ac_assessment=[str(x) for x in (data.get("ac_assessment") or [])],
@@ -396,4 +565,4 @@ class FocusedReviewer:
             summary=summary or "已完成契约与边界核查。",
             full_report_url=full_report_url,
         )
-        return report, metrics.estimated_cost_usd
+        return report, total_cost
