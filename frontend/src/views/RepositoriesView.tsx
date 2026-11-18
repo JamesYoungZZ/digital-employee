@@ -2,6 +2,7 @@ import React from "react";
 import {
   AlertTriangle,
   BookMarked,
+  Brain,
   CheckCircle2,
   Edit3,
   FolderGit2,
@@ -11,8 +12,10 @@ import {
   PlayCircle,
   Plus,
   RefreshCw,
+  Search,
   ShieldAlert,
   ShieldCheck,
+  Sparkles,
   Terminal,
   Trash2,
   UserCheck,
@@ -20,6 +23,7 @@ import {
 import { toast } from "sonner";
 import type {
   DecisionPolicy,
+  MemoryObservationItem,
   PolicyCategory,
   RepositoryItem,
 } from "../types/api";
@@ -64,6 +68,9 @@ const CATEGORY_META: Record<
 };
 
 function renderSourceLabel(p: DecisionPolicy): string {
+  if (p.source_type === "MEM_DISTILLED") {
+    return p.source_ref ? `claude-mem 记忆提炼 (${p.source_ref})` : "claude-mem 历史记忆提炼";
+  }
   if (p.source_type === "TASK_PROMOTED") {
     return p.source_ref ? `任务沉淀 (${p.source_ref})` : "历史任务复盘沉淀";
   }
@@ -98,6 +105,88 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
   const [editor, setEditor] = React.useState<PolicyEditorState | null>(null);
   const [savingPolicy, setSavingPolicy] = React.useState(false);
   const [busyKey, setBusyKey] = React.useState<string | null>(null);
+
+  // `claude-mem` repository memory browser modal state
+  const [memModalRepo, setMemModalRepo] = React.useState<string | null>(null);
+  const [memQuery, setMemQuery] = React.useState("");
+  const [memItems, setMemItems] = React.useState<MemoryObservationItem[]>([]);
+  const [memLoading, setMemLoading] = React.useState(false);
+
+  const loadRepoMemories = React.useCallback(async (targetRepoId: string, q: string) => {
+    setMemLoading(true);
+    try {
+      const qs = q.trim() ? `?query=${encodeURIComponent(q.trim())}&limit=30` : "?limit=30";
+      const res = await apiFetch<{ observations: MemoryObservationItem[] }>(
+        `/api/repositories/${encodeURIComponent(targetRepoId)}/memories${qs}`
+      );
+      setMemItems(res.observations ?? []);
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setMemLoading(false);
+    }
+  }, []);
+
+  const openMemoryBrowser = async (targetRepoId: string) => {
+    setMemModalRepo(targetRepoId);
+    setMemQuery("");
+    await loadRepoMemories(targetRepoId, "");
+  };
+
+  const handleDeleteMemory = async (targetRepoId: string, obsId: number) => {
+    try {
+      await apiFetch(
+        `/api/repositories/${encodeURIComponent(targetRepoId)}/memories/${obsId}`,
+        { method: "DELETE" }
+      );
+      toast.success(`记忆 #${obsId} 已删除`);
+      await loadRepoMemories(targetRepoId, memQuery);
+      await onRefresh();
+    } catch (err: any) {
+      toast.error(err.message);
+    }
+  };
+
+  const handleDistillFromMemory = async (targetRepoId: string) => {
+    const key = `distill:${targetRepoId}`;
+    setBusyKey(key);
+    try {
+      const res = await apiFetch<{ created_count: number }>(
+        `/api/repositories/${encodeURIComponent(targetRepoId)}/policies/distill-from-memory`,
+        { method: "POST" }
+      );
+      if (res.created_count > 0) {
+        toast.success(`已从 claude-mem 提炼 ${res.created_count} 条候选规则草稿，请审核采纳`);
+      } else {
+        toast.info("当前记忆库暂无新的高频踩坑或审查经验需要提炼（或已有同类规则）");
+      }
+      await onRefresh();
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleApproveCandidate = async (targetRepoId: string, p: DecisionPolicy) => {
+    const key = `approve:${targetRepoId}:${p.id}`;
+    setBusyKey(key);
+    try {
+      await apiFetch(
+        `/api/repositories/${encodeURIComponent(targetRepoId)}/policies/${encodeURIComponent(p.id)}/approve`,
+        {
+          method: "POST",
+          body: JSON.stringify({ owner: p.owner || "jamesyang" }),
+        }
+      );
+      toast.success(`候选规则 ${p.id} 已采纳转正，将对后续编码与审查正式生效`);
+      await onRefresh();
+    } catch (err: any) {
+      toast.error(err.message);
+    } finally {
+      setBusyKey(null);
+    }
+  };
 
   const handleOnboard = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -411,12 +500,16 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
           const activeCount =
             r.policy_summary?.active_effective ??
             allPolicies.filter((p) => p.effective_for_ai !== false && p.status === "APPROVED_POLICY").length;
+          const candidateCount =
+            r.policy_summary?.candidate_drafts ??
+            allPolicies.filter((p) => p.status === "CANDIDATE_DRAFT").length;
           const pausedCount =
             r.policy_summary?.paused ??
-            allPolicies.filter((p) => p.status !== "APPROVED_POLICY").length;
+            allPolicies.filter((p) => p.status !== "APPROVED_POLICY" && p.status !== "CANDIDATE_DRAFT").length;
           const unhealthyCount =
             r.policy_summary?.unhealthy ??
-            allPolicies.filter((p) => p.health_status && p.health_status !== "HEALTHY").length;
+            allPolicies.filter((p) => p.status === "APPROVED_POLICY" && p.health_status && p.health_status !== "HEALTHY").length;
+          const memTotal = r.memory_summary?.total ?? 0;
 
           return (
             <SurfaceCard key={r.repo_id} className="p-5 space-y-4">
@@ -460,6 +553,12 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
                       <ShieldCheck className="h-3 w-3" />
                       {activeCount} 条向 AI 生效
                     </span>
+                    {candidateCount > 0 && (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-indigo-500/15 px-2 py-0.5 text-[11px] font-semibold text-indigo-700 dark:text-indigo-300">
+                        <Sparkles className="h-3 w-3" />
+                        {candidateCount} 条记忆提炼草稿待采纳
+                      </span>
+                    )}
                     {unhealthyCount > 0 && (
                       <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-300">
                         <AlertTriangle className="h-3 w-3" />
@@ -473,7 +572,32 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
                     )}
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => openMemoryBrowser(r.repo_id)}
+                      title="查看和检索底层 Coding Agent 沉淀的 claude-mem 经验记忆卡片"
+                    >
+                      <Brain className="h-3.5 w-3.5 text-indigo-500" />
+                      记忆库 ({memTotal})
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={busyKey === `distill:${r.repo_id}`}
+                      onClick={() => handleDistillFromMemory(r.repo_id)}
+                      title="从 claude-mem 历史踩坑与审查记录中自动归纳候选治理规则草稿"
+                    >
+                      {busyKey === `distill:${r.repo_id}` ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-500" />
+                      ) : (
+                        <Sparkles className="h-3.5 w-3.5 text-amber-500" />
+                      )}
+                      从记忆提炼规则
+                    </Button>
                     <Button
                       type="button"
                       variant="outline"
@@ -525,6 +649,7 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
                       ) as PolicyCategory;
                       const catMeta = CATEGORY_META[catKey];
                       const isActive = p.status === "APPROVED_POLICY";
+                      const isCandidate = p.status === "CANDIDATE_DRAFT";
                       const isInvalidScope = p.health_status === "INVALID_SCOPE";
                       const isWarn =
                         p.health_status === "WARN_STALE_REF" ||
@@ -536,13 +661,15 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
                           key={p.id}
                           className={cn(
                             "rounded-lg border p-3.5 transition-colors space-y-2",
-                            !isActive
-                              ? "border-zinc-200/60 bg-zinc-100/50 opacity-75 dark:border-zinc-800/60 dark:bg-zinc-900/30"
-                              : isInvalidScope
-                                ? "border-rose-300/80 bg-rose-50/40 dark:border-rose-900/70 dark:bg-rose-950/20"
-                                : isWarn
-                                  ? "border-amber-300/80 bg-amber-50/30 dark:border-amber-900/60 dark:bg-amber-950/15"
-                                  : "border-zinc-200/80 bg-white dark:border-zinc-800/80 dark:bg-zinc-900/70"
+                            isCandidate
+                              ? "border-indigo-300/90 bg-indigo-50/40 dark:border-indigo-800/70 dark:bg-indigo-950/20"
+                              : !isActive
+                                ? "border-zinc-200/60 bg-zinc-100/50 opacity-75 dark:border-zinc-800/60 dark:bg-zinc-900/30"
+                                : isInvalidScope
+                                  ? "border-rose-300/80 bg-rose-50/40 dark:border-rose-900/70 dark:bg-rose-950/20"
+                                  : isWarn
+                                    ? "border-amber-300/80 bg-amber-50/30 dark:border-amber-900/60 dark:bg-amber-950/15"
+                                    : "border-zinc-200/80 bg-white dark:border-zinc-800/80 dark:bg-zinc-900/70"
                           )}
                         >
                           {/* Top Row: Category + Title + ID + AI Status + Actions */}
@@ -563,7 +690,12 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
                                 {p.id}
                               </span>
 
-                              {effective ? (
+                              {isCandidate ? (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-indigo-500/15 px-2 py-0.5 text-[10.5px] font-semibold text-indigo-700 dark:text-indigo-300">
+                                  <Sparkles className="h-3 w-3" />
+                                  记忆提炼草稿（采纳后生效）
+                                </span>
+                              ) : effective ? (
                                 <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10.5px] font-medium text-emerald-700 dark:text-emerald-300">
                                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
                                   向 AI 生效中
@@ -583,7 +715,20 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
 
                             {/* Action Buttons */}
                             <div className="flex items-center gap-1 shrink-0">
-                              {(isWarn || isInvalidScope) && (
+                              {isCandidate && (
+                                <Button
+                                  type="button"
+                                  variant="emerald"
+                                  size="sm"
+                                  disabled={busyKey === `approve:${r.repo_id}:${p.id}`}
+                                  onClick={() => handleApproveCandidate(r.repo_id, p)}
+                                  title="审核通过并正式加入仓库治理规则库"
+                                >
+                                  <CheckCircle2 className="h-3.5 w-3.5" />
+                                  采纳生效
+                                </Button>
+                              )}
+                              {!isCandidate && (isWarn || isInvalidScope) && (
                                 <Button
                                   type="button"
                                   variant="outline"
@@ -606,26 +751,28 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
                                 <Edit3 className="h-3.5 w-3.5" />
                                 编辑
                               </Button>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                disabled={busyKey === `toggle:${r.repo_id}:${p.id}`}
-                                onClick={() => handleTogglePolicy(r.repo_id, p)}
-                                title={isActive ? "暂时停用该规则" : "重新启用该规则"}
-                              >
-                                {isActive ? (
-                                  <>
-                                    <PauseCircle className="h-3.5 w-3.5 text-amber-500" />
-                                    停用
-                                  </>
-                                ) : (
-                                  <>
-                                    <PlayCircle className="h-3.5 w-3.5 text-emerald-500" />
-                                    启用
-                                  </>
-                                )}
-                              </Button>
+                              {!isCandidate && (
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  disabled={busyKey === `toggle:${r.repo_id}:${p.id}`}
+                                  onClick={() => handleTogglePolicy(r.repo_id, p)}
+                                  title={isActive ? "暂时停用该规则" : "重新启用该规则"}
+                                >
+                                  {isActive ? (
+                                    <>
+                                      <PauseCircle className="h-3.5 w-3.5 text-amber-500" />
+                                      停用
+                                    </>
+                                  ) : (
+                                    <>
+                                      <PlayCircle className="h-3.5 w-3.5 text-emerald-500" />
+                                      启用
+                                    </>
+                                  )}
+                                </Button>
+                              )}
                               <Button
                                 type="button"
                                 variant="ghost"
@@ -843,6 +990,125 @@ export function RepositoriesView({ repos, onRefresh }: Props) {
                 </div>
               </form>
             </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* `claude-mem` Repository Persistent Memory Browser Modal */}
+      <Dialog
+        open={memModalRepo !== null}
+        onOpenChange={(open) => {
+          if (!open) setMemModalRepo(null);
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          {memModalRepo && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="flex items-center gap-2 text-base font-semibold text-zinc-900 dark:text-zinc-100">
+                    <Brain className="h-4 w-4 text-indigo-500" />
+                    仓库经验记忆库 (`claude-mem`) · <span className="font-mono">{memModalRepo}</span>
+                  </h3>
+                  <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+                    底层 Coding Agent 按仓库沉淀的排障根因、测试踩坑与审查反馈（支持三阶段渐进式 MCP 检索，并可提炼为上层治理规则）
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={busyKey === `distill:${memModalRepo}`}
+                  onClick={() => handleDistillFromMemory(memModalRepo)}
+                >
+                  <Sparkles className="h-3.5 w-3.5 text-amber-500" />
+                  一键提炼候选规则
+                </Button>
+              </div>
+
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  loadRepoMemories(memModalRepo, memQuery);
+                }}
+                className="flex items-center gap-2"
+              >
+                <div className="relative flex-1">
+                  <Search className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-zinc-400" />
+                  <input
+                    type="text"
+                    value={memQuery}
+                    onChange={(e) => setMemQuery(e.target.value)}
+                    placeholder="搜索模块路径、错误关键字、根因或审查意见 (SQLite FTS5)..."
+                    className="h-8 w-full rounded-lg border border-zinc-200 bg-white pl-8 pr-3 text-xs dark:border-zinc-800 dark:bg-zinc-950"
+                  />
+                </div>
+                <Button type="submit" variant="primary" size="sm" disabled={memLoading}>
+                  {memLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "搜索"}
+                </Button>
+              </form>
+
+              <div className="max-h-[420px] space-y-2.5 overflow-y-auto pr-1">
+                {memLoading ? (
+                  <div className="py-10 text-center text-xs text-zinc-500">
+                    正在检索记忆库...
+                  </div>
+                ) : memItems.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-zinc-200 p-6 text-center text-xs text-zinc-500 dark:border-zinc-800">
+                    当前暂无匹配的经验记忆。随着沙箱排障、单测修复与 Code Review 的执行，底层会自动按仓库沉淀经验卡片。
+                  </div>
+                ) : (
+                  memItems.map((obs) => (
+                    <div
+                      key={obs.id}
+                      className="rounded-lg border border-zinc-200/80 bg-zinc-50/70 p-3 text-xs space-y-1.5 dark:border-zinc-800 dark:bg-zinc-900/60"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="font-mono text-[11px] font-semibold text-indigo-600 dark:text-indigo-400">
+                            #{obs.id}
+                          </span>
+                          <span className="rounded bg-zinc-200/70 px-1.5 py-0.5 font-mono text-[10.5px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                            {obs.obs_type}
+                          </span>
+                          {obs.verified && (
+                            <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10.5px] font-medium text-emerald-700 dark:text-emerald-300">
+                              ✓ 已验证
+                            </span>
+                          )}
+                          <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+                            {obs.title}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteMemory(memModalRepo, obs.id)}
+                          className="text-zinc-400 hover:text-rose-600 transition-colors"
+                          title="删除此条记忆"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                      <p className="whitespace-pre-line text-zinc-600 dark:text-zinc-300 leading-relaxed">
+                        {obs.narrative}
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] text-zinc-400">
+                        {obs.files_modified.length > 0 && (
+                          <span>
+                            关联文件:{" "}
+                            <code className="font-mono text-zinc-600 dark:text-zinc-300">
+                              {obs.files_modified.slice(0, 3).join(", ")}
+                            </code>
+                          </span>
+                        )}
+                        {obs.task_id && <span>任务: {obs.task_id}</span>}
+                        <span className="ml-auto">{obs.created_at.slice(0, 19).replace("T", " ")}</span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
           )}
         </DialogContent>
       </Dialog>

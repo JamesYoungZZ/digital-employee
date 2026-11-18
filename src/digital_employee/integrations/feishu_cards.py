@@ -336,7 +336,17 @@ def build_evidence_report_card(
                     "tag": "markdown",
                     "content": (
                         f"**改动**：{_clip(state.contract.objective, 75)}\n"
-                        f"**门禁**：✅ 单测 Fail→Pass · {'✅' if rev_verdict == 'APPROVE' else '🛑'} AI Review {rev_verdict}（花费 ${state.total_cost_usd:.3f}）\n"
+                        + (
+                            f"**📌 跨目录连带修改**：{'、'.join(f'`{p}`' for p in ev.out_of_scope_files[:3])}\n"
+                            if (ev and ev.out_of_scope_files)
+                            else ""
+                        )
+                        + (
+                            f"**💡 规则提炼**：已生成 `{len(state.distilled_policy_ids)}` 条候选治理规则草稿\n"
+                            if state.distilled_policy_ids
+                            else ""
+                        )
+                        + f"**门禁**：✅ 单测 Fail→Pass · {'✅' if rev_verdict == 'APPROVE' else '🛑'} AI Review {rev_verdict}（花费 ${state.total_cost_usd:.3f}）\n"
                         f"<font color='grey'>线上 GitHub Actions CI 全绿后将推送「批准合入」审批卡。</font>"
                     ),
                 },
@@ -423,6 +433,14 @@ def build_merge_approval_card(
         review_lines.append(f"**交付内容**：{_clip(state.contract.objective, 75)}")
 
     review_lines.append(f"**审查结论**：{rev_summary}")
+    if ev and ev.out_of_scope_files:
+        extra_paths = "、".join(f"`{p}`" for p in ev.out_of_scope_files[:3])
+        suffix = f" 等 {len(ev.out_of_scope_files)} 个文件" if len(ev.out_of_scope_files) > 3 else ""
+        review_lines.append(f"**📌 跨目录连带修改**：{extra_paths}{suffix}")
+    if state.distilled_policy_ids:
+        review_lines.append(
+            f"**💡 规则提炼**：已从本次踩坑提炼 `{len(state.distilled_policy_ids)}` 条候选治理规则草稿（可在控制台一键采纳）"
+        )
     if risk_note:
         review_lines.append(f"**⚠️ 边界留意**：{risk_note}")
 

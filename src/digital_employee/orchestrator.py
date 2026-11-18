@@ -47,6 +47,7 @@ from digital_employee.integrations.jira_client import (
     extract_jira_issue_key,
 )
 from digital_employee.llm.client import LLMClient, TransientLLMError
+from digital_employee.memory.claude_mem import ClaudeMemService, MemoryObservation
 from digital_employee.models.contract import JiraTicketDraft
 from digital_employee.models.state import (
     DurableTaskState,
@@ -81,7 +82,13 @@ class DelegationOrchestrator:
     ) -> None:
         self.settings = settings or load_settings()
         self.store = store or DurableStore(self.settings.db_path, self.settings.artifacts_dir)
+        self._has_injected_llm = llm is not None
         self.llm = llm or LLMClient(self.settings)
+        self.claude_mem = ClaudeMemService(
+            self.settings.claude_mem_db_path,
+            external_url=self.settings.claude_mem_url,
+            enabled=self.settings.enable_claude_mem,
+        )
         self.reviewer_llm = (
             llm
             if llm is not None
@@ -95,7 +102,10 @@ class DelegationOrchestrator:
         )
         self.drafter = ContractDrafter(self.llm, store=self.store)
         self.coder: CodingRuntime = create_coding_runtime(
-            self.settings, llm=llm, store=self.store
+            self.settings,
+            llm=llm,
+            store=self.store,
+            claude_mem=self.claude_mem,
         )
         self.reviewer = FocusedReviewer(
             self.reviewer_llm,
@@ -840,6 +850,23 @@ class DelegationOrchestrator:
         state.failure_class = "NONE"
         state.failure_reason = None
         state.lifecycle_status = "QUEUED"
+        if not use_defaults and state.contract.resolved_decisions:
+            try:
+                profile = self.settings.resolve_repository(state.contract.target_repo)
+                decisions_summary = "; ".join(
+                    f"{q} -> {a}" for q, a in state.contract.resolved_decisions.items()
+                )
+                self.claude_mem.record_pitfall_or_review_lesson(
+                    project=profile.repo_id,
+                    task_id=state.task_id,
+                    lesson_kind="human_feedback",
+                    title=f"业务/技术澄清决策：{state.contract.objective[:60]}",
+                    detail=f"人工拍板结论：{decisions_summary}",
+                    files_modified=state.contract.permitted_scopes,
+                    facts=[decisions_summary],
+                )
+            except Exception:
+                pass
         self.store.save_task(
             state,
             step_name="clarification_resolved",
@@ -1075,6 +1102,20 @@ class DelegationOrchestrator:
                 state.handoff_bundle = None
                 state.lifecycle_status = "ACCEPTED_AND_CLOSED"
 
+                try:
+                    self.claude_mem.record_coding_attempt_trace(
+                        project=profile.repo_id,
+                        task_id=state.task_id,
+                        objective=state.contract.objective,
+                        trace_log=all_traces,
+                        files_modified=[],
+                        summary=outcome.summary,
+                        is_noop=True,
+                        verified=True,
+                    )
+                except Exception:
+                    pass
+
                 noop_card = build_noop_verified_card(state, self.web_base_url)
                 self.store.write_artifact(task_id, "feishu_noop_card.json", noop_card)
                 try:
@@ -1214,6 +1255,22 @@ class DelegationOrchestrator:
 
                 # If BLOCKED on a PR workflow, still publish the branch/PR & post the BLOCK review comment
                 # onto GitHub so every real review finding is visibly documented on the PR timeline!
+                if reviewer_report.verdict == "BLOCK":
+                    try:
+                        for b in reviewer_report.blocking_issues[:3]:
+                            sug = f" 建议改法：{b.suggestion}" if b.suggestion else ""
+                            self.claude_mem.record_pitfall_or_review_lesson(
+                                project=profile.repo_id,
+                                task_id=state.task_id,
+                                lesson_kind="review_block",
+                                title=f"Code Review 拦截 [{b.category}]：{b.path or state.contract.objective[:45]}",
+                                detail=f"问题原因：{b.message}{sug}",
+                                files_modified=[b.path] if b.path else sandbox.modified_files(state.contract.base_commit_sha),
+                                facts=[f"{b.message}{sug}"],
+                            )
+                    except Exception:
+                        pass
+
                 if (
                     reviewer_report.verdict == "BLOCK"
                     and (publish_pr or state.auto_publish_pr)
@@ -1226,6 +1283,46 @@ class DelegationOrchestrator:
             if evidence.passed_all_hard_gates:
                 state.failure_class = "NONE"
                 state.failure_reason = None
+                try:
+                    changed_now = sandbox.modified_files(state.contract.base_commit_sha)
+                    self.claude_mem.record_coding_attempt_trace(
+                        project=profile.repo_id,
+                        task_id=state.task_id,
+                        objective=state.contract.objective,
+                        trace_log=all_traces,
+                        files_modified=changed_now,
+                        root_cause=outcome.root_cause,
+                        summary=outcome.summary,
+                        repro_test_target=outcome.repro_test_target,
+                        verified=True,
+                    )
+                    # Auto-distill candidate governance rules when this task overcame friction
+                    # (multi-attempt self-heal, human PR feedback, clarification, or recurring repo pitfalls)
+                    had_friction = (
+                        attempt > 1
+                        or bool(followup_comment.strip())
+                        or bool(state.contract.resolved_decisions)
+                    )
+                    distilled = self.distill_repository_policies_from_memory(
+                        profile.repo_id,
+                        focus_task_id=state.task_id if had_friction else "",
+                        max_candidates=2,
+                    )
+                    if distilled:
+                        state.distilled_policy_ids = list(
+                            dict.fromkeys([*state.distilled_policy_ids, *(d.id for d in distilled)])
+                        )
+                        self.append_live_event(
+                            state,
+                            attempt=attempt,
+                            kind="policy_distilled",
+                            icon="💡",
+                            title=f"已从记忆库自动提炼 {len(distilled)} 条候选仓库治理规则草稿（待人工确认生效）",
+                            detail="；".join(f"[{d.id}] {d.title}" for d in distilled),
+                        )
+                except Exception:
+                    pass
+
                 self.append_live_event(
                     state,
                     attempt=attempt,
@@ -1242,6 +1339,20 @@ class DelegationOrchestrator:
 
             # Prepare concise diagnostic feedback for the next self-heal iteration
             feedback = self._format_gate_failures(evidence, gate_res.diagnostic_log)
+            try:
+                changed_attempt = sandbox.modified_files(state.contract.base_commit_sha)
+                first_issue = feedback.splitlines()[0].lstrip("- ").strip() if feedback else "门禁校验未通过"
+                self.claude_mem.record_pitfall_or_review_lesson(
+                    project=profile.repo_id,
+                    task_id=state.task_id,
+                    lesson_kind="pitfall",
+                    title=f"门禁自愈踩坑 ({state.contract.objective[:48]})",
+                    detail=feedback[:800],
+                    files_modified=changed_attempt,
+                    facts=[first_issue[:240]],
+                )
+            except Exception:
+                pass
             self.append_live_event(
                 state,
                 attempt=attempt,
@@ -1278,6 +1389,19 @@ class DelegationOrchestrator:
                 state = self.sync_contract_from_jira(task_id)
             except Exception:
                 pass
+        try:
+            profile = self.settings.resolve_repository(state.contract.target_repo)
+            self.claude_mem.record_pitfall_or_review_lesson(
+                project=profile.repo_id,
+                task_id=state.task_id,
+                lesson_kind="human_feedback",
+                title=f"人工 PR Review 指导意见：{comment_body.strip()[:60]}",
+                detail=comment_body.strip(),
+                files_modified=state.contract.permitted_scopes,
+                facts=[comment_body.strip()[:260]],
+            )
+        except Exception:
+            pass
         state.contract.contract_version += 1
         self.store.save_task(
             state,
@@ -1521,6 +1645,104 @@ class DelegationOrchestrator:
         profile = self.settings.resolve_repository(repo_id)
         DecisionLedger.for_repository(self.store, profile)
         return DecisionLedger.sync_incremental_from_repo(self.store, profile)
+
+    # =========================================================================
+    # Repository Persistent Memory (`claude-mem`) & Governance Rule Distillation
+    # =========================================================================
+
+    def list_repository_memories(
+        self,
+        repo_id: str,
+        *,
+        query: str = "",
+        obs_type: str = "",
+        limit: int = 30,
+    ) -> list[MemoryObservation]:
+        profile = self.settings.resolve_repository(repo_id)
+        return self.claude_mem.search(
+            project=profile.repo_id,
+            query=query,
+            obs_type=obs_type,
+            limit=limit,
+        )
+
+    def get_repository_memory_stats(self, repo_id: str) -> dict[str, Any]:
+        profile = self.settings.resolve_repository(repo_id)
+        return self.claude_mem.stats(project=profile.repo_id)
+
+    def create_repository_memory(
+        self,
+        repo_id: str,
+        *,
+        title: str,
+        narrative: str,
+        obs_type: str = "discovery",
+        files_modified: list[str] | None = None,
+    ) -> MemoryObservation:
+        profile = self.settings.resolve_repository(repo_id)
+        obs = self.claude_mem.save_observation(
+            project=profile.repo_id,
+            obs_type=obs_type,
+            title=title,
+            narrative=narrative,
+            files_modified=files_modified or [],
+            concepts=["console-manual"],
+            verified=True,
+        )
+        if obs is None:
+            raise ValueError("记忆标题与正文不能为空")
+        return obs
+
+    def delete_repository_memory(self, repo_id: str, obs_id: int) -> bool:
+        profile = self.settings.resolve_repository(repo_id)
+        return self.claude_mem.delete_observation(obs_id, project=profile.repo_id)
+
+    def distill_repository_policies_from_memory(
+        self,
+        repo_id: str,
+        *,
+        focus_task_id: str = "",
+        max_candidates: int = 3,
+    ) -> list[DecisionEntry]:
+        """Distill high-signal `claude-mem` observations into `CANDIDATE_DRAFT` governance rules."""
+        profile = self.settings.resolve_repository(repo_id)
+        ledger = DecisionLedger.for_repository(self.store, profile)
+        distill_llm = None if self._has_injected_llm else self.llm
+        candidates = self.claude_mem.distill_candidate_policies(
+            project=profile.repo_id,
+            existing_policies=ledger.entries,
+            next_id_fn=lambda: self.store.next_policy_id(profile.repo_id),
+            owner=self.settings.default_owner_id,
+            llm=distill_llm,
+            focus_task_id=focus_task_id,
+            max_candidates=max_candidates,
+        )
+        saved: list[DecisionEntry] = []
+        for entry in candidates:
+            # Allocate fresh sequential policy ID right before insert so multiple drafts never collide
+            fresh = entry.model_copy(update={"id": self.store.next_policy_id(profile.repo_id)})
+            saved.append(self.store.upsert_repository_policy(profile.repo_id, fresh))
+        return saved
+
+    def approve_candidate_policy(
+        self, repo_id: str, policy_id: str, *, owner: str = ""
+    ) -> DecisionEntry:
+        """Promote a `CANDIDATE_DRAFT` rule distilled from `claude-mem` into an active `APPROVED_POLICY`."""
+        profile = self.settings.resolve_repository(repo_id)
+        DecisionLedger.for_repository(self.store, profile)
+        existing = self.store.get_repository_policy(profile.repo_id, policy_id)
+        if existing is None:
+            raise KeyError(f"Policy {policy_id} not found in repository {profile.repo_id}")
+        today = date.today().isoformat()
+        promoted = existing.model_copy(
+            update={
+                "status": "APPROVED_POLICY",
+                "verified_at": today,
+                "updated_at": today,
+                "owner": owner.strip() or existing.owner or self.settings.default_owner_id,
+            }
+        ).normalized()
+        return self.store.upsert_repository_policy(profile.repo_id, promoted)
 
     # =========================================================================
     # Internal Delivery & Handoff Helpers

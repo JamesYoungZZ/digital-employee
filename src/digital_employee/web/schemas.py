@@ -76,6 +76,13 @@ class VerifyPolicyPayload(BaseModel):
     owner: str = ""
 
 
+class CreateMemoryPayload(BaseModel):
+    title: str
+    narrative: str
+    obs_type: str = "discovery"
+    files_modified: list[str] = Field(default_factory=list)
+
+
 class OnboardRepoPayload(BaseModel):
     source: str
     repo_id: str | None = None

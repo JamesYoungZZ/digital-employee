@@ -189,6 +189,7 @@ class VerificationEvidence(BaseModel):
     noop_summary: str = ""
     anti_tampering_violations: list[str] = Field(default_factory=list)
     scope_violations: list[str] = Field(default_factory=list)
+    out_of_scope_files: list[str] = Field(default_factory=list)
     unverified_risks: list[str] = Field(default_factory=list)
     reviewer_report: ReviewerReport | None = None
     artifact_log_uri: str = ""
@@ -291,6 +292,7 @@ class DurableTaskState(BaseModel):
     deliverable_pr_number: int | None = None
     pr_review_comment_url: str | None = None
     merged_commit_sha: str | None = None
+    distilled_policy_ids: list[str] = Field(default_factory=list)
 
     # 5. Failure classification & economics/time accounting
     failure_class: FailureClass = "NONE"

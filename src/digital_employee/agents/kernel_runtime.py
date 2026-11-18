@@ -16,6 +16,7 @@ from digital_employee.agents.runtime import CodingLoopOutcome
 from digital_employee.context.decision_ledger import DecisionLedger
 
 if TYPE_CHECKING:
+    from digital_employee.memory.claude_mem import ClaudeMemService
     from digital_employee.storage.durable_store import DurableStore
 from digital_employee.kernel.agent import (
     Agent,
@@ -91,7 +92,7 @@ from digital_employee.settings import Settings
 
 
 class ContractPathSandbox(PathSandbox):
-    """Extends kernel `PathSandbox` so every write/edit is locked to `TaskContract` boundaries."""
+    """Extends kernel `PathSandbox` to enforce hard `forbidden_paths` while allowing cross-module fixes."""
 
     def __init__(
         self,
@@ -99,11 +100,17 @@ class ContractPathSandbox(PathSandbox):
         *,
         permitted_scopes: list[str],
         forbidden_paths: list[str],
+        extra_allow_dirs: list[str] | None = None,
     ) -> None:
-        super().__init__(str(worktree_root), deny_write=forbidden_paths)
+        super().__init__(
+            str(worktree_root),
+            extra_allowed=extra_allow_dirs or [],
+            deny_write=forbidden_paths,
+        )
         self._worktree_root = worktree_root.resolve()
         self._permitted_scopes = list(permitted_scopes)
         self._forbidden_paths = list(forbidden_paths)
+        self._extra_allow_dirs = [Path(p).resolve() for p in (extra_allow_dirs or []) if p]
 
     def check_deny_write(self, path: str) -> tuple[bool, str]:
         ok, err = super().check_deny_write(path)
@@ -113,6 +120,14 @@ class ContractPathSandbox(PathSandbox):
         real_path, resolve_err = self._resolve(path)
         if real_path is None:
             return False, resolve_err
+
+        # Allow persistent repository memory directories configured outside the ephemeral worktree
+        for allowed_dir in self._extra_allow_dirs:
+            try:
+                real_path.relative_to(allowed_dir)
+                return True, ""
+            except ValueError:
+                continue
 
         # Allow internal `.de/` session/spill/memory state inside the worktree
         try:
@@ -133,9 +148,10 @@ class ContractPathSandbox(PathSandbox):
             norm_rel,
             permitted_scopes=self._permitted_scopes,
             forbidden_paths=self._forbidden_paths,
+            enforce_scopes=False,
         )
         if not allowed:
-            return False, f"{reason} (permitted_scopes={self._permitted_scopes})"
+            return False, reason
         return True, ""
 
 
@@ -459,10 +475,12 @@ KERNEL_CONTRACT_DIRECTIVE = """
 ## Autonomous Digital Employee — Mandatory Execution Protocol (Dev + QA + Ops)
 You are running inside an isolated Git Worktree governed by an accountable `TaskContract`.
 
-1. **Probe & Diagnose First**: Use `Glob`, `Grep`, `ReadFile` (read-only calls batch concurrently!), or delegate broad repo exploration to the `Agent` (`explore`) subagent. Read files BEFORE calling `EditFile` or `WriteFile`.
+1. **Probe, Recall Memory & Diagnose First**:
+   - Check the `claude-mem` Historical Memory Index below or call `mem_search` / `mem_get_observations` (via `ToolSearch` / `mcp_call` or direct MCP tools) to recall past bugfixes, test gotchas, and Code Review lessons in this repository.
+   - Use `Glob`, `Grep`, `ReadFile` (read-only calls batch concurrently!), or delegate broad repo exploration to the `Agent` (`explore`) subagent. Read files BEFORE calling `EditFile` or `WriteFile`.
 2. **Ops / Incident Triage**: If investigating an alert or runtime failure, check available MCP diagnostics (`ToolSearch` / `mcp_call`) and skills (`LoadSkill`), correlate stack traces with source code, and determine whether a code fix or verified `finish_noop` diagnosis is warranted.
 3. **TDD & Surgical Modification**:
-   - Stay strictly within `permitted_scopes`; never touch `forbidden_paths`.
+   - Treat `permitted_scopes` as recommended starting directories; if root-cause analysis requires updating related business modules or shared helpers outside `permitted_scopes`, you MAY modify them cleanly, while NEVER touching `forbidden_paths`.
    - Write or run a focused reproduction test via `Bash` (using the repository's configured test runner) to observe the failure and verify your fix passes with zero regressions.
    - NEVER weaken tests: do NOT delete assertions, do NOT add `@skip` / `xfail` / `.skip`, and do NOT swallow exceptions.
 4. **Accountable Exit**:
@@ -482,12 +500,21 @@ class NativeKernelRuntime:
         injected_llm: HarnessLLMClient | None = None,
         mcp_servers: list[MCPServerConfig] | None = None,
         store: DurableStore | None = None,
+        claude_mem: ClaudeMemService | None = None,
     ) -> None:
         import sys
+
+        from digital_employee.memory.claude_mem import ClaudeMemService as _ClaudeMemService
 
         self.settings = settings
         self.injected_llm = injected_llm
         self.store = store
+        self.claude_mem = claude_mem or _ClaudeMemService(
+            settings.claude_mem_db_path,
+            external_url=settings.claude_mem_url,
+            enabled=settings.enable_claude_mem,
+        )
+        self._explicit_mcp_override = mcp_servers is not None
         if mcp_servers is not None:
             self.mcp_servers = list(mcp_servers)
         elif settings.enable_ops_mcp and injected_llm is None:
@@ -524,20 +551,15 @@ class NativeKernelRuntime:
     def _build_os_sandbox_config(
         self, sandbox: WorktreeSandbox, contract: TaskContract
     ) -> SandboxConfig:
+        del contract
         wt = sandbox.worktree_path.resolve()
-        allow_write: list[str] = [str(wt / ".de"), "/tmp", "/private/tmp"]
-        if contract.permitted_scopes:
-            for scope in contract.permitted_scopes:
-                s = scope.strip().rstrip("/")
-                if s in ("", "*", "**"):
-                    allow_write.append(str(wt))
-                else:
-                    # Strip glob wildcards to directory prefix for OS seatbelt/bwrap
-                    prefix = s.split("*")[0].rstrip("/")
-                    allow_write.append(str((wt / prefix).resolve()) if prefix else str(wt))
-        else:
-            allow_write.append(str(wt))
-
+        repo_mem = (self.settings.repo_memory_root / sandbox.profile.repo_id).resolve()
+        allow_write: list[str] = [
+            str(wt),
+            str(repo_mem),
+            "/tmp",
+            "/private/tmp",
+        ]
         deny_write = [
             str((wt / fp.rstrip("/")).resolve()) for fp in sandbox.profile.forbidden_paths
         ]
@@ -620,10 +642,13 @@ class NativeKernelRuntime:
             protocol = provider.protocol
 
         # 1. Defense-in-depth PermissionChecker + ContractPathSandbox + OS Sandbox
+        repo_mem_dir = self.settings.repo_memory_root / sandbox.profile.repo_id
+        repo_mem_dir.mkdir(parents=True, exist_ok=True)
         path_sandbox = ContractPathSandbox(
             sandbox.worktree_path,
             permitted_scopes=contract.permitted_scopes,
             forbidden_paths=sandbox.profile.forbidden_paths,
+            extra_allow_dirs=[str(repo_mem_dir)],
         )
         os_sandbox = create_sandbox() if self.settings.enable_os_sandbox else None
         os_sandbox_cfg = (
@@ -674,7 +699,10 @@ class NativeKernelRuntime:
         registry.register(McpCallTool(registry))
 
         instructions = load_instructions(work_dir)
-        memory_manager = MemoryManager(work_dir) if self.injected_llm is None else None
+        # Anchor MemoryManager to persistent repo-scoped root instead of ephemeral worktree
+        memory_manager = (
+            MemoryManager(str(repo_mem_dir)) if self.injected_llm is None else None
+        )
 
         agent = Agent(
             client=kernel_client,
@@ -716,10 +744,36 @@ class NativeKernelRuntime:
             )
 
         # Adaptive MCP Connection (`Eager` / `Native` / `Dispatch` preserving KV-cache prefix)
+        import sys
+
+        from digital_employee.settings import PROJECT_ROOT
+
+        effective_mcp = list(self.mcp_servers)
+        if (
+            not self._explicit_mcp_override
+            and self.injected_llm is None
+            and self.claude_mem.enabled
+            and not any(cfg.name == "claude-mem" for cfg in effective_mcp)
+        ):
+            effective_mcp.append(
+                MCPServerConfig(
+                    name="claude-mem",
+                    command=sys.executable,
+                    args=["-m", "digital_employee.mcp_servers.claude_mem_mcp"],
+                    env={
+                        "PYTHONPATH": str(PROJECT_ROOT / "src"),
+                        "DE_CLAUDE_MEM_DB_PATH": str(self.settings.claude_mem_db_path),
+                        "DE_CLAUDE_MEM_URL": self.settings.claude_mem_url,
+                        "DE_CLAUDE_MEM_DEFAULT_PROJECT": sandbox.profile.repo_id,
+                        "DE_CLAUDE_MEM_TASK_ID": sandbox.task_id,
+                    },
+                )
+            )
+
         mcp_manager: MCPManager | None = None
-        if self.mcp_servers:
+        if effective_mcp:
             mcp_manager = MCPManager()
-            mcp_manager.load_configs(self.mcp_servers)
+            mcp_manager.load_configs(effective_mcp)
             await mcp_manager.register_all_tools(registry)
             decide_and_apply(
                 registry,
@@ -761,6 +815,14 @@ class NativeKernelRuntime:
                 "## Accountable TaskContract\n" + contract.model_dump_json(indent=2),
                 ledger.render_truth_hierarchy_block(contract.permitted_scopes),
             ]
+            if self.claude_mem.enabled:
+                mem_ctx = self.claude_mem.render_session_start_context(
+                    project=sandbox.profile.repo_id,
+                    objective=contract.objective,
+                    suggested_scopes=contract.permitted_scopes,
+                )
+                if mem_ctx:
+                    prompt_parts.append(mem_ctx)
             if prior_feedback:
                 prompt_parts.append(
                     "## Previous Verification Gate Feedback (Must Resolve)\n"
@@ -813,6 +875,14 @@ class NativeKernelRuntime:
                 return "🤖", f"派发子智能体 (`{sub_type}`) · {str(args.get('description', ''))[:60]}"
             if tool_name == "LoadSkill":
                 return "📚", f"加载专业技能 `{args.get('skill_name', '')}`"
+            if tool_name.endswith("mem_search"):
+                return "🧠", f"检索仓库历史记忆 (`{args.get('query', '') or '最新索引'}`)"
+            if tool_name.endswith("mem_timeline"):
+                return "🕒", f"查看历史记忆时序上下文 (`#{args.get('anchor_id', '')}`)"
+            if tool_name.endswith("mem_get_observations"):
+                return "📖", f"读取历史记忆完整详情 (`{args.get('ids', [])}`)"
+            if tool_name.endswith("mem_save_observation"):
+                return "📌", f"写入仓库踩坑/发现记忆 (`{str(args.get('title', ''))[:50]}`)"
             if tool_name == "finish_task":
                 return "🏁", f"完成编码，提交门禁验证 (`{args.get('repro_test_target', '')}`)"
             if tool_name == "finish_noop":

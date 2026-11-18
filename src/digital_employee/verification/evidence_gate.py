@@ -10,7 +10,7 @@ from pathlib import Path
 from digital_employee.models.contract import TaskContract
 from digital_employee.models.state import VerificationEvidence
 from digital_employee.sandbox.worktree_runner import WorktreeSandbox
-from digital_employee.security.dlp import check_path_policy
+from digital_employee.security.dlp import check_path_policy, find_out_of_scope_files
 
 SKIP_OR_XFAIL_RE = re.compile(
     r"^\+.*(?:\bpytest\.skip\s*\(|\bpytest\.xfail\s*\(|@pytest\.mark\.skip\b|@pytest\.mark\.xfail\b|"
@@ -113,7 +113,7 @@ class EvidenceGate:
         mode_used = "regression_and_build" if use_regression_mode else "fail_to_pass"
         logs.append(f"Verification Mode: {mode_used}")
 
-        # 1. Scope Compliance Check
+        # 1. Hard Forbidden-Path Check + Soft Suggested-Scope Advisory
         scope_violations: list[str] = []
         if not changed_files:
             scope_violations.append("No files were modified compared to base_commit_sha.")
@@ -122,10 +122,19 @@ class EvidenceGate:
                 rel,
                 permitted_scopes=self.contract.permitted_scopes,
                 forbidden_paths=self.sandbox.profile.forbidden_paths,
+                enforce_scopes=False,
             )
             if not ok:
                 scope_violations.append(reason)
         scope_ok = len(scope_violations) == 0
+        out_of_scope_files = find_out_of_scope_files(
+            changed_files, self.contract.permitted_scopes
+        )
+        if out_of_scope_files:
+            logs.append(
+                f"[INFO] Cross-directory edits outside initial suggested scopes "
+                f"{self.contract.permitted_scopes}: {out_of_scope_files}"
+            )
 
         # 2. Anti-Tampering Check on Test Files
         test_files = [f for f in changed_files if is_test_path(f)]
@@ -263,5 +272,6 @@ class EvidenceGate:
             static_analysis_passed=static_passed,
             anti_tampering_violations=tampering_violations,
             scope_violations=scope_violations,
+            out_of_scope_files=out_of_scope_files,
         )
         return GateExecutionResult(evidence=evidence, diagnostic_log="\n".join(logs))

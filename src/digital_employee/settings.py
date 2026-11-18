@@ -64,6 +64,8 @@ class Settings(BaseModel):
     external_coding_cli: str = "claude"
     enable_os_sandbox: bool = False
     enable_ops_mcp: bool = True
+    enable_claude_mem: bool = True
+    claude_mem_url: str = ""
 
     github_token: str = Field(default="", repr=False)
     github_api_base: str = "https://api.github.com"
@@ -89,6 +91,14 @@ class Settings(BaseModel):
     @property
     def db_path(self) -> Path:
         return self.data_dir / "state.db"
+
+    @property
+    def claude_mem_db_path(self) -> Path:
+        return self.data_dir / "claude_mem.db"
+
+    @property
+    def repo_memory_root(self) -> Path:
+        return self.data_dir / "repo_memory"
 
     @property
     def artifacts_dir(self) -> Path:
@@ -272,6 +282,9 @@ def load_settings(env_file: Path | None = None) -> Settings:
         external_coding_cli=get_val("DE_EXTERNAL_CODING_CLI", "claude"),
         enable_os_sandbox=get_val("DE_ENABLE_OS_SANDBOX", "false").lower() in ("1", "true", "yes"),
         enable_ops_mcp=get_val("DE_ENABLE_OPS_MCP", "true").lower() not in ("0", "false", "no"),
+        enable_claude_mem=get_val("DE_ENABLE_CLAUDE_MEM", "true").lower()
+        not in ("0", "false", "no"),
+        claude_mem_url=get_val("DE_CLAUDE_MEM_URL", ""),
         github_token=get_val("DE_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", ""),
         github_api_base=get_val("DE_GITHUB_API_BASE", "https://api.github.com"),
         feishu_webhook_url=get_val("DE_FEISHU_WEBHOOK_URL", ""),

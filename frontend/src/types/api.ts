@@ -33,7 +33,11 @@ export interface MetricsInfo {
 }
 
 export type PolicyCategory = "ARCHITECTURE" | "SECURITY" | "TESTING" | "CODE_QUALITY";
-export type PolicySourceType = "CONSOLE_MANUAL" | "TASK_PROMOTED" | "REPO_SYNC";
+export type PolicySourceType =
+  | "CONSOLE_MANUAL"
+  | "TASK_PROMOTED"
+  | "REPO_SYNC"
+  | "MEM_DISTILLED";
 export type PolicyHealthStatus =
   | "HEALTHY"
   | "WARN_STALE_REF"
@@ -47,7 +51,13 @@ export interface DecisionPolicy {
   scope: string;
   rule: string;
   reason: string;
-  status: "APPROVED_POLICY" | "PAUSED" | "ONE_OFF_WORKAROUND" | "DEPRECATED" | string;
+  status:
+    | "APPROVED_POLICY"
+    | "CANDIDATE_DRAFT"
+    | "PAUSED"
+    | "ONE_OFF_WORKAROUND"
+    | "DEPRECATED"
+    | string;
   source_type: PolicySourceType | string;
   source_ref: string;
   owner: string;
@@ -63,8 +73,33 @@ export interface DecisionPolicy {
 export interface RepositoryPolicySummary {
   total: number;
   active_effective: number;
+  candidate_drafts?: number;
   paused: number;
   unhealthy: number;
+}
+
+export interface RepositoryMemorySummary {
+  mode: string;
+  total: number;
+  verified: number;
+  pitfalls_and_reviews: number;
+  external_url?: string;
+}
+
+export interface MemoryObservationItem {
+  id: number;
+  project: string;
+  task_id: string;
+  obs_type: string;
+  title: string;
+  subtitle: string;
+  narrative: string;
+  facts: string[];
+  files_read: string[];
+  files_modified: string[];
+  concepts: string[];
+  verified: boolean;
+  created_at: string;
 }
 
 export interface RepositoryItem {
@@ -77,6 +112,7 @@ export interface RepositoryItem {
   policies?: DecisionPolicy[];
   active_policies: DecisionPolicy[];
   policy_summary?: RepositoryPolicySummary;
+  memory_summary?: RepositoryMemorySummary;
 }
 
 export interface UnresolvedDecision {
@@ -175,6 +211,7 @@ export interface VerificationEvidence {
   noop_summary?: string;
   anti_tampering_violations: string[];
   scope_violations: string[];
+  out_of_scope_files?: string[];
   unverified_risks: string[];
   reviewer_report?: ReviewerReport | null;
 }
@@ -231,6 +268,7 @@ export interface TaskItem {
   deliverable_pr_number?: number | null;
   pr_review_comment_url?: string | null;
   merged_commit_sha?: string | null;
+  distilled_policy_ids?: string[];
   failure_class: string;
   failure_reason?: string | null;
   sandbox_attempt_count: number;

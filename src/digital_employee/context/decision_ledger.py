@@ -17,8 +17,19 @@ if TYPE_CHECKING:
     from digital_employee.storage.durable_store import DurableStore
 
 PolicyCategory = Literal["ARCHITECTURE", "SECURITY", "TESTING", "CODE_QUALITY"]
-PolicyStatus = Literal["APPROVED_POLICY", "PAUSED", "ONE_OFF_WORKAROUND", "DEPRECATED"]
-PolicySourceType = Literal["CONSOLE_MANUAL", "TASK_PROMOTED", "REPO_SYNC"]
+PolicyStatus = Literal[
+    "APPROVED_POLICY",
+    "CANDIDATE_DRAFT",
+    "PAUSED",
+    "ONE_OFF_WORKAROUND",
+    "DEPRECATED",
+]
+PolicySourceType = Literal[
+    "CONSOLE_MANUAL",
+    "TASK_PROMOTED",
+    "REPO_SYNC",
+    "MEM_DISTILLED",
+]
 PolicyHealthStatus = Literal[
     "HEALTHY",
     "WARN_STALE_REF",

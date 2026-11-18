@@ -305,11 +305,21 @@ class FocusedReviewer:
             )
         )
 
+        out_of_scope_note = ""
+        if evidence.out_of_scope_files:
+            out_of_scope_note = (
+                "\n## Cross-Directory Edits Beyond Initial Suggested Scopes (Audit Carefully)\n"
+                f"Initial suggested scopes were `{contract.permitted_scopes}`, and the agent also modified: "
+                f"`{evidence.out_of_scope_files}`. Verify these cross-module changes are cohesive and necessary "
+                "for the root cause rather than unintended sprawling edits.\n"
+            )
+
         prompt = "\n\n".join(
             [
                 "## Accountable TaskContract\n" + contract.model_dump_json(indent=2),
                 ledger.render_truth_hierarchy_block(changed),
                 "## Deterministic Sandbox Evidence Summary\n" + evidence.model_dump_json(indent=2),
+                out_of_scope_note.strip(),
                 f"## Unified Git Diff ({len(changed)} files)\n```diff\n{diff_text[:16000]}\n```",
             ]
         )

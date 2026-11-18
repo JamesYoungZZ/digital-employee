@@ -249,6 +249,7 @@ class WorktreeSandbox:
             norm,
             permitted_scopes=self.permitted_scopes,
             forbidden_paths=self.profile.forbidden_paths,
+            enforce_scopes=False,
         )
         if not allowed:
             raise PolicyViolationError(reason)
@@ -409,6 +410,7 @@ class WorktreeSandbox:
                 rel,
                 permitted_scopes=self.permitted_scopes,
                 forbidden_paths=self.profile.forbidden_paths,
+                enforce_scopes=False,
             )
             if not allowed:
                 raise PolicyViolationError(reason)
