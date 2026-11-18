@@ -31,6 +31,7 @@ from digital_employee.integrations.feishu_cards import (
     build_handoff_card,
     build_jira_approval_card,
     build_merge_approval_card,
+    build_merge_result_card,
     build_merged_closed_card,
     build_noop_verified_card,
     build_review_fix_card,
@@ -39,6 +40,7 @@ from digital_employee.integrations.feishu_cards import (
 )
 from digital_employee.integrations.github_client import (
     GitHubIntegration,
+    infer_conventional_commit_prefix,
     render_evidence_pr_body,
 )
 from digital_employee.integrations.jira_client import (
@@ -247,12 +249,15 @@ class DelegationOrchestrator:
 
     @property
     def web_base_url(self) -> str:
-        return self.settings.public_web_url or f"http://{self.settings.web_host}:{self.settings.web_port}"
+        pub = (self.settings.web_public_url or self.settings.public_web_url).rstrip("/")
+        if pub:
+            return pub
+        return f"http://{self.settings.web_host}:{self.settings.web_port}"
 
     @property
     def external_report_url_base(self) -> str:
         """Publicly reachable report base URL (empty when running on 127.0.0.1 without tunnel)."""
-        return self.settings.public_web_url
+        return (self.settings.web_public_url or self.settings.public_web_url).rstrip("/")
 
     def _seed_jira_sync_baseline(self, state: DurableTaskState, issue: JiraIssueData) -> None:
         state.recorded_operations["jira_spec_fingerprint"] = issue.spec_fingerprint
@@ -1467,6 +1472,14 @@ class DelegationOrchestrator:
             except Exception:
                 pass
             return self.store.save_task(state, step_name="abandoned_by_human", note=note)
+        if action == "hold_merge":
+            state.auto_merge = False
+            state.recorded_operations["merge_held_by_human"] = utc_now_iso()
+            return self.store.save_task(
+                state,
+                step_name="merge_held_by_human",
+                note=note or "Merge held by human; PR remains open for review/follow-up.",
+            )
         if action == "publish_pr":
             if not (state.verification_evidence and state.verification_evidence.passed_all_hard_gates):
                 raise ValueError("Cannot publish PR before passing all hard evidence gates.")
@@ -2062,9 +2075,10 @@ class DelegationOrchestrator:
         task_id: str,
         *,
         extra_comment: str = "",
+        include_cautions: bool = False,
         triggered_by: str = "feishu_card",
     ) -> DurableTaskState:
-        """1-Click Auto-Fix: wake up sandbox Coding Agent to resolve blocking AI/human Review comments."""
+        """1-Click Auto-Fix: wake up sandbox Coding Agent to resolve blocking or caution PR Review comments."""
         state = self._require_task(task_id)
         if state.jira_issue_key and self.jira.is_configured:
             try:
@@ -2073,12 +2087,29 @@ class DelegationOrchestrator:
                 pass
         parts: list[str] = []
         ev = state.verification_evidence
-        if ev and ev.reviewer_report and ev.reviewer_report.blocking_issues:
+        rep = ev.reviewer_report if ev else None
+        if rep and rep.blocking_issues:
             parts.append("Please resolve ALL of the following blocking PR Code Review issues:")
-            for idx, b in enumerate(ev.reviewer_report.blocking_issues, start=1):
+            for idx, b in enumerate(rep.blocking_issues, start=1):
                 loc = f"{b.path}:{b.line}" if (b.path and b.line) else (b.path or "diff")
                 sug = f" | Suggested fix: {b.suggestion}" if b.suggestion else ""
                 parts.append(f"{idx}. [{b.severity} · {b.category}] {loc} — {b.message}{sug}")
+
+        if rep and (include_cautions or not rep.blocking_issues):
+            caution_lines: list[str] = []
+            for item in rep.audit_checklist:
+                if item.status != "PASS" and item.detail:
+                    caution_lines.append(f"- [{item.dimension} · {item.status}] {item.detail}")
+            for obs in rep.notable_observations:
+                loc = f"{obs.path}:{obs.line} " if (obs.path and obs.line) else (f"{obs.path} " if obs.path else "")
+                caution_lines.append(f"- [Observation] {loc}{obs.note}")
+            for risk in rep.unverified_risks:
+                caution_lines.append(f"- [Edge-Case Risk] {risk}")
+            if caution_lines:
+                parts.append(
+                    "Please address the following PR Review caution / edge-case items and add corresponding unit tests:\n"
+                    + "\n".join(caution_lines)
+                )
 
         human_cmt = extra_comment.strip() or state.recorded_operations.get("latest_human_pr_comment", "")
         if human_cmt:
@@ -2197,6 +2228,38 @@ class DelegationOrchestrator:
             if target_fix is None:
                 return None
             return self.autofix_review_issues(target_fix.task_id, triggered_by="feishu_reply")
+
+        if intent == "quick_autofix_caution":
+            waiting_pr = [
+                *self.store.list_tasks(status="WAITING_MERGE_APPROVAL", limit=10),
+                *self.store.list_tasks(status="PR_OPEN_FOLLOWING_UP", limit=10),
+            ]
+            target_c = next(
+                (t for t in waiting_pr if not chat_id or t.feishu_chat_id == chat_id),
+                waiting_pr[0] if waiting_pr else None,
+            )
+            if target_c is None:
+                return None
+            return self.autofix_review_issues(
+                target_c.task_id, include_cautions=True, triggered_by="feishu_reply"
+            )
+
+        if intent == "quick_followup_pr":
+            waiting_pr = [
+                *self.store.list_tasks(status="WAITING_MERGE_APPROVAL", limit=10),
+                *self.store.list_tasks(status="PR_OPEN_FOLLOWING_UP", limit=10),
+            ]
+            target_f = next(
+                (t for t in waiting_pr if not chat_id or t.feishu_chat_id == chat_id),
+                waiting_pr[0] if waiting_pr else None,
+            )
+            if target_f is None:
+                return None
+            return self.handle_pr_review_comment(
+                target_f.task_id,
+                comment_body=parsed["comment"],
+                publish_pr=self.github.is_configured,
+            )
 
         if intent == "task_approve_merge":
             self.approve_and_merge(parsed["task_id"], approved_by="feishu_reply")
@@ -2383,6 +2446,29 @@ class DelegationOrchestrator:
             )
         return {"ready": True, "merged": False, "reason": "waiting_human_approval"}
 
+    def _notify_feishu_merge_result(
+        self,
+        state: DurableTaskState,
+        *,
+        approved_by: str,
+        merged: bool,
+        merge_sha: str = "",
+        reason: str = "",
+    ) -> None:
+        if not (approved_by.startswith("feishu") and self.feishu.is_configured):
+            return
+        try:
+            receipt = build_merge_result_card(
+                state,
+                merged=merged,
+                merge_sha=merge_sha,
+                reason=reason,
+                approved_by=approved_by,
+            )
+            self.feishu.send_card(receipt, chat_id=state.feishu_chat_id)
+        except Exception:
+            pass
+
     def approve_and_merge(
         self,
         task_id: str,
@@ -2393,12 +2479,17 @@ class DelegationOrchestrator:
         """Execute atomic SHA-locked Squash Merge after human approval on Console or Feishu Card."""
         state = self._require_task(task_id)
         if not (self.github.is_configured and state.deliverable_pr_number):
+            self._notify_feishu_merge_result(state, approved_by=approved_by, merged=False, reason="no_remote_pr")
             return {"merged": False, "reason": "no_remote_pr"}
 
         ev = state.verification_evidence
         if not (ev and ev.passed_all_hard_gates and ev.reviewer_report):
+            self._notify_feishu_merge_result(
+                state, approved_by=approved_by, merged=False, reason="local_or_review_gate_not_passed"
+            )
             return {"merged": False, "reason": "local_or_review_gate_not_passed"}
         if ev.reviewer_report.verdict != "APPROVE" or len(ev.reviewer_report.blocking_issues) > 0:
+            self._notify_feishu_merge_result(state, approved_by=approved_by, merged=False, reason="pr_review_blocked")
             return {"merged": False, "reason": "pr_review_blocked"}
 
         profile = self.settings.resolve_repository(state.contract.target_repo)
@@ -2409,8 +2500,10 @@ class DelegationOrchestrator:
         if pr_data.get("merged"):
             state.lifecycle_status = "ACCEPTED_AND_CLOSED"
             self.store.save_task(state, step_name="pr_already_merged", note=f"PR #{pr_num} merged.")
+            self._notify_feishu_merge_result(state, approved_by=approved_by, merged=True, merge_sha="already_merged")
             return {"merged": True, "reason": "already_merged"}
         if pr_data.get("state") != "open":
+            self._notify_feishu_merge_result(state, approved_by=approved_by, merged=False, reason="pr_not_open")
             return {"merged": False, "reason": "pr_not_open"}
 
         if pr_data.get("draft") and pr_data.get("node_id"):
@@ -2418,8 +2511,10 @@ class DelegationOrchestrator:
 
         remote_head_sha = str((pr_data.get("head") or {}).get("sha") or "")
         if remote_head_sha != ev.verified_commit_sha:
+            self._notify_feishu_merge_result(state, approved_by=approved_by, merged=False, reason="head_sha_mismatch")
             return {"merged": False, "reason": "head_sha_mismatch"}
         if pr_data.get("mergeable") is False:
+            self._notify_feishu_merge_result(state, approved_by=approved_by, merged=False, reason="merge_conflict")
             return {"merged": False, "reason": "merge_conflict"}
 
         expect_wf = (Path(profile.local_path) / ".github" / "workflows").is_dir()
@@ -2429,14 +2524,28 @@ class DelegationOrchestrator:
             expect_workflows=expect_wf,
         )
         if ci_info["state"] != "passed":
-            return {"merged": False, "reason": f"ci_{ci_info['state']}"}
+            reason = f"ci_{ci_info['state']}"
+            self._notify_feishu_merge_result(state, approved_by=approved_by, merged=False, reason=reason)
+            return {"merged": False, "reason": reason}
 
-        merge_res = self.github.merge_pull_request(
-            github_repo=gh_repo,
-            pr_number=pr_num,
-            expected_head_sha=ev.verified_commit_sha,
-            commit_title=f"fix: {state.contract.objective[:72]} (#{pr_num})",
-        )
+        cc_prefix = infer_conventional_commit_prefix(state.contract.objective)
+        clean_obj = state.contract.objective.strip()
+        if clean_obj.lower().startswith(f"{cc_prefix}:"):
+            clean_obj = clean_obj[len(cc_prefix) + 1 :].strip()
+        commit_title = f"{cc_prefix}: {clean_obj[:72]} (#{pr_num})"
+
+        try:
+            merge_res = self.github.merge_pull_request(
+                github_repo=gh_repo,
+                pr_number=pr_num,
+                expected_head_sha=ev.verified_commit_sha,
+                commit_title=commit_title,
+            )
+        except Exception as merge_exc:
+            err_msg = f"merge_api_error: {str(merge_exc)[:160]}"
+            self._notify_feishu_merge_result(state, approved_by=approved_by, merged=False, reason=err_msg)
+            return {"merged": False, "reason": err_msg}
+
         merge_sha = str(merge_res.get("sha") or "")
         state.merged_commit_sha = merge_sha
         state.lifecycle_status = "ACCEPTED_AND_CLOSED"
@@ -2471,17 +2580,22 @@ class DelegationOrchestrator:
                     state.jira_status = done_st
             except Exception:
                 pass
-        # Patch Merge Approval Card in-place on Feishu so old buttons vanish cleanly!
+        # Patch Merge Approval Card in-place on Feishu so old buttons vanish cleanly; fall back to receipt card!
+        patched_in_place = False
         try:
             closed_card = build_merged_closed_card(state, self.web_base_url)
             self.store.write_artifact(task_id, "feishu_merged_closed_card.json", closed_card)
             mid = trigger_message_id or extract_feishu_message_id(
                 state.recorded_operations.get(f"notify_merge_approval_{ev.verified_commit_sha[:8]}", "")
             )
-            if mid:
-                self.feishu.update_card(mid, closed_card)
+            if mid and self.feishu.update_card(mid, closed_card):
+                patched_in_place = True
         except Exception:
             pass
+        if not patched_in_place:
+            self._notify_feishu_merge_result(
+                state, approved_by=approved_by, merged=True, merge_sha=merge_sha
+            )
 
         self.store.save_task(
             state,

@@ -54,6 +54,12 @@ def render_evidence_pr_body(state: DurableTaskState) -> str:
                 f"| **Anti-Tampering & Scope** | {'✅ PASS' if (ev.tests_weakened_check and ev.scope_compliance_check) else '❌ FAIL'} | Zero deleted asserts, zero `@skip`/`xfail` |",
             ]
         )
+        if ev.reviewer_report:
+            rep = ev.reviewer_report
+            sc = rep.quality_score if rep.quality_score is not None else 95
+            lines.append(
+                f"| **Independent AI Review** | {'✅ APPROVE' if rep.verdict == 'APPROVE' else '🛑 BLOCK'} | `{sc}/100` · {rep.merge_recommendation_label or rep.verdict} (`{rep.reviewer_model}`) |"
+            )
     lines.extend(
         [
             "",
@@ -62,6 +68,31 @@ def render_evidence_pr_body(state: DurableTaskState) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def infer_conventional_commit_prefix(objective: str) -> str:
+    """Infer Conventional Commit prefix (`feat`/`refactor`/`docs`/`test`/`perf`/`fix`) from objective."""
+    raw = (objective or "").strip()
+    low = raw.lower()
+    for explicit in ("feat:", "fix:", "refactor:", "docs:", "test:", "perf:", "chore:"):
+        if low.startswith(explicit):
+            return explicit[:-1]
+    if any(k in low for k in ("重构", "refactor", "cleanup", "提取", "解耦")):
+        return "refactor"
+    if any(k in low for k in ("文档", "readme", "注释", "docs")):
+        return "docs"
+    if any(k in low for k in ("性能优化", "提速", "perf", "latency", "缓存优化")):
+        return "perf"
+    if any(
+        k in low
+        for k in ("修复", "报错", "异常", "崩溃", "失败", "bug", "fix", "crash", "error", "回归")
+    ):
+        return "fix"
+    if any(k in low for k in ("新增", "增加", "支持", "添加", "实现", "接入", "add", "support", "implement", "feat")):
+        return "feat"
+    if any(k in low for k in ("单测", "测试", "test")):
+        return "test"
+    return "fix"
 
 
 class GitHubIntegration:
@@ -140,6 +171,9 @@ class GitHubIntegration:
             raise PolicyViolationError("DE_GITHUB_TOKEN is not configured.")
 
         owner, repo = github_repo.split("/", 1)
+        jira_prefix = f"[{state.jira_issue_key}] " if state.jira_issue_key else "[AI-Agent] "
+        pr_title = f"{jira_prefix}{state.contract.objective[:100]}"
+        pr_body = render_evidence_pr_body(state)
         with httpx.Client(timeout=30.0, headers=self._headers()) as client:
             list_resp = client.get(
                 f"{self.api_base}/repos/{owner}/{repo}/pulls",
@@ -151,18 +185,22 @@ class GitHubIntegration:
                 pr = existing[0]
                 if pr.get("draft") and not draft and pr.get("node_id"):
                     self.mark_pr_ready_for_review(str(pr["node_id"]))
+                # Sync latest commit SHA, verification gate table & review score onto existing PR description
+                client.patch(
+                    f"{self.api_base}/repos/{owner}/{repo}/pulls/{pr['number']}",
+                    json={"title": pr_title, "body": pr_body},
+                )
                 return {
                     "html_url": pr["html_url"],
                     "number": pr["number"],
                     "reconciled": True,
                 }
 
-            jira_prefix = f"[{state.jira_issue_key}] " if state.jira_issue_key else "[AI-Agent] "
             payload = {
-                "title": f"{jira_prefix}{state.contract.objective[:100]}",
+                "title": pr_title,
                 "head": state.branch_name,
                 "base": state.contract.base_branch,
-                "body": render_evidence_pr_body(state),
+                "body": pr_body,
                 "draft": draft,
             }
             create_resp = client.post(

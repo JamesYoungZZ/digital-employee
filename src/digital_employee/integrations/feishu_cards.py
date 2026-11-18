@@ -8,12 +8,24 @@ from typing import Any
 
 import httpx
 
+from digital_employee.agents.reviewer import is_loopback_url
 from digital_employee.integrations.jira_client import extract_jira_issue_key
 from digital_employee.models.state import DurableTaskState
 
 MENTION_TAG_RE = re.compile(r"@_user_\d+\s*")
 TASK_TAG_RE = re.compile(r"#?(t-\d{8}-[a-f0-9]{6})\b", re.IGNORECASE)
 REPO_BRACKET_RE = re.compile(r"^\[([A-Za-z0-9_.\-]+)\]\s*(.+)$", re.DOTALL)
+QUICK_FOLLOWUP_RE = re.compile(
+    r"^(?:追改|修改意见|再改下|改一下|修一下)\s*[:：,\s]\s*(.+)$", re.DOTALL
+)
+
+
+def _resolve_review_report_url(state: DurableTaskState, web_base_url: str) -> str:
+    """Prefer GitHub PR Review permalink when `web_base_url` is localhost (`127.0.0.1`)."""
+    local_report = f"{web_base_url}/reports/{state.task_id}/review"
+    if not is_loopback_url(web_base_url):
+        return local_report
+    return state.pr_review_comment_url or state.deliverable_pr_url or local_report
 
 
 def _clean_feishu_text(text: str) -> str:
@@ -365,12 +377,15 @@ def build_merge_approval_card(
     rep = ev.reviewer_report if ev else None
 
     pr_num = mc.pr_number if mc else (state.deliverable_pr_number or 0)
-    pr_url = state.pr_review_comment_url or (mc.pr_url if mc else state.deliverable_pr_url) or web_base_url
+    pr_url = (mc.pr_url if mc else state.deliverable_pr_url) or state.pr_review_comment_url or web_base_url
+    report_url = _resolve_review_report_url(state, web_base_url)
     rev_model = (
         (mc.reviewer_model if mc else "")
         or (rep.reviewer_model if rep else "")
         or "AI Reviewer"
     )
+    if rep and rep.degraded_from_model:
+        rev_model = f"{rev_model}·兜底"
     rev_verdict = (
         (mc.reviewer_verdict if mc else "")
         or (rep.verdict if rep else "APPROVE")
@@ -443,6 +458,52 @@ def build_merge_approval_card(
         )
     if risk_note:
         review_lines.append(f"**⚠️ 边界留意**：{risk_note}")
+    review_lines.append("<font color='grey'>可直接点按钮，或回复『批准』合入 / 回复『追改：你的意见』微调本 PR。</font>")
+
+    has_cautions = bool(
+        rec_code == "MERGE_WITH_CAUTION"
+        or risk_note
+        or (rep and (rep.notable_observations or any(i.status != "PASS" for i in rep.audit_checklist)))
+    )
+    action_buttons: list[dict[str, Any]] = [
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "✅ 批准合入"},
+            "type": "primary",
+            "value": {"action": "approve_merge", "task_id": state.task_id},
+        }
+    ]
+    if has_cautions:
+        action_buttons.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "🔧 修掉边界项"},
+                "type": "default",
+                "value": {"action": "autofix_caution", "task_id": state.task_id},
+            }
+        )
+    action_buttons.extend(
+        [
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "📄 全量Review报告"},
+                "type": "default",
+                "url": report_url,
+            },
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"PR #{pr_num}"},
+                "type": "default",
+                "url": pr_url,
+            },
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "暂缓"},
+                "type": "default",
+                "value": {"action": "hold_merge", "task_id": state.task_id},
+            },
+        ]
+    )
 
     return {
         "msg_type": "interactive",
@@ -471,32 +532,7 @@ def build_merge_approval_card(
                 {"tag": "markdown", "content": "\n".join(review_lines)},
                 {
                     "tag": "action",
-                    "actions": [
-                        {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": "✅ 批准合入"},
-                            "type": "primary",
-                            "value": {"action": "approve_merge", "task_id": state.task_id},
-                        },
-                        {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": "📄 全量Review报告"},
-                            "type": "default",
-                            "url": f"{web_base_url}/reports/{state.task_id}/review",
-                        },
-                        {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": f"PR #{pr_num}"},
-                            "type": "default",
-                            "url": pr_url,
-                        },
-                        {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": "暂缓"},
-                            "type": "default",
-                            "value": {"action": "reject_merge", "task_id": state.task_id},
-                        },
-                    ],
+                    "actions": action_buttons,
                 },
             ],
         },
@@ -576,7 +612,7 @@ def build_review_fix_card(
             "tag": "button",
             "text": {"tag": "plain_text", "content": "📄 全量报告"},
             "type": "default",
-            "url": f"{web_base_url}/reports/{state.task_id}/review",
+            "url": _resolve_review_report_url(state, web_base_url),
         },
     ]
     if state.deliverable_pr_url:
@@ -771,6 +807,84 @@ def build_abandoned_card(state: DurableTaskState, reason: str = "已由人工放
     }
 
 
+def build_merge_result_card(
+    state: DurableTaskState,
+    *,
+    merged: bool,
+    merge_sha: str = "",
+    reason: str = "",
+    approved_by: str = "",
+) -> dict[str, Any]:
+    """Build crisp Feishu confirmation/error receipt card after clicking Approve Merge."""
+    pr_num = state.deliverable_pr_number or 0
+    pr_url = state.deliverable_pr_url or ""
+    actions: list[dict[str, Any]] = []
+    if pr_url:
+        actions.append(
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"查看 PR #{pr_num}"},
+                "type": "primary" if not merged else "default",
+                "url": pr_url,
+            }
+        )
+    if merged:
+        elements: list[dict[str, Any]] = [
+            _meta_fields(
+                "合入分支",
+                f"**{state.contract.target_repo}** → **{state.contract.base_branch}**",
+                "合入提交",
+                f"**{merge_sha[:8] or 'merged'}**（{approved_by or 'human'}）",
+            ),
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": f"**已交付**：{_clip(state.contract.objective, 75)}",
+            },
+        ]
+        if actions:
+            elements.append({"tag": "action", "actions": actions})
+        return {
+            "msg_type": "interactive",
+            "card": {
+                "header": {
+                    "title": {"tag": "plain_text", "content": f"✅ PR #{pr_num} 已成功 Squash 合入"},
+                    "template": "green",
+                },
+                "elements": elements,
+            },
+        }
+
+    elements = [
+        _meta_fields(
+            "目标仓库",
+            f"**{state.contract.target_repo}** → **{state.contract.base_branch}**",
+            "状态",
+            "合入未完成（PR 仍保持开启）",
+        ),
+        {"tag": "hr"},
+        {
+            "tag": "markdown",
+            "content": (
+                f"**失败原因**：{_clip(reason or 'GitHub Merge API 未通过', 110)}\n"
+                f"<font color='grey'>请检查 GitHub 分支保护规则或合并冲突，处理后可再次回复『批准』重试。</font>"
+            ),
+        },
+    ]
+    if actions:
+        elements.append({"tag": "action", "actions": actions})
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "header": {
+                "title": {"tag": "plain_text", "content": f"⚠️ PR #{pr_num} 自动合入未成功"},
+                "template": "orange",
+            },
+            "elements": elements,
+        },
+    }
+
+
 def build_test_connection_card(web_base_url: str = "http://127.0.0.1:8020") -> dict[str, Any]:
     """Crisp welcome & quick-command card sent on `连接` / `链接` / `帮助`."""
     return {
@@ -836,6 +950,15 @@ def parse_feishu_command(
     # 0c. Quick review auto-fix reply ("修复", "一键修复", "自动修复", "autofix", "fix")
     if lowered in {"修复", "一键修复", "自动修复", "按意见修复", "autofix", "fix"}:
         return {"intent": "quick_autofix_review"}
+
+    # 0d. Quick caution/edge-case polish reply ("修边界", "修掉边界项", "优化边界")
+    if lowered in {"修边界", "修边界项", "修掉边界项", "修掉边界", "优化边界"}:
+        return {"intent": "quick_autofix_caution"}
+
+    # 0e. Natural follow-up comment onto active waiting PR ("追改：把无法根治排除掉")
+    qf_match = QUICK_FOLLOWUP_RE.match(cleaned)
+    if qf_match and qf_match.group(1).strip():
+        return {"intent": "quick_followup_pr", "comment": qf_match.group(1).strip()}
 
     # 1. Quick clarification reply ("默认", "继续", "1", "2")
     if lowered in {"默认", "继续", "确认", "default", "ok", "yes", "1", "2"}:

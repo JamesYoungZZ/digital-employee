@@ -77,6 +77,8 @@ class ReviewerReport(BaseModel):
     merge_recommendation: MergeRecommendation | None = None
     merge_recommendation_label: str = ""
     reviewer_model: str = ""
+    degraded_from_model: str = ""
+    fallback_reason: str = ""
     reviewer_fallback_note: str = ""
     skill_used: str = "pr-code-review"
     ac_covered: bool = True
@@ -94,6 +96,11 @@ class ReviewerReport(BaseModel):
 
     @model_validator(mode="after")
     def _calibrate_score_and_recommendation(self) -> ReviewerReport:
+        if self.degraded_from_model and not self.reviewer_fallback_note:
+            self.reviewer_fallback_note = (
+                f"原配置独立审查模型 `{self.degraded_from_model}` 当前未生效，"
+                f"已自动降级为 `{self.reviewer_model}` 完成审查。"
+            )
         warn_dims = [item for item in self.audit_checklist if item.status == "WARN"]
         fail_dims = [item for item in self.audit_checklist if item.status == "FAIL"]
         obs_cnt = len(self.notable_observations)

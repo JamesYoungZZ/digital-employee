@@ -44,7 +44,7 @@ class Settings(BaseModel):
     )
     reviewer_base_url: str = "https://api.deepseek.com"
     reviewer_api_key: str = Field(default="", repr=False)
-    reviewer_model: str = "deepseek-flash"
+    reviewer_model: str = "deepseek-v4-pro"
     pr_review_skill_path: Path = Field(
         default_factory=lambda: PROJECT_ROOT / "skills" / "pr-code-review" / "SKILL.md"
     )
@@ -86,6 +86,7 @@ class Settings(BaseModel):
 
     web_host: str = "127.0.0.1"
     web_port: int = 8020
+    web_public_url: str = ""
     public_web_url: str = ""
 
     @property
@@ -321,9 +322,8 @@ def load_settings(env_file: Path | None = None) -> Settings:
     else:
         reviewer_api_key = get_val("DE_REVIEWER_API_KEY") or api_key
         reviewer_base_url = get_val("DE_REVIEWER_BASE_URL") or base_url
-        # Default to distinct model (`fast_model` vs `reasoning_model`) when sharing provider
-        default_cross = fast_model if fast_model != reasoning_model else reasoning_model
-        reviewer_model = get_val("DE_REVIEWER_MODEL") or default_cross
+        # Never default Reviewer to weak fast_model; use strong reasoning_model when sharing provider
+        reviewer_model = get_val("DE_REVIEWER_MODEL") or reasoning_model
 
     settings = Settings(
         inference_mode=inference_mode,
@@ -376,7 +376,12 @@ def load_settings(env_file: Path | None = None) -> Settings:
         not in ("0", "false", "no"),
         web_host=get_val("DE_WEB_HOST", "127.0.0.1"),
         web_port=int(get_val("DE_WEB_PORT", "8020")),
-        public_web_url=get_val("DE_PUBLIC_WEB_URL", "").rstrip("/"),
+        web_public_url=(
+            get_val("DE_WEB_PUBLIC_URL", "") or get_val("DE_PUBLIC_WEB_URL", "")
+        ).rstrip("/"),
+        public_web_url=(
+            get_val("DE_PUBLIC_WEB_URL", "") or get_val("DE_WEB_PUBLIC_URL", "")
+        ).rstrip("/"),
     )
     settings.ensure_dirs()
     return settings
